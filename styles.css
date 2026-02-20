@@ -1,0 +1,2 @@
+.atpath-link { color: var(--text-accent); cursor: pointer; text-decoration: underline dotted; }
+.atpath-link:hover { text-decoration: underline solid; }

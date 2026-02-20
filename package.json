@@ -1,0 +1,8 @@
+{
+  "name": "obsidian-atpath",
+  "version": "1.0.0",
+  "description": "Autocomplete and navigate @path/to/file references in Obsidian",
+  "author": "sergio",
+  "license": "MIT",
+  "keywords": ["obsidian", "plugin", "autocomplete", "path", "claude"]
+}
