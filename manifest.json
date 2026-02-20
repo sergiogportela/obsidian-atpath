@@ -1,9 +1,10 @@
 {
-  "id": "obsidian-atpath",
+  "id": "atpath",
   "name": "AtPath",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "Autocomplete and navigate @path/to/file references in Obsidian",
+  "description": "Autocomplete and navigate @path/to/file references.",
   "author": "sergio",
+  "authorUrl": "https://github.com/sergiogportela",
   "isDesktopOnly": false
 }
