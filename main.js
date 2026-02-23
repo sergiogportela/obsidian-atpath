@@ -174,6 +174,68 @@ class AtPathPlugin extends Plugin {
     this.registerEditorSuggest(new AtPathSuggest(this));
     this.registerEditorExtension(buildAtPathViewPlugin(this));
     registerPostProcessor(this);
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) => {
+        this.updateAtPathReferences(file, oldPath);
+      })
+    );
+  }
+
+  async updateAtPathReferences(file, oldPath) {
+    const oldRepoRoot = getRepoRoot(oldPath);
+    const newRepoRoot = getRepoRoot(file.path);
+
+    const oldRel = oldRepoRoot ? toRepoRelative(oldPath, oldRepoRoot) : oldPath;
+    const newRel = newRepoRoot ? toRepoRelative(file.path, newRepoRoot) : file.path;
+
+    const isFolder = !file.path.includes('.') || file.children !== undefined;
+    const mdFiles = this.app.vault.getMarkdownFiles();
+
+    // Pass 1: repo-relative references (files inside the same repo)
+    if (oldRel !== newRel) {
+      const escaped = oldRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = isFolder
+        ? `(?<=(?:^|[\\s(]))@${escaped}/`
+        : `(?<=(?:^|[\\s(]))@${escaped}(?=$|[\\s)\\]},;:!?])`;
+      const re = new RegExp(pattern, 'gm');
+      const replacement = isFolder ? '@' + newRel + '/' : '@' + newRel;
+      const scope = oldRepoRoot || "";
+
+      for (const mdFile of mdFiles) {
+        if (scope && !mdFile.path.startsWith(scope + "/")) continue;
+        if (!scope && getRepoRoot(mdFile.path)) continue;
+
+        const content = await this.app.vault.read(mdFile);
+        if (!re.test(content)) continue;
+        re.lastIndex = 0;
+        const updated = content.replace(re, replacement);
+        if (updated !== content) {
+          await this.app.vault.modify(mdFile, updated);
+        }
+      }
+    }
+
+    // Pass 2: full-vault-path references (files outside the repo use @full/vault/path)
+    if (oldRepoRoot && oldPath !== file.path) {
+      const escaped = oldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = isFolder
+        ? `(?<=(?:^|[\\s(]))@${escaped}/`
+        : `(?<=(?:^|[\\s(]))@${escaped}(?=$|[\\s)\\]},;:!?])`;
+      const re = new RegExp(pattern, 'gm');
+      const replacement = isFolder ? '@' + file.path + '/' : '@' + file.path;
+
+      for (const mdFile of mdFiles) {
+        if (getRepoRoot(mdFile.path) === oldRepoRoot) continue;
+
+        const content = await this.app.vault.read(mdFile);
+        if (!re.test(content)) continue;
+        re.lastIndex = 0;
+        const updated = content.replace(re, replacement);
+        if (updated !== content) {
+          await this.app.vault.modify(mdFile, updated);
+        }
+      }
+    }
   }
 }
 
