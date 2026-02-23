@@ -82,7 +82,7 @@ class AtPathSuggest extends EditorSuggest {
 
 // ─── C) CM6 ViewPlugin — Clickable links in Live Preview ─────────────
 
-const AT_PATH_RE = /(?<=^|[\s(])@([\w./_-]+\.[\w]+|[\w./_-][\w./ _()-]+?\.[\w]+)/g;
+const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()-]+?\.[\w]+)/gu;
 
 function buildAtPathViewPlugin(plugin) {
   const decorator = new MatchDecorator({
@@ -129,7 +129,7 @@ function buildAtPathViewPlugin(plugin) {
 function registerPostProcessor(plugin) {
   plugin.registerMarkdownPostProcessor((el, ctx) => {
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    const regex = /(?:^|(?<=[\s(]))@([\w./_-]+\.[\w]+|[\w./_-][\w./ _()-]+?\.[\w]+)/g;
+    const regex = /(?:^|(?<=[\s(]))@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()-]+?\.[\w]+)/gu;
     const replacements = [];
 
     let node;
