@@ -1,9 +1,41 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Pure JS, no build step. Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, Menu } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { RangeSetBuilder } = require("@codemirror/state");
+
+// ─── Helpers: open externally & context menu ─────────────────────────
+
+function openInDefaultApp(plugin, vaultPath) {
+  const basePath = plugin.app.vault.adapter.getBasePath();
+  const absolutePath = require("path").join(basePath, vaultPath);
+  require("electron").shell.openPath(absolutePath);
+}
+
+function showAtPathMenu(plugin, event, vaultPath) {
+  const menu = new Menu();
+  menu.addItem((item) =>
+    item
+      .setTitle("Open in default app")
+      .setIcon("arrow-up-right")
+      .onClick(() => openInDefaultApp(plugin, vaultPath))
+  );
+  menu.showAtMouseEvent(event);
+}
+
+async function openFileByViewState(plugin, resolved) {
+  const ext = resolved.extension;
+  const viewType = typeof plugin.app.viewRegistry.getTypeByExtension === 'function'
+    ? plugin.app.viewRegistry.getTypeByExtension(ext)
+    : plugin.app.viewRegistry.typeByExtension[ext];
+  const leaf = plugin.app.workspace.getLeaf(false);
+  await leaf.setViewState({
+    type: viewType || "markdown",
+    active: true,
+    state: { file: resolved.path },
+  });
+}
 
 // ─── A) Repo root detection ──────────────────────────────────────────
 
@@ -114,9 +146,24 @@ function buildAtPathViewPlugin(plugin) {
           const repoRoot = getRepoRoot(activeFile.path);
           const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
           const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
-          if (resolved) {
-            plugin.app.workspace.openLinkText(vaultPath, "", false);
+          if (resolved instanceof TFile) {
+            openFileByViewState(plugin, resolved);
           }
+          return true;
+        },
+        contextmenu(event, view) {
+          const target = event.target;
+          if (!target.classList.contains("atpath-link")) return false;
+          const relPath = target.dataset.atpath;
+          if (!relPath) return false;
+
+          event.preventDefault();
+          const activeFile = plugin.app.workspace.getActiveFile();
+          if (!activeFile) return false;
+
+          const repoRoot = getRepoRoot(activeFile.path);
+          const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+          showAtPathMenu(plugin, event, vaultPath);
           return true;
         },
       },
@@ -156,7 +203,17 @@ function registerPostProcessor(plugin) {
         const sourcePath = ctx.sourcePath;
         const repoRoot = getRepoRoot(sourcePath);
         const vaultPath = repoRoot ? repoRoot + "/" + capture : capture;
-        plugin.app.workspace.openLinkText(vaultPath, "", false);
+        const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
+        if (resolved instanceof TFile) {
+          openFileByViewState(plugin, resolved);
+        }
+      });
+      link.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const sourcePath = ctx.sourcePath;
+        const repoRoot = getRepoRoot(sourcePath);
+        const vaultPath = repoRoot ? repoRoot + "/" + capture : capture;
+        showAtPathMenu(plugin, e, vaultPath);
       });
 
       const parent = node.parentNode;
