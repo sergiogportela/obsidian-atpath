@@ -1924,9 +1924,31 @@ var require_gpt_4o = __commonJS({
 
 // src/main.js
 var { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice } = require("obsidian");
-var { ViewPlugin, Decoration, MatchDecorator, EditorView } = require("@codemirror/view");
+var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 var { RangeSetBuilder } = require("@codemirror/state");
 var { encode } = require_gpt_4o();
+var AtPathWidget = class extends WidgetType {
+  constructor(fullMatch, path, tokenCount) {
+    super();
+    this.fullMatch = fullMatch;
+    this.path = path;
+    this.tokenCount = tokenCount;
+  }
+  eq(other) {
+    return this.fullMatch === other.fullMatch && this.tokenCount === other.tokenCount;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "atpath-link";
+    span.textContent = this.fullMatch;
+    span.dataset.atpath = this.path;
+    if (this.tokenCount) span.dataset.tokens = this.tokenCount;
+    return span;
+  }
+  ignoreEvent() {
+    return false;
+  }
+};
 var BINARY_EXTENSIONS = /* @__PURE__ */ new Set([
   "png",
   "jpg",
@@ -2098,16 +2120,24 @@ function buildAtPathViewPlugin(plugin) {
   const decorator = new MatchDecorator({
     regexp: AT_PATH_RE,
     decoration: (match, view, pos) => {
+      const end = pos + match[0].length;
+      const cursorInside = view.state.selection.ranges.some(
+        (r) => r.from >= pos && r.to <= end
+      );
       const attrs = { "data-atpath": match[1] };
+      let tokenStr = null;
       if (plugin.settings.showTokenCounts) {
         const vaultPath = resolveAtPath(match[1], plugin);
         const cached = plugin.tokenCache.get(vaultPath);
-        if (cached) {
-          attrs["data-tokens"] = formatTokens(cached.tokens);
-        } else {
-          plugin.scheduleTokenFetch(vaultPath, view);
-        }
+        if (cached) tokenStr = formatTokens(cached.tokens);
+        else plugin.scheduleTokenFetch(vaultPath, view);
       }
+      if (!cursorInside) {
+        return Decoration.replace({
+          widget: new AtPathWidget(match[0], match[1], tokenStr)
+        });
+      }
+      if (tokenStr) attrs["data-tokens"] = tokenStr;
       return Decoration.mark({ class: "atpath-link", attributes: attrs });
     }
   });
@@ -2115,7 +2145,7 @@ function buildAtPathViewPlugin(plugin) {
     (view) => ({
       decorations: decorator.createDeco(view),
       update(update) {
-        if (plugin.tokenCacheDirty) {
+        if (plugin.tokenCacheDirty || update.selectionSet) {
           this.decorations = decorator.createDeco(update.view);
           plugin.tokenCacheDirty = false;
         } else {
