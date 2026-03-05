@@ -1,2 +1,19 @@
 .atpath-link { color: var(--text-accent); cursor: pointer; text-decoration: underline dotted; }
 .atpath-link:hover { text-decoration: underline solid; }
+
+/* Live Preview: CSS pseudo-element after the mark */
+.atpath-link[data-tokens]::after {
+  content: " (" attr(data-tokens) ")";
+  font-size: 0.85em;
+  opacity: 0.5;
+  font-style: italic;
+}
+
+/* Reading Mode: span inserted after the <a> */
+.atpath-token-count {
+  font-size: 0.85em;
+  opacity: 0.5;
+  margin-left: 2px;
+  font-style: italic;
+  pointer-events: none;
+}
