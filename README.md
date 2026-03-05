@@ -21,6 +21,15 @@ See at a glance how large each referenced file is in LLM tokens:
 
 Token counts use GPT-4o's tokenizer as a proxy (works as a reasonable estimate for Claude and other models too).
 
+### Copy Note with @path Contents
+Copy the current note plus the full contents of all referenced `@path` files to the clipboard in a single action — ready to paste into Claude, ChatGPT, Gemini, or any web LLM.
+
+- **Command palette**: "Copy note with @path contents to clipboard" (assign your own hotkey)
+- **Status bar click**: click the token count in the status bar
+- Referenced files are appended below the note, each under a `## @path` header in fenced code blocks
+- Duplicate references are included only once; binary files are skipped automatically
+- If any file fails to resolve, a persistent notice lists the failures while still copying everything that succeeded
+
 ### Repo-Aware Paths
 Inside a `_repos/REPO_NAME/` folder, paths are automatically scoped to the repo root. Editing `docs/notes.md` and selecting `src/main.py` inserts `@src/main.py` -- matching the paths that tools like Claude Code, Cursor, and Codex expect.
 

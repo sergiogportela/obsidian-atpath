@@ -1,7 +1,7 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView } = require("@codemirror/view");
 const { RangeSetBuilder } = require("@codemirror/state");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
@@ -18,6 +18,28 @@ const BINARY_EXTENSIONS = new Set([
   "exe", "dll", "so", "dylib", "bin",
   "sqlite", "db",
 ]);
+
+function makeFence(content) {
+  let max = 2;
+  const runs = content.match(/`{3,}/g);
+  if (runs) for (const r of runs) { if (r.length > max) max = r.length; }
+  return "`".repeat(max + 1);
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch (_) { /* fall through to fallback */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+}
 
 function formatTokens(n) {
   if (n < 1000) return String(n);
@@ -385,6 +407,14 @@ class AtPathPlugin extends Plugin {
     );
 
     this.addSettingTab(new AtPathSettingTab(this.app, this));
+
+    this.addCommand({
+      id: "copy-note-with-atpaths",
+      name: "Copy note with @path contents to clipboard",
+      editorCallback: () => this.copyNoteWithAtPaths(),
+    });
+
+    this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
   }
 
   async loadSettings() {
@@ -500,7 +530,84 @@ class AtPathPlugin extends Plugin {
       tooltipLines.push("@paths (" + linkedCount + "): " + formatTokens(linkedTokens));
     }
     tooltipLines.push("Total: " + formatTokens(total));
+    tooltipLines.push("Click to copy with @path contents");
     this.statusBarEl.setAttribute("aria-label", tooltipLines.join("\n"));
+  }
+
+  async copyNoteWithAtPaths() {
+    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!mdView) {
+      new Notice("No active note to copy.");
+      return;
+    }
+    const content = mdView.editor.getValue();
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new Notice("No active file.");
+      return;
+    }
+
+    const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
+    const repoRoot = getRepoRoot(activeFile.path);
+    const seen = new Set();
+    const resolved = [];
+    const failed = [];
+    let match;
+
+    while ((match = regex.exec(content)) !== null) {
+      const relPath = match[1];
+      const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+      if (seen.has(vaultPath)) continue;
+      seen.add(vaultPath);
+
+      const ext = relPath.split(".").pop().toLowerCase();
+      if (BINARY_EXTENSIONS.has(ext)) continue;
+
+      const file = this.app.vault.getAbstractFileByPath(vaultPath);
+      if (!(file instanceof TFile)) {
+        failed.push(relPath);
+        continue;
+      }
+      try {
+        const fileContent = await this.app.vault.cachedRead(file);
+        resolved.push({ relPath, content: fileContent });
+      } catch (e) {
+        failed.push(relPath);
+      }
+    }
+
+    let output = content;
+    if (resolved.length > 0) {
+      output += "\n\n---\n";
+      for (const { relPath, content: fileContent } of resolved) {
+        const fence = makeFence(fileContent);
+        output += "\n## @" + relPath + "\n\n" + fence + "\n" + fileContent + "\n" + fence + "\n\n---\n";
+      }
+    }
+
+    try {
+      await copyToClipboard(output);
+    } catch (e) {
+      new Notice("Failed to copy to clipboard: " + e.message, 0);
+      return;
+    }
+
+    if (failed.length > 0) {
+      const frag = document.createDocumentFragment();
+      const header = document.createElement("div");
+      header.textContent = "Copied note, but " + failed.length + " @path(s) failed to resolve:";
+      frag.appendChild(header);
+      for (const p of failed) {
+        const line = document.createElement("div");
+        line.textContent = "  • @" + p;
+        frag.appendChild(line);
+      }
+      new Notice(frag, 0);
+    } else if (resolved.length > 0) {
+      new Notice("Copied note + " + resolved.length + " @path(s) to clipboard.", 5000);
+    } else {
+      new Notice("Copied note to clipboard (no @path references found).", 5000);
+    }
   }
 
   onTokenSettingsChanged() {
