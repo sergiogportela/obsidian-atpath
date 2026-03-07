@@ -70,9 +70,15 @@ function formatTokens(n) {
   return Math.round(n / 1000) + "k";
 }
 
+const { buildMainPage, buildAtPathPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
+const { deployToVercel } = require("./vercel-api");
+
 const DEFAULT_SETTINGS = {
   showTokenCounts: true,
   maxFileSizeMB: 5,
+  vercelToken: "",
+  contactUrl: "",
+  contactLabel: "Entre em contato",
 };
 
 // ─── Helpers: open externally & context menu ─────────────────────────
@@ -385,6 +391,47 @@ class AtPathSettingTab extends PluginSettingTab {
           }
         })
       );
+
+    containerEl.createEl("h3", { text: "Publishing" });
+
+    new Setting(containerEl)
+      .setName("Vercel API token")
+      .setDesc("Personal access token for deploying notes to Vercel.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Enter token...")
+          .setValue(this.plugin.settings.vercelToken)
+          .then((t) => { t.inputEl.type = "password"; })
+          .onChange(async (value) => {
+            this.plugin.settings.vercelToken = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Contact URL")
+      .setDesc("Link for the contact button on published pages (e.g. WhatsApp link).")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://wa.me/...")
+          .setValue(this.plugin.settings.contactUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.contactUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Contact button label")
+      .setDesc("Text shown on the contact button.")
+      .addText((text) =>
+        text
+          .setValue(this.plugin.settings.contactLabel)
+          .onChange(async (value) => {
+            this.plugin.settings.contactLabel = value;
+            await this.plugin.saveSettings();
+          })
+      );
   }
 }
 
@@ -448,6 +495,18 @@ class AtPathPlugin extends Plugin {
       name: "Copy note with @path contents to clipboard",
       editorCallback: () => this.copyNoteWithAtPaths(),
     });
+
+    this.addCommand({
+      id: "publish-to-vercel",
+      name: "Publish current note to Vercel",
+      callback: () => this.publishToVercel(),
+    });
+
+    // Publish button in status bar
+    this.publishBarEl = this.addStatusBarItem();
+    this.publishBarEl.addClass("mod-clickable", "atpath-publish-btn");
+    this.publishBarEl.setText("Publish");
+    this.publishBarEl.addEventListener("click", () => this.publishToVercel());
 
     this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
   }
@@ -642,6 +701,119 @@ class AtPathPlugin extends Plugin {
       new Notice("Copied note + " + resolved.length + " @path(s) to clipboard.", 5000);
     } else {
       new Notice("Copied note to clipboard (no @path references found).", 5000);
+    }
+  }
+
+  async resolveLocalImages(md, activeFile) {
+    const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+    let result = md;
+    const replacements = [];
+    let match;
+
+    while ((match = imgRegex.exec(md)) !== null) {
+      const src = match[2];
+      if (/^https?:\/\//.test(src) || src.startsWith("data:")) continue;
+
+      // Resolve vault path relative to active file
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(src, activeFile.path);
+      if (!resolved || !(resolved instanceof TFile)) continue;
+
+      try {
+        const binary = await this.app.vault.readBinary(resolved);
+        const bytes = new Uint8Array(binary);
+        let b64 = "";
+        for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
+        b64 = btoa(b64);
+        const ext = resolved.extension.toLowerCase();
+        const mime = ext === "svg" ? "image/svg+xml" : ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/jpeg";
+        replacements.push({ original: match[2], dataUri: `data:${mime};base64,${b64}` });
+      } catch (_) { /* skip unreadable images */ }
+    }
+
+    for (const r of replacements) {
+      result = result.split(r.original).join(r.dataUri);
+    }
+    return result;
+  }
+
+  async publishToVercel() {
+    const { vercelToken, contactUrl, contactLabel } = this.settings;
+    if (!vercelToken) {
+      new Notice("Set your Vercel API token in AtPath settings first.", 0);
+      this.app.setting.open();
+      return;
+    }
+
+    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!mdView) { new Notice("No active note to publish."); return; }
+
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) { new Notice("No active file."); return; }
+
+    const noteTitle = activeFile.basename;
+    this.publishBarEl.setText("Publishing...");
+
+    try {
+      let content = mdView.editor.getValue();
+      const repoRoot = getRepoRoot(activeFile.path);
+
+      // Collect first-level @path files
+      const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
+      const seen = new Set();
+      const atPathFiles = [];
+      let m;
+
+      while ((m = regex.exec(content)) !== null) {
+        const relPath = m[1];
+        if (seen.has(relPath)) continue;
+        seen.add(relPath);
+
+        const ext = relPath.split(".").pop().toLowerCase();
+        if (BINARY_EXTENSIONS.has(ext)) continue;
+
+        const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+        const file = this.app.vault.getAbstractFileByPath(vaultPath);
+        if (!(file instanceof TFile)) continue;
+
+        try {
+          const fileContent = await this.app.vault.cachedRead(file);
+          atPathFiles.push({ relPath, content: fileContent });
+        } catch (_) { /* skip */ }
+      }
+
+      // Build slug map for @path links
+      const atPathSlugs = new Map();
+      for (const f of atPathFiles) {
+        atPathSlugs.set(f.relPath, slugifyPath(f.relPath));
+      }
+
+      // Resolve images in main note
+      content = await this.resolveLocalImages(content, activeFile);
+
+      // Build main page
+      const mainHtml = buildMainPage(noteTitle, content, atPathSlugs, contactUrl, contactLabel);
+
+      // Build @path pages
+      const deployFiles = [{ path: "index.html", content: mainHtml }];
+
+      for (const f of atPathFiles) {
+        const slug = atPathSlugs.get(f.relPath);
+        let atContent = await this.resolveLocalImages(f.content, activeFile);
+        const pageTitle = f.relPath.split("/").pop();
+        const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
+        deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+      }
+
+      // Deploy
+      const result = await deployToVercel(vercelToken, noteTitle, deployFiles);
+
+      this.publishBarEl.setText("Publish");
+      new Notice("Published! " + result.url, 10000);
+
+      try { await copyToClipboard(result.url); } catch (_) {}
+    } catch (e) {
+      this.publishBarEl.setText("Publish");
+      new Notice("Publish failed: " + (e.message || e), 0);
     }
   }
 

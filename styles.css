@@ -9,6 +9,15 @@
   font-style: italic;
 }
 
+/* Publish button in status bar */
+.atpath-publish-btn {
+  cursor: pointer;
+  opacity: 0.7;
+}
+.atpath-publish-btn:hover {
+  opacity: 1;
+}
+
 /* Reading Mode: span inserted after the <a> */
 .atpath-token-count {
   font-size: 0.85em;

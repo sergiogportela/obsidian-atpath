@@ -24,6 +24,13 @@ status bar:
 	- appends each file under `## @path` in fenced code blocks
 	- dedupes repeated refs, skips binaries
 	- shows a notice for any unresolved paths (still copies the rest)
+- **Publish to Vercel**: deploy any note as a styled dark-themed web page
+	- command: **Publish current note to Vercel** (or click "Publish" in status bar)
+	- `@path` references become linked sub-pages with back-navigation
+	- collapsible sections (h2–h4) and foldable bold list items
+	- local images inlined as base64 (fully self-contained)
+	- "Baixar .md" download button + configurable contact button on every page
+	- one Vercel project per note (domain = slugified title, e.g. `my-note.vercel.app`)
 - **Repo-aware paths (optional)**: inside `_repos/REPO/`, inserts repo-relative paths (e.g. `@src/main.py`)
 - **Auto-update refs**: renames/moves update all `@path` references across the vault
 
@@ -33,6 +40,9 @@ status bar:
 |--------|---------|-------------|
 | Show token counts | On | Inline + status bar |
 | Max file size (MB) | 5 | Skip counting above this |
+| Vercel API token | — | Personal access token for publishing |
+| Contact URL | — | Link for contact button (e.g. WhatsApp) |
+| Contact button label | Entre em contato | Text on the contact button |
 
 ## Repo-aware mode (optional)
 
