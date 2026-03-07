@@ -96,9 +96,7 @@ async function deployToVercel(token, noteTitle, files) {
     files: fileEntries,
   });
 
-  const url = data.url ? "https://" + data.url : data.alias && data.alias[0] ? "https://" + data.alias[0] : null;
-
-  return { url: url || "https://" + projectName + ".vercel.app", projectName };
+  return { url: "https://" + projectName + ".vercel.app", projectName };
 }
 
 module.exports = { slugify, deployToVercel };

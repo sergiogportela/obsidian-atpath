@@ -1,65 +1,90 @@
+<div align="center">
+
 # AtPath
 
-Autocomplete and click `@path/to/file` references in Obsidian — the same `@path` syntax used by AI coding tools (Claude Code, Cursor, Codex).
+**Reference any file in your vault with `@path/to/file` — the same syntax used by AI coding tools.**
 
-![image|500](https://storage.googleapis.com/obsidian-images-sergio-public/a251878152226958e89f39bb30a14ab0.png)
-auto complete:
-![image|300](https://storage.googleapis.com/obsidian-images-sergio-public/abc481cbe93ecb4462307fdde82adb76.png)
+Autocomplete, click-to-open, token counting, one-click publish to the web, and cross-repo support.
 
-status bar: 
-![image|400](https://storage.googleapis.com/obsidian-images-sergio-public/67468e0340d947daba90bb5798134dc5.png)
+[![GitHub release](https://img.shields.io/github/v/release/sergiogportela/obsidian-atpath?style=flat-square)](https://github.com/sergiogportela/obsidian-atpath/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+</div>
+
+---
+
+<p align="center">
+  <img src="screenshots/atpath-links.png" width="600" alt="@path references rendered as clickable links with token counts" />
+</p>
+
 ## Features
 
-- **@ autocomplete**: type `@` → pick a file → inserts `@path/to/file`
-- **Clickable links**: click `@path` in Live Preview/Reading to open the file (right-click → open externally)
-- **Token counts**:
-	- inline: `@src/main.py (1.2k)`
-	- status bar total: `Tokens: 16.4k` (note + all `@paths`)
-	- hover breakdown: `Note / @paths / Total`
-	- updates automatically as files change  
-	- _Uses GPT-4o tokenizer as an estimate._
-- **Copy note + @path contents** (ready to paste into any web LLM):
-	- command: **Copy note with @path contents to clipboard** (bind a hotkey)
-	- or click the status bar token total
-	- appends each file under `## @path` in fenced code blocks
-	- dedupes repeated refs, skips binaries
-	- shows a notice for any unresolved paths (still copies the rest)
-- **Publish to Vercel**: deploy any note as a styled dark-themed web page
-	- command: **Publish current note to Vercel** (or click "Publish" in status bar)
-	- `@path` references become linked sub-pages with back-navigation
-	- collapsible sections (h2–h4) and foldable bold list items
-	- local images inlined as base64 (fully self-contained)
-	- "Baixar .md" download button + configurable contact button on every page
-	- one Vercel project per note (domain = slugified title, e.g. `my-note.vercel.app`)
-- **Repo-aware paths (optional)**: inside `_repos/REPO/`, inserts repo-relative paths (e.g. `@src/main.py`)
-- **Auto-update refs**: renames/moves update all `@path` references across the vault
+### @ Autocomplete
+
+Type `@` and pick any file. Works across repos — files from the current repo appear first, then cross-repo matches (`@other-repo/src/file.py`), then loose vault files.
+
+<p align="center">
+  <img src="screenshots/autocomplete.png" width="350" alt="Autocomplete dropdown showing file suggestions" />
+</p>
+
+### Clickable Links
+
+Click any `@path` in Live Preview or Reading mode to open the file inside Obsidian. Right-click to open in your default external app.
+
+### Token Counts
+
+See how many tokens each `@path` reference adds — inline badges and a status bar total. Uses the GPT-4o tokenizer as an estimate. Click the status bar to copy everything to clipboard.
+
+<p align="center">
+  <img src="screenshots/status-bar.png" width="500" alt="Status bar showing total token count with tooltip breakdown" />
+</p>
+
+### Copy Note + @path Contents
+
+One command (or click the status bar) to copy the current note with all referenced file contents appended — ready to paste into any web LLM. Each file appears under a `## @path` header in fenced code blocks.
+
+### Publish to Vercel
+
+Deploy any note as a styled dark-themed web page with one click. Before publishing, a confirmation modal shows the target domain, all linked `@path` notes, and a toggle to compact file paths to just filenames.
+
+<p align="center">
+  <img src="screenshots/publish-confirm.png" width="500" alt="Publish confirmation modal showing domain, linked notes, and compact toggle" />
+</p>
+
+After deploying, a result modal gives you the URL with **Copy** and **Open in browser** buttons.
+
+<p align="center">
+  <img src="screenshots/publish-result.png" width="500" alt="Publish result modal with URL, Copy and Open buttons" />
+</p>
+
+Published pages include collapsible sections, foldable bold list items, inlined local images, a download button, and a configurable contact button.
+
+### Cross-Repo References
+
+Reference files across different repos with `@reponame/path/to/file.ext`. Renames propagate automatically. Inside `_repos/`, paths are repo-relative; the first segment of a cross-repo path is matched against known repo names.
+
+### Auto-Update References
+
+Rename or move a file and all `@path` references across the vault update automatically — same-repo, cross-repo, and vault-relative formats.
 
 ## Settings
 
 | Setting | Default | Description |
-|--------|---------|-------------|
-| Show token counts | On | Inline + status bar |
-| Max file size (MB) | 5 | Skip counting above this |
-| Vercel API token | — | Personal access token for publishing |
-| Contact URL | — | Link for contact button (e.g. WhatsApp) |
-| Contact button label | Entre em contato | Text on the contact button |
-
-## Repo-aware mode (optional)
-
-Symlink repos under `_repos/`:
-
-```text
-vault/_repos/my-project/...
-````
-
-Inside a repo, AtPath emits repo-relative paths; elsewhere it uses vault-relative paths.
+|---------|---------|-------------|
+| Show token counts | On | Inline badges + status bar total |
+| Max file size (MB) | 5 | Skip token counting above this |
+| Vercel API token | — | For one-click publishing |
+| Contact URL | — | Button link on published pages |
+| Contact button label | Entre em contato | Button text |
 
 ## Install
 
-- **Community Plugins**: search “AtPath”
-    
-- **Manual**: copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable
-    
+- **Community Plugins** — search "AtPath" in Obsidian settings
+- **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable
+
+## Contributing
+
+Contributions are welcome! Feel free to open issues or submit pull requests.
 
 ## License
 

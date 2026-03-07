@@ -1,7 +1,7 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { RangeSetBuilder } = require("@codemirror/state");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
@@ -71,7 +71,7 @@ function formatTokens(n) {
 }
 
 const { buildMainPage, buildAtPathPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
-const { deployToVercel } = require("./vercel-api");
+const { deployToVercel, slugify } = require("./vercel-api");
 
 const DEFAULT_SETTINGS = {
   showTokenCounts: true,
@@ -131,11 +131,61 @@ function toRepoRelative(filePath, repoRoot) {
   return filePath.substring(repoRoot.length + 1);
 }
 
+function discoverRepoRoots(plugin) {
+  const now = Date.now();
+  if (plugin._repoRootsCache && now - plugin._repoRootsCacheTime < 5000) {
+    return plugin._repoRootsCache;
+  }
+  const roots = new Map();
+  for (const file of plugin.app.vault.getFiles()) {
+    const idx = file.path.indexOf(REPOS_SEGMENT);
+    if (idx === -1) continue;
+    const afterRepos = file.path.substring(idx + REPOS_SEGMENT.length);
+    const slash = afterRepos.indexOf("/");
+    if (slash === -1) continue;
+    const repoName = afterRepos.substring(0, slash);
+    if (!roots.has(repoName)) {
+      roots.set(repoName, file.path.substring(0, idx + REPOS_SEGMENT.length + slash));
+    }
+  }
+  plugin._repoRootsCache = roots;
+  plugin._repoRootsCacheTime = now;
+  return roots;
+}
+
+function resolveAtPathFromSource(relPath, sourceFilePath, plugin) {
+  const sourceRepoRoot = getRepoRoot(sourceFilePath);
+
+  // 1. Same-repo
+  if (sourceRepoRoot) {
+    const candidate = sourceRepoRoot + "/" + relPath;
+    if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+  }
+
+  // 2. Cross-repo: first segment may be a repo name
+  const slashIdx = relPath.indexOf("/");
+  if (slashIdx !== -1) {
+    const firstSegment = relPath.substring(0, slashIdx);
+    const rest = relPath.substring(slashIdx + 1);
+    const repoRoots = discoverRepoRoots(plugin);
+    const repoRoot = repoRoots.get(firstSegment);
+    if (repoRoot) {
+      const candidate = repoRoot + "/" + rest;
+      if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+    }
+  }
+
+  // 3. Vault-relative
+  if (plugin.app.vault.getAbstractFileByPath(relPath)) return relPath;
+
+  // 4. Fallback: same-repo concat (preserves old behavior)
+  return sourceRepoRoot ? sourceRepoRoot + "/" + relPath : relPath;
+}
+
 function resolveAtPath(relPath, plugin) {
   const activeFile = plugin.app.workspace.getActiveFile();
   if (!activeFile) return relPath;
-  const repoRoot = getRepoRoot(activeFile.path);
-  return repoRoot ? repoRoot + "/" + relPath : relPath;
+  return resolveAtPathFromSource(relPath, activeFile.path, plugin);
 }
 
 // ─── B) EditorSuggest — Autocomplete ─────────────────────────────────
@@ -173,15 +223,30 @@ class AtPathSuggest extends EditorSuggest {
     const allFiles = this.app.vault.getFiles();
     const query = context.query.toLowerCase();
 
-    const results = [];
+    const sameRepo = [];
+    const crossRepo = [];
+    const loose = [];
+
     for (const f of allFiles) {
-      if (!f.path.startsWith(repoRoot ? repoRoot + "/" : "")) continue;
-      const rel = repoRoot ? toRepoRelative(f.path, repoRoot) : f.path;
-      if (query && !rel.toLowerCase().includes(query)) continue;
-      results.push({ file: f, display: rel, repoRoot });
-      if (results.length >= 50) break;
+      if (repoRoot && f.path.startsWith(repoRoot + "/")) {
+        const rel = toRepoRelative(f.path, repoRoot);
+        if (query && !rel.toLowerCase().includes(query)) continue;
+        sameRepo.push({ file: f, display: rel, repoRoot });
+      } else {
+        const fRepoRoot = getRepoRoot(f.path);
+        if (fRepoRoot) {
+          const repoName = fRepoRoot.substring(fRepoRoot.lastIndexOf("/") + 1);
+          const rel = repoName + "/" + toRepoRelative(f.path, fRepoRoot);
+          if (query && !rel.toLowerCase().includes(query)) continue;
+          crossRepo.push({ file: f, display: rel, repoRoot: fRepoRoot });
+        } else {
+          if (query && !f.path.toLowerCase().includes(query)) continue;
+          loose.push({ file: f, display: f.path, repoRoot: "" });
+        }
+      }
     }
-    return results;
+
+    return [...sameRepo, ...crossRepo, ...loose].slice(0, 50);
   }
 
   renderSuggestion(value, el) {
@@ -254,8 +319,7 @@ function buildAtPathViewPlugin(plugin) {
           const activeFile = plugin.app.workspace.getActiveFile();
           if (!activeFile) return false;
 
-          const repoRoot = getRepoRoot(activeFile.path);
-          const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+          const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, plugin);
           const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
           if (resolved instanceof TFile) {
             openFileByViewState(plugin, resolved);
@@ -272,8 +336,7 @@ function buildAtPathViewPlugin(plugin) {
           const activeFile = plugin.app.workspace.getActiveFile();
           if (!activeFile) return false;
 
-          const repoRoot = getRepoRoot(activeFile.path);
-          const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+          const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, plugin);
           showAtPathMenu(plugin, event, vaultPath);
           return true;
         },
@@ -311,9 +374,7 @@ function registerPostProcessor(plugin) {
       link.textContent = match;
       link.addEventListener("click", (e) => {
         e.preventDefault();
-        const sourcePath = ctx.sourcePath;
-        const repoRoot = getRepoRoot(sourcePath);
-        const vaultPath = repoRoot ? repoRoot + "/" + capture : capture;
+        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
         const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
         if (resolved instanceof TFile) {
           openFileByViewState(plugin, resolved);
@@ -321,9 +382,7 @@ function registerPostProcessor(plugin) {
       });
       link.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        const sourcePath = ctx.sourcePath;
-        const repoRoot = getRepoRoot(sourcePath);
-        const vaultPath = repoRoot ? repoRoot + "/" + capture : capture;
+        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
         showAtPathMenu(plugin, e, vaultPath);
       });
 
@@ -334,9 +393,7 @@ function registerPostProcessor(plugin) {
       if (plugin.settings.showTokenCounts) {
         const tokenSpan = document.createElement("span");
         tokenSpan.className = "atpath-token-count";
-        const sourcePath = ctx.sourcePath;
-        const repoRoot = getRepoRoot(sourcePath);
-        const vaultPath = repoRoot ? repoRoot + "/" + capture : capture;
+        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
         const cached = plugin.tokenCache.get(vaultPath);
         if (cached) {
           tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
@@ -435,7 +492,122 @@ class AtPathSettingTab extends PluginSettingTab {
   }
 }
 
-// ─── F) Plugin lifecycle ─────────────────────────────────────────────
+// ─── F) Publish modals ───────────────────────────────────────────────
+
+class PublishConfirmModal extends Modal {
+  constructor(app, publishData, onConfirm) {
+    super(app);
+    this.publishData = publishData;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const { domain, atPathFiles, plugin } = this.publishData;
+
+    contentEl.createEl("h2", { text: "Publish to Vercel" });
+
+    new Setting(contentEl)
+      .setName("Domain")
+      .setDesc(domain);
+
+    if (atPathFiles.length > 0) {
+      contentEl.createEl("h3", { text: "Linked @path notes (" + atPathFiles.length + ")" });
+      const list = contentEl.createEl("ul");
+      for (const f of atPathFiles) {
+        list.createEl("li", { text: "@" + f.relPath });
+      }
+    }
+
+    let tokenValue = plugin.settings.vercelToken;
+    if (!tokenValue) {
+      new Setting(contentEl)
+        .setName("Vercel API token")
+        .addText((text) =>
+          text
+            .setPlaceholder("Enter token...")
+            .then((t) => { t.inputEl.type = "password"; })
+            .onChange((value) => { tokenValue = value.trim(); })
+        );
+    }
+
+    let compactLinks = true;
+    new Setting(contentEl)
+      .setName("Compact @path to file title?")
+      .setDesc("Show just the filename (e.g. helpers.py) instead of the full path")
+      .addToggle((toggle) =>
+        toggle.setValue(true).onChange((value) => { compactLinks = value; })
+      );
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Cancel").onClick(() => this.close())
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Publish").setCta().onClick(() => {
+          if (!tokenValue) {
+            new Notice("Please enter a Vercel API token.");
+            return;
+          }
+          this.close();
+          this.onConfirm(tokenValue, compactLinks);
+        })
+      );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class PublishResultModal extends Modal {
+  constructor(app, result) {
+    super(app);
+    this.result = result;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const { success, url, summary, error } = this.result;
+
+    if (success) {
+      contentEl.createEl("h2", { text: "Published successfully" });
+      contentEl.createEl("p", { text: summary });
+      contentEl.createEl("p", { text: url, cls: "atpath-publish-url" });
+
+      new Setting(contentEl)
+        .addButton((btn) =>
+          btn.setButtonText("Copy URL").setCta().onClick(async () => {
+            await copyToClipboard(url);
+            btn.setButtonText("Copied!");
+            setTimeout(() => btn.setButtonText("Copy URL"), 2000);
+          })
+        )
+        .addButton((btn) =>
+          btn.setButtonText("Open in browser").onClick(() => {
+            window.open(url, "_blank");
+          })
+        );
+    } else {
+      contentEl.createEl("h2", { text: "Publish failed" });
+      const pre = contentEl.createEl("pre");
+      pre.style.whiteSpace = "pre-wrap";
+      pre.style.color = "#ff6b6b";
+      pre.textContent = error;
+    }
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Close").onClick(() => this.close())
+      );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// ─── G) Plugin lifecycle ─────────────────────────────────────────────
 
 class AtPathPlugin extends Plugin {
   async onload() {
@@ -594,13 +766,12 @@ class AtPathPlugin extends Plugin {
 
     // Find all @paths and count their tokens
     const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
-    const repoRoot = getRepoRoot(activeFile.path);
     const seenPaths = new Set();
     let linkedTokens = 0;
     let linkedCount = 0;
     let match;
     while ((match = regex.exec(content)) !== null) {
-      const vaultPath = repoRoot ? repoRoot + "/" + match[1] : match[1];
+      const vaultPath = resolveAtPathFromSource(match[1], activeFile.path, this);
       if (seenPaths.has(vaultPath)) continue;
       seenPaths.add(vaultPath);
       const tokens = await this.getTokenCount(vaultPath);
@@ -642,7 +813,6 @@ class AtPathPlugin extends Plugin {
     }
 
     const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
-    const repoRoot = getRepoRoot(activeFile.path);
     const seen = new Set();
     const resolved = [];
     const failed = [];
@@ -650,7 +820,7 @@ class AtPathPlugin extends Plugin {
 
     while ((match = regex.exec(content)) !== null) {
       const relPath = match[1];
-      const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
+      const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, this);
       if (seen.has(vaultPath)) continue;
       seen.add(vaultPath);
 
@@ -736,14 +906,38 @@ class AtPathPlugin extends Plugin {
     return result;
   }
 
-  async publishToVercel() {
-    const { vercelToken, contactUrl, contactLabel } = this.settings;
-    if (!vercelToken) {
-      new Notice("Set your Vercel API token in AtPath settings first.", 0);
-      this.app.setting.open();
-      return;
+  getRepoRoots() {
+    return discoverRepoRoots(this);
+  }
+
+  async collectAtPathFiles(content, activeFile) {
+    const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
+    const seen = new Set();
+    const atPathFiles = [];
+    let m;
+
+    while ((m = regex.exec(content)) !== null) {
+      const relPath = m[1];
+      if (seen.has(relPath)) continue;
+      seen.add(relPath);
+
+      const ext = relPath.split(".").pop().toLowerCase();
+      if (BINARY_EXTENSIONS.has(ext)) continue;
+
+      const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, this);
+      const file = this.app.vault.getAbstractFileByPath(vaultPath);
+      if (!(file instanceof TFile)) continue;
+
+      try {
+        const fileContent = await this.app.vault.cachedRead(file);
+        atPathFiles.push({ relPath, content: fileContent });
+      } catch (_) { /* skip */ }
     }
 
+    return atPathFiles;
+  }
+
+  async publishToVercel() {
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) { new Notice("No active note to publish."); return; }
 
@@ -751,51 +945,39 @@ class AtPathPlugin extends Plugin {
     if (!activeFile) { new Notice("No active file."); return; }
 
     const noteTitle = activeFile.basename;
+    const content = mdView.editor.getValue();
+    const atPathFiles = await this.collectAtPathFiles(content, activeFile);
+    const domain = slugify(noteTitle) + ".vercel.app";
+
+    const publishData = { noteTitle, content, activeFile, atPathFiles, domain, plugin: this };
+
+    new PublishConfirmModal(this.app, publishData, (token, compactLinks) => {
+      this._executePublish(publishData, { token, compactLinks });
+    }).open();
+  }
+
+  async _executePublish(publishData, opts) {
+    const { noteTitle, content, activeFile, atPathFiles } = publishData;
+    const { token, compactLinks } = opts;
+    const { contactUrl, contactLabel } = this.settings;
+
+    if (token !== this.settings.vercelToken) {
+      this.settings.vercelToken = token;
+      await this.saveSettings();
+    }
+
     this.publishBarEl.setText("Publishing...");
 
     try {
-      let content = mdView.editor.getValue();
-      const repoRoot = getRepoRoot(activeFile.path);
-
-      // Collect first-level @path files
-      const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
-      const seen = new Set();
-      const atPathFiles = [];
-      let m;
-
-      while ((m = regex.exec(content)) !== null) {
-        const relPath = m[1];
-        if (seen.has(relPath)) continue;
-        seen.add(relPath);
-
-        const ext = relPath.split(".").pop().toLowerCase();
-        if (BINARY_EXTENSIONS.has(ext)) continue;
-
-        const vaultPath = repoRoot ? repoRoot + "/" + relPath : relPath;
-        const file = this.app.vault.getAbstractFileByPath(vaultPath);
-        if (!(file instanceof TFile)) continue;
-
-        try {
-          const fileContent = await this.app.vault.cachedRead(file);
-          atPathFiles.push({ relPath, content: fileContent });
-        } catch (_) { /* skip */ }
-      }
-
-      // Build slug map for @path links
       const atPathSlugs = new Map();
       for (const f of atPathFiles) {
         atPathSlugs.set(f.relPath, slugifyPath(f.relPath));
       }
 
-      // Resolve images in main note
-      content = await this.resolveLocalImages(content, activeFile);
+      let resolvedContent = await this.resolveLocalImages(content, activeFile);
+      const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks);
 
-      // Build main page
-      const mainHtml = buildMainPage(noteTitle, content, atPathSlugs, contactUrl, contactLabel);
-
-      // Build @path pages
       const deployFiles = [{ path: "index.html", content: mainHtml }];
-
       for (const f of atPathFiles) {
         const slug = atPathSlugs.get(f.relPath);
         let atContent = await this.resolveLocalImages(f.content, activeFile);
@@ -804,16 +986,16 @@ class AtPathPlugin extends Plugin {
         deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
       }
 
-      // Deploy
-      const result = await deployToVercel(vercelToken, noteTitle, deployFiles);
-
+      const result = await deployToVercel(token, noteTitle, deployFiles);
       this.publishBarEl.setText("Publish");
-      new Notice("Published! " + result.url, 10000);
 
-      try { await copyToClipboard(result.url); } catch (_) {}
+      const linkedCount = atPathFiles.length;
+      const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "");
+
+      new PublishResultModal(this.app, { success: true, url: result.url, summary }).open();
     } catch (e) {
       this.publishBarEl.setText("Publish");
-      new Notice("Publish failed: " + (e.message || e), 0);
+      new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
 
@@ -876,6 +1058,33 @@ class AtPathPlugin extends Plugin {
         if (!re.test(content)) continue;
         re.lastIndex = 0;
         const updated = content.replace(re, replacement);
+        if (updated !== content) {
+          await this.app.vault.modify(mdFile, updated);
+        }
+      }
+    }
+
+    // Pass 3: cross-repo format references (@reponame/old-rel-path → @reponame/new-rel-path)
+    if (oldRepoRoot && oldRel !== newRel) {
+      const oldRepoName = oldRepoRoot.substring(oldRepoRoot.lastIndexOf("/") + 1);
+      const newRepoName = newRepoRoot ? newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1) : "";
+      const oldCrossRef = oldRepoName + "/" + oldRel;
+      const newCrossRef = newRepoName ? newRepoName + "/" + newRel : file.path;
+
+      const escaped3 = oldCrossRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern3 = isFolder
+        ? `(?<=(?:^|[\\s(]))@${escaped3}/`
+        : `(?<=(?:^|[\\s(]))@${escaped3}(?=$|[\\s)\\]},;:!?])`;
+      const re3 = new RegExp(pattern3, 'gm');
+      const replacement3 = isFolder ? '@' + newCrossRef + '/' : '@' + newCrossRef;
+
+      for (const mdFile of mdFiles) {
+        if (getRepoRoot(mdFile.path) === oldRepoRoot) continue;
+
+        const content = await this.app.vault.read(mdFile);
+        if (!re3.test(content)) continue;
+        re3.lastIndex = 0;
+        const updated = content.replace(re3, replacement3);
         if (updated !== content) {
           await this.app.vault.modify(mdFile, updated);
         }

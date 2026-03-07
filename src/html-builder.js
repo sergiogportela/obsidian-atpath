@@ -229,12 +229,13 @@ function slugifyPath(filePath) {
 
 const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
 
-function replaceAtPathsWithLinks(md, atPathSlugs) {
+function replaceAtPathsWithLinks(md, atPathSlugs, compactLinks) {
   const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
   return md.replace(regex, (match, relPath) => {
     const slug = atPathSlugs.get(relPath);
     if (slug) {
-      return `<a href="atpath/${slug}.html" class="atpath-ref">@${relPath}</a>`;
+      const linkText = compactLinks ? relPath.split("/").pop() : "@" + relPath;
+      return `<a href="atpath/${slug}.html" class="atpath-ref">${linkText}</a>`;
     }
     return match;
   });
@@ -264,12 +265,12 @@ function toBase64(str) {
 
 // ─── Exported builders ──────────────────────────────────────────────
 
-function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel) {
+function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks) {
   const mdBase64 = toBase64(markdown);
   const downloadFilename = title + ".md";
 
   // Replace first-level @paths with links before rendering
-  let md = replaceAtPathsWithLinks(markdown, atPathSlugs);
+  let md = replaceAtPathsWithLinks(markdown, atPathSlugs, compactLinks);
 
   const bodyHtml = processMarkdown(md);
   const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
