@@ -38,3 +38,51 @@ Edit `src/main.js`, then run `npm run build` to regenerate `main.js`. The built 
 - `manifest.json` and `package.json` must have the **same** version
 - `versions.json` maps each plugin version to its minimum Obsidian app version
 - Tags must match the version string exactly (e.g. `1.2.0`, not `v1.2.0`)
+
+## Obsidian Community Plugin compliance
+
+This plugin is submitted (or will be submitted) to the Obsidian Community Plugin directory.
+All code changes **must** follow these rules to pass the automated review bot and human review.
+
+See `COMMUNITY_PLUGINS.md` for the full reference. Key rules summarized here:
+
+### Code rules (enforced by eslint-plugin-obsidianmd)
+
+- **No `console.log`** — only `console.warn`, `console.error`, `console.debug`
+- **No `innerHTML` / `outerHTML`** — use DOM API methods (XSS risk)
+- **No hardcoded `.obsidian`** — use `this.app.vault.configDir`
+- **All promises** must be awaited, `.catch()`-ed, `.then(_, reject)`-ed, or `void`-ed
+- **No `var`** — use `const` / `let`
+- **Sentence case** for all user-facing text (e.g. "Open file", not "Open File")
+- **No default hotkeys** on commands
+- **No "command"** in command IDs/names; no plugin ID/name in command IDs/names
+- **Regex lookbehinds** — avoid if possible (unsupported on some iOS versions). Currently used in `AT_PATH_RE`; flagged as a known review risk
+- **Use `requestUrl()`** instead of `fetch()` for HTTP requests
+- **Use CSS classes** not inline styles; use `styles.css` not `<style>` elements
+
+### Manifest rules
+
+- `id`: cannot contain "obsidian", cannot end with "plugin"
+- `name`: cannot contain "Obsidian", cannot end with "Plugin"
+- `description`: cannot contain "Obsidian" or "This plugin"; must end with punctuation (`.` `?` `!` `)`)
+- `version`: must be exact semver `x.y.z` — no `v` prefix
+
+### Submission process
+
+To re-submit to community plugins (if the PR is closed/rejected):
+
+1. Sync fork: `gh repo sync sergiogportela/obsidian-releases --source obsidianmd/obsidian-releases --branch master`
+2. Clone fork, create branch `add-plugin-atpath`
+3. Add entry to end of `community-plugins.json`:
+   ```json
+   {
+     "id": "atpath",
+     "name": "AtPath",
+     "author": "sergio",
+     "description": "Autocomplete and navigate @path/to/file references.",
+     "repo": "sergiogportela/obsidian-atpath"
+   }
+   ```
+4. PR title: `Add plugin: AtPath`
+5. PR body: **must use the exact template** from `.github/PULL_REQUEST_TEMPLATE/plugin.md` — see `COMMUNITY_PLUGINS.md` for the full template
+6. Use `--head sergiogportela:add-plugin-atpath --base master --repo obsidianmd/obsidian-releases`
