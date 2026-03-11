@@ -7336,6 +7336,18 @@ var require_index_cjs4 = __commonJS({
 var require_html_builder = __commonJS({
   "src/html-builder.js"(exports2, module2) {
     var markdownit = require_index_cjs4();
+    var HLJS_CSS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
+    var HLJS_JS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js";
+    var MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
+    function makeFence2(content) {
+      let max = 2;
+      const runs = content.match(/`{3,}/g);
+      if (runs) for (const r of runs) {
+        if (r.length > max) max = r.length;
+      }
+      return "`".repeat(max + 1);
+    }
+    var MARKDOWN_EXTENSIONS = /* @__PURE__ */ new Set(["md", "markdown"]);
     var mdi = markdownit({ html: true, linkify: true, typographer: true });
     function preprocessObsidianImages(md) {
       return md.replace(
@@ -7493,6 +7505,9 @@ hr { border: none; border-top: 1px solid #444; margin: 1.5em 0; }
   border-bottom: 1px solid #444;
 }
 .back-nav a { font-size: 0.95em; }
+pre code.hljs { background: transparent; padding: 0; }
+.mermaid { text-align: center; margin: 1em 0; }
+.mermaid svg { max-width: 100%; }
 `;
     function escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -7503,7 +7518,9 @@ hr { border: none; border-top: 1px solid #444; margin: 1.5em 0; }
         btns += `  <a class="contact-btn" href="${escapeHtml(contactUrl)}" target="_blank" rel="noopener">${escapeHtml(contactLabel || "Contact")}</a>
 `;
       }
-      btns += `  <a class="dl-btn" href="data:text/markdown;base64,${downloadBase64}" download="${escapeHtml(downloadFilename)}">Baixar .md</a>
+      const ext = (downloadFilename.match(/\.(\w+)$/) || [])[1] || "md";
+      const mime = ext === "md" ? "text/markdown" : "text/plain";
+      btns += `  <a class="dl-btn" href="data:${mime};base64,${downloadBase64}" download="${escapeHtml(downloadFilename)}">Baixar .${ext}</a>
 `;
       return `<div class="top-btns">
 ${btns}</div>`;
@@ -7516,10 +7533,32 @@ ${btns}</div>`;
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>${CSS_TEMPLATE}</style>
+<link rel="stylesheet" href="${HLJS_CSS}">
 ${extraHead || ""}
 </head>
 <body>
 ${bodyContent}
+<script src="${HLJS_JS}"></script>
+<script src="${MERMAID_JS}"></script>
+<script>
+(function() {
+  try {
+    document.querySelectorAll('pre code').forEach(function(el) {
+      if (!el.classList.contains('language-mermaid')) hljs.highlightElement(el);
+    });
+  } catch(e) {}
+  try {
+    document.querySelectorAll('pre code.language-mermaid').forEach(function(el) {
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = el.textContent;
+      el.closest('pre').replaceWith(div);
+    });
+    mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+    mermaid.run();
+  } catch(e) {}
+})();
+</script>
 </body>
 </html>`;
     }
@@ -7567,8 +7606,14 @@ ${bodyHtml}
     }
     function buildAtPathPage2(title, markdown, mainPageTitle, contactUrl, contactLabel) {
       const mdBase64 = toBase64(markdown);
-      const downloadFilename = title.replace(/\//g, "-") + ".md";
-      let md = replaceNestedAtPaths(markdown);
+      const downloadFilename = title.replace(/\//g, "-");
+      const ext = (title.match(/\.(\w+)$/) || [])[1]?.toLowerCase();
+      let md = markdown;
+      if (ext && !MARKDOWN_EXTENSIONS.has(ext)) {
+        const fence = makeFence2(md);
+        md = fence + ext + "\n" + md + "\n" + fence;
+      }
+      md = replaceNestedAtPaths(md);
       const bodyHtml = processMarkdown(md);
       const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
       const backNav = `<div class="back-nav"><a href="../index.html">&larr; Back to ${escapeHtml(mainPageTitle)}</a></div>`;

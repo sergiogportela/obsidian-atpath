@@ -3,6 +3,22 @@
 
 const markdownit = require("markdown-it");
 
+// ─── CDN URLs (syntax highlighting & diagrams) ─────────────────────
+const HLJS_CSS  = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
+const HLJS_JS   = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js";
+const MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
+
+// ─── Helpers for code-file fencing ───────────────────────────────────
+
+function makeFence(content) {
+  let max = 2;
+  const runs = content.match(/`{3,}/g);
+  if (runs) for (const r of runs) { if (r.length > max) max = r.length; }
+  return "`".repeat(max + 1);
+}
+
+const MARKDOWN_EXTENSIONS = new Set(["md", "markdown"]);
+
 // ─── Markdown rendering ──────────────────────────────────────────────
 
 const mdi = markdownit({ html: true, linkify: true, typographer: true });
@@ -180,6 +196,9 @@ hr { border: none; border-top: 1px solid #444; margin: 1.5em 0; }
   border-bottom: 1px solid #444;
 }
 .back-nav a { font-size: 0.95em; }
+pre code.hljs { background: transparent; padding: 0; }
+.mermaid { text-align: center; margin: 1em 0; }
+.mermaid svg { max-width: 100%; }
 `;
 
 // ─── HTML scaffolding ────────────────────────────────────────────────
@@ -193,7 +212,9 @@ function topButtons(downloadBase64, downloadFilename, contactUrl, contactLabel) 
   if (contactUrl) {
     btns += `  <a class="contact-btn" href="${escapeHtml(contactUrl)}" target="_blank" rel="noopener">${escapeHtml(contactLabel || "Contact")}</a>\n`;
   }
-  btns += `  <a class="dl-btn" href="data:text/markdown;base64,${downloadBase64}" download="${escapeHtml(downloadFilename)}">Baixar .md</a>\n`;
+  const ext = (downloadFilename.match(/\.(\w+)$/) || [])[1] || "md";
+  const mime = ext === "md" ? "text/markdown" : "text/plain";
+  btns += `  <a class="dl-btn" href="data:${mime};base64,${downloadBase64}" download="${escapeHtml(downloadFilename)}">Baixar .${ext}</a>\n`;
   return `<div class="top-btns">\n${btns}</div>`;
 }
 
@@ -205,10 +226,32 @@ function htmlPage(title, bodyContent, extraHead) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>${CSS_TEMPLATE}</style>
+<link rel="stylesheet" href="${HLJS_CSS}">
 ${extraHead || ""}
 </head>
 <body>
 ${bodyContent}
+<script src="${HLJS_JS}"><\/script>
+<script src="${MERMAID_JS}"><\/script>
+<script>
+(function() {
+  try {
+    document.querySelectorAll('pre code').forEach(function(el) {
+      if (!el.classList.contains('language-mermaid')) hljs.highlightElement(el);
+    });
+  } catch(e) {}
+  try {
+    document.querySelectorAll('pre code.language-mermaid').forEach(function(el) {
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = el.textContent;
+      el.closest('pre').replaceWith(div);
+    });
+    mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+    mermaid.run();
+  } catch(e) {}
+})();
+<\/script>
 </body>
 </html>`;
 }
@@ -280,10 +323,18 @@ function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, c
 
 function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabel) {
   const mdBase64 = toBase64(markdown);
-  const downloadFilename = title.replace(/\//g, "-") + ".md";
+  const downloadFilename = title.replace(/\//g, "-");
+
+  // Wrap non-markdown files in a fenced code block so they render as <pre><code>
+  const ext = (title.match(/\.(\w+)$/) || [])[1]?.toLowerCase();
+  let md = markdown;
+  if (ext && !MARKDOWN_EXTENSIONS.has(ext)) {
+    const fence = makeFence(md);
+    md = fence + ext + "\n" + md + "\n" + fence;
+  }
 
   // Replace second-level @paths as inert spans
-  let md = replaceNestedAtPaths(markdown);
+  md = replaceNestedAtPaths(md);
 
   const bodyHtml = processMarkdown(md);
   const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
