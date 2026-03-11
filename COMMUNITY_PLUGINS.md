@@ -143,9 +143,9 @@ Link to my plugin: https://github.com/sergiogportela/obsidian-atpath
 
 ## Release Checklist
 - [x] I have tested the plugin on
-  - [x]  Windows
+  - [ ]  Windows
   - [x]  macOS
-  - [x]  Linux
+  - [ ]  Linux
   - [ ]  Android _(if applicable)_
   - [ ]  iOS _(if applicable)_
 - [x] My GitHub release contains all required files (as individual files, not just in the source.zip / source.tar.gz)
