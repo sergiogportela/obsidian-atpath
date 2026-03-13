@@ -70,8 +70,10 @@ function formatTokens(n) {
   return Math.round(n / 1000) + "k";
 }
 
-const { buildMainPage, buildAtPathPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
-const { deployToVercel, slugify } = require("./vercel-api");
+const { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
+const { deployToVercel, slugify, generateAuthSecret, provisionUpstashRedis } = require("./vercel-api");
+const { buildAuthShell } = require("./auth-shell-builder");
+const { buildAuthFunction } = require("./auth-function-template");
 
 const DEFAULT_SETTINGS = {
   showTokenCounts: true,
@@ -79,6 +81,12 @@ const DEFAULT_SETTINGS = {
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
+  resendApiKey: "",
+  upstashApiKey: "",
+  upstashRestUrl: "",
+  upstashRestToken: "",
+  publisherEmail: "",
+  publishedPages: {},
 };
 
 // ─── Helpers: open externally & context menu ─────────────────────────
@@ -449,7 +457,7 @@ class AtPathSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Publishing" });
+    new Setting(containerEl).setHeading().setName("Publishing");
 
     new Setting(containerEl)
       .setName("Vercel API token")
@@ -489,36 +497,102 @@ class AtPathSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl).setHeading().setName("Private publishing");
+
+    new Setting(containerEl)
+      .setName("Resend API key")
+      .setDesc("API key for email delivery. Get one free at resend.com/api-keys.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Enter key...")
+          .setValue(this.plugin.settings.resendApiKey)
+          .then((t) => { t.inputEl.type = "password"; })
+          .onChange(async (value) => {
+            this.plugin.settings.resendApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Upstash API key")
+      .setDesc("For session storage. Get a free key at console.upstash.com/account/api.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Enter key...")
+          .setValue(this.plugin.settings.upstashApiKey)
+          .then((t) => { t.inputEl.type = "password"; })
+          .onChange(async (value) => {
+            this.plugin.settings.upstashApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Publisher email")
+      .setDesc("Where access request notifications are sent.")
+      .addText((text) =>
+        text
+          .setPlaceholder("you@example.com")
+          .setValue(this.plugin.settings.publisherEmail)
+          .onChange(async (value) => {
+            this.plugin.settings.publisherEmail = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
   }
 }
 
 // ─── F) Publish modals ───────────────────────────────────────────────
 
 class PublishConfirmModal extends Modal {
-  constructor(app, publishData, onConfirm) {
+  constructor(app, publishData, onConfirm, onUnpublish) {
     super(app);
     this.publishData = publishData;
     this.onConfirm = onConfirm;
+    this.onUnpublish = onUnpublish;
   }
 
   onOpen() {
     const { contentEl } = this;
-    const { domain, atPathFiles, plugin } = this.publishData;
+    const { domain, atPathFiles, plugin, notePath } = this.publishData;
+    const pageState = plugin.settings.publishedPages[notePath];
 
     contentEl.createEl("h2", { text: "Publish to Vercel" });
 
-    new Setting(contentEl)
-      .setName("Domain")
-      .setDesc(domain);
+    // ── Status block ──
+    const statusEl = contentEl.createDiv({ cls: "atpath-publish-status" });
+    if (pageState && pageState.url && !pageState.isUnpublished) {
+      statusEl.createSpan({ cls: "atpath-status-dot atpath-status-dot--live" });
+      statusEl.appendText("Live at " + pageState.url);
+      if (pageState.isPrivate && pageState.approvedEmails) {
+        statusEl.appendText(" — Private (" + pageState.approvedEmails.length + " users)");
+      }
+    } else if (pageState && pageState.isUnpublished) {
+      statusEl.createSpan({ cls: "atpath-status-dot atpath-status-dot--unpublished" });
+      statusEl.appendText("Unpublished — " + pageState.url);
+    } else {
+      statusEl.appendText("Not published");
+      statusEl.createEl("br");
+      statusEl.createEl("small", { text: "Will publish to " + domain });
+    }
 
+    // ── Linked @path notes ──
     if (atPathFiles.length > 0) {
-      contentEl.createEl("h3", { text: "Linked @path notes (" + atPathFiles.length + ")" });
-      const list = contentEl.createEl("ul");
-      for (const f of atPathFiles) {
-        list.createEl("li", { text: "@" + f.relPath });
+      const heading = "Linked @path notes (" + atPathFiles.length + ")";
+      if (atPathFiles.length > 5) {
+        const details = contentEl.createEl("details");
+        details.createEl("summary", { text: heading });
+        const list = details.createEl("ul");
+        for (const f of atPathFiles) list.createEl("li", { text: "@" + f.relPath });
+      } else {
+        contentEl.createEl("p", { text: heading });
+        const list = contentEl.createEl("ul");
+        for (const f of atPathFiles) list.createEl("li", { text: "@" + f.relPath });
       }
     }
 
+    // ── Vercel token (only if not saved) ──
     let tokenValue = plugin.settings.vercelToken;
     if (!tokenValue) {
       new Setting(contentEl)
@@ -531,6 +605,7 @@ class PublishConfirmModal extends Modal {
         );
     }
 
+    // ── Compact toggle ──
     let compactLinks = true;
     new Setting(contentEl)
       .setName("Compact @path to file title?")
@@ -539,18 +614,178 @@ class PublishConfirmModal extends Modal {
         toggle.setValue(true).onChange((value) => { compactLinks = value; })
       );
 
-    new Setting(contentEl)
-      .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => this.close())
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Publish").setCta().onClick(() => {
-          if (!tokenValue) {
-            new Notice("Please enter a Vercel API token.");
+    // ── Private toggle ──
+    let isPrivate = (pageState && pageState.isPrivate) || false;
+
+    const privateToggleContainer = contentEl.createDiv();
+    new Setting(privateToggleContainer)
+      .setName("Require login to view")
+      .addToggle((toggle) =>
+        toggle.setValue(isPrivate).onChange((value) => {
+          isPrivate = value;
+          if (value) {
+            authSectionEl.removeClass("atpath-hidden");
+          } else {
+            authSectionEl.addClass("atpath-hidden");
+          }
+        })
+      );
+
+    const authSectionEl = contentEl.createDiv({ cls: "atpath-auth-section" + (isPrivate ? "" : " atpath-hidden") });
+
+    // ── Auth fields (inside authSectionEl) ──
+    let resendKey = plugin.settings.resendApiKey;
+    if (!resendKey) {
+      new Setting(authSectionEl)
+        .setName("Resend API key")
+        .addText((text) =>
+          text
+            .setPlaceholder("Enter key...")
+            .then((t) => { t.inputEl.type = "password"; })
+            .onChange((value) => { resendKey = value.trim(); })
+        );
+    }
+
+    let upstashKey = plugin.settings.upstashApiKey;
+    if (!upstashKey) {
+      new Setting(authSectionEl)
+        .setName("Upstash API key")
+        .setDesc("Get a free key at console.upstash.com/account/api")
+        .addText((text) =>
+          text
+            .setPlaceholder("Enter key...")
+            .then((t) => { t.inputEl.type = "password"; })
+            .onChange((value) => { upstashKey = value.trim(); })
+        );
+    }
+
+    let publisherEmail = plugin.settings.publisherEmail;
+    if (!publisherEmail) {
+      new Setting(authSectionEl)
+        .setName("Publisher email")
+        .addText((text) =>
+          text
+            .setPlaceholder("you@example.com")
+            .onChange((value) => { publisherEmail = value.trim(); })
+        );
+    }
+
+    const existingEmails = (pageState && pageState.approvedEmails) || [];
+    let approvedEmailsText = existingEmails.join("\n");
+    const emailsSetting = new Setting(authSectionEl)
+      .setName("Approved emails")
+      .setDesc("One email per line");
+    emailsSetting.controlEl.addClass("atpath-approved-emails");
+    const textarea = emailsSetting.controlEl.createEl("textarea", {
+      attr: { placeholder: "alice@example.com\nbob@example.com", rows: "4" },
+    });
+    textarea.value = approvedEmailsText;
+    textarea.addEventListener("input", () => { approvedEmailsText = textarea.value; });
+
+    // ── Buttons ──
+    const buttonSetting = new Setting(contentEl);
+
+    // Unpublish button (only if currently published)
+    if (pageState && pageState.url && !pageState.isUnpublished) {
+      buttonSetting.addButton((btn) =>
+        btn.setButtonText("Unpublish").setWarning().onClick(() => {
+          this.close();
+          new UnpublishConfirmModal(this.app, this.publishData, this.onUnpublish).open();
+        })
+      );
+    }
+
+    buttonSetting.addButton((btn) =>
+      btn.setButtonText("Cancel").onClick(() => this.close())
+    );
+
+    const publishLabel = (pageState && pageState.url) ? "Republish" : "Publish";
+    buttonSetting.addButton((btn) =>
+      btn.setButtonText(publishLabel).setCta().onClick(() => {
+        if (!tokenValue) {
+          new Notice("Please enter a Vercel API token.");
+          return;
+        }
+        if (isPrivate) {
+          const emails = approvedEmailsText.split("\n").map(e => e.trim().toLowerCase()).filter(Boolean);
+          if (emails.length === 0) {
+            new Notice("Add at least one approved email.");
             return;
           }
+          if (!resendKey) {
+            new Notice("Please enter a Resend API key.");
+            return;
+          }
+          if (!upstashKey && !plugin.settings.upstashRestUrl) {
+            new Notice("Please enter an Upstash API key.");
+            return;
+          }
+          if (!publisherEmail) {
+            new Notice("Please enter a publisher email.");
+            return;
+          }
+
           this.close();
-          this.onConfirm(tokenValue, compactLinks);
+          this.onConfirm(tokenValue, compactLinks, {
+            isPrivate: true,
+            approvedEmails: emails,
+            resendApiKey: resendKey,
+            upstashApiKey: upstashKey,
+            publisherEmail,
+          });
+        } else {
+          // Warn if switching from private to public
+          if (pageState && pageState.isPrivate) {
+            const confirmed = confirm("This will make the page publicly accessible. Continue?");
+            if (!confirmed) return;
+          }
+          this.close();
+          this.onConfirm(tokenValue, compactLinks, { isPrivate: false });
+        }
+      })
+    );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class UnpublishConfirmModal extends Modal {
+  constructor(app, publishData, onUnpublish) {
+    super(app);
+    this.publishData = publishData;
+    this.onUnpublish = onUnpublish;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const { plugin, notePath } = this.publishData;
+    const pageState = plugin.settings.publishedPages[notePath];
+    const url = pageState ? pageState.url : "";
+
+    contentEl.createEl("h2", { text: "Unpublish" });
+    contentEl.createEl("p", { text: url });
+    contentEl.createEl("p", {
+      text: "This will replace the content with a placeholder page. The URL will remain active. You can republish at any time.",
+    });
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Go back").onClick(() => {
+          this.close();
+          new PublishConfirmModal(
+            this.app,
+            this.publishData,
+            this.publishData._onConfirm,
+            this.publishData._onUnpublish
+          ).open();
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Unpublish").setWarning().onClick(() => {
+          this.close();
+          this.onUnpublish();
         })
       );
   }
@@ -590,9 +825,7 @@ class PublishResultModal extends Modal {
         );
     } else {
       contentEl.createEl("h2", { text: "Publish failed" });
-      const pre = contentEl.createEl("pre");
-      pre.style.whiteSpace = "pre-wrap";
-      pre.style.color = "#ff6b6b";
+      const pre = contentEl.createEl("pre", { cls: "atpath-error-pre" });
       pre.textContent = error;
     }
 
@@ -645,6 +878,12 @@ class AtPathPlugin extends Plugin {
       this.app.vault.on('rename', (file, oldPath) => {
         this.tokenCache.delete(oldPath);
         this.updateAtPathReferences(file, oldPath);
+        // Update publishedPages key if renamed
+        if (this.settings.publishedPages[oldPath]) {
+          this.settings.publishedPages[file.path] = this.settings.publishedPages[oldPath];
+          delete this.settings.publishedPages[oldPath];
+          this.saveSettings();
+        }
       })
     );
 
@@ -945,20 +1184,29 @@ class AtPathPlugin extends Plugin {
     if (!activeFile) { new Notice("No active file."); return; }
 
     const noteTitle = activeFile.basename;
+    const notePath = activeFile.path;
     const content = mdView.editor.getValue();
     const atPathFiles = await this.collectAtPathFiles(content, activeFile);
     const domain = slugify(noteTitle) + ".vercel.app";
 
-    const publishData = { noteTitle, content, activeFile, atPathFiles, domain, plugin: this };
+    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, domain, plugin: this };
 
-    new PublishConfirmModal(this.app, publishData, (token, compactLinks) => {
-      this._executePublish(publishData, { token, compactLinks });
-    }).open();
+    const onConfirm = (token, compactLinks, privateOpts) => {
+      this._executePublish(publishData, { token, compactLinks, ...privateOpts });
+    };
+    const onUnpublish = () => {
+      this._executeUnpublish(publishData);
+    };
+    // Store callbacks for UnpublishConfirmModal's "Go back"
+    publishData._onConfirm = onConfirm;
+    publishData._onUnpublish = onUnpublish;
+
+    new PublishConfirmModal(this.app, publishData, onConfirm, onUnpublish).open();
   }
 
   async _executePublish(publishData, opts) {
-    const { noteTitle, content, activeFile, atPathFiles } = publishData;
-    const { token, compactLinks } = opts;
+    const { noteTitle, notePath, content, activeFile, atPathFiles } = publishData;
+    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, publisherEmail } = opts;
     const { contactUrl, contactLabel } = this.settings;
 
     if (token !== this.settings.vercelToken) {
@@ -977,25 +1225,153 @@ class AtPathPlugin extends Plugin {
       let resolvedContent = await this.resolveLocalImages(content, activeFile);
       const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks);
 
-      const deployFiles = [{ path: "index.html", content: mainHtml }];
+      const subPages = {};
+      const deployFiles = [];
+
       for (const f of atPathFiles) {
         const slug = atPathSlugs.get(f.relPath);
-        let atContent = await this.resolveLocalImages(f.content, activeFile);
+        const atContent = await this.resolveLocalImages(f.content, activeFile);
         const pageTitle = f.relPath.split("/").pop();
         const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
-        deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+        if (isPrivate) {
+          subPages["atpath/" + slug] = pageHtml;
+        } else {
+          deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+        }
       }
 
-      const result = await deployToVercel(token, noteTitle, deployFiles);
+      let result;
+
+      if (isPrivate) {
+        // Save auth-related settings
+        if (resendApiKey) {
+          this.settings.resendApiKey = resendApiKey;
+        }
+        if (publisherEmail) {
+          this.settings.publisherEmail = publisherEmail;
+        }
+
+        // Auto-generate auth secret per-note if not already set
+        const pageState = this.settings.publishedPages[notePath] || {};
+        if (!pageState.authSecret) {
+          pageState.authSecret = generateAuthSecret();
+        }
+
+        // Auto-provision Upstash Redis if needed
+        if (!this.settings.upstashRestUrl && (upstashApiKey || this.settings.upstashApiKey)) {
+          const key = upstashApiKey || this.settings.upstashApiKey;
+          this.settings.upstashApiKey = key;
+          new Notice("Provisioning Upstash Redis database...");
+          const redis = await provisionUpstashRedis(key);
+          this.settings.upstashRestUrl = redis.restUrl;
+          this.settings.upstashRestToken = redis.restToken;
+        }
+
+        await this.saveSettings();
+
+        const siteUrl = "https://" + slugify(noteTitle) + ".vercel.app";
+        const pages = { main: mainHtml, ...subPages };
+
+        const authShellHtml = buildAuthShell(noteTitle);
+        const authFunctionSrc = buildAuthFunction({
+          approvedEmails,
+          pages,
+          noteTitle,
+          siteUrl,
+        });
+
+        const vercelJson = JSON.stringify({
+          rewrites: [
+            { source: "/api/auth", destination: "/api/auth" },
+            { source: "/((?!api/).*)", destination: "/index.html" },
+          ],
+        });
+
+        const privateFiles = [
+          { path: "index.html", content: authShellHtml },
+          { path: "api/auth.js", content: authFunctionSrc },
+          { path: "vercel.json", content: vercelJson },
+        ];
+
+        const envVars = {
+          RESEND_API_KEY: this.settings.resendApiKey,
+          AUTH_SECRET: pageState.authSecret,
+          PUBLISHER_EMAIL: this.settings.publisherEmail,
+          UPSTASH_REDIS_REST_URL: this.settings.upstashRestUrl,
+          UPSTASH_REDIS_REST_TOKEN: this.settings.upstashRestToken,
+        };
+
+        result = await deployToVercel(token, noteTitle, privateFiles, { isPrivate: true, envVars });
+
+        // Save page state
+        this.settings.publishedPages[notePath] = {
+          ...pageState,
+          url: result.url,
+          projectName: result.projectName,
+          publishedAt: new Date().toISOString(),
+          isPrivate: true,
+          isUnpublished: false,
+          approvedEmails,
+        };
+        await this.saveSettings();
+      } else {
+        // Public publish (existing path)
+        deployFiles.unshift({ path: "index.html", content: mainHtml });
+        result = await deployToVercel(token, noteTitle, deployFiles);
+
+        this.settings.publishedPages[notePath] = {
+          url: result.url,
+          projectName: result.projectName,
+          publishedAt: new Date().toISOString(),
+          isPrivate: false,
+          isUnpublished: false,
+          approvedEmails: [],
+        };
+        await this.saveSettings();
+      }
+
       this.publishBarEl.setText("Publish");
 
       const linkedCount = atPathFiles.length;
-      const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "");
+      const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "")
+        + (isPrivate ? " (private)" : "");
 
       new PublishResultModal(this.app, { success: true, url: result.url, summary }).open();
     } catch (e) {
       this.publishBarEl.setText("Publish");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
+    }
+  }
+
+  async _executeUnpublish(publishData) {
+    const { noteTitle, notePath } = publishData;
+    const plugin = this;
+    const token = plugin.settings.vercelToken;
+
+    if (!token) {
+      new Notice("No Vercel token configured.");
+      return;
+    }
+
+    plugin.publishBarEl.setText("Unpublishing...");
+
+    try {
+      const placeholderHtml = buildUnpublishedPage(noteTitle);
+      const files = [{ path: "index.html", content: placeholderHtml }];
+      await deployToVercel(token, noteTitle, files);
+
+      const pageState = plugin.settings.publishedPages[notePath] || {};
+      plugin.settings.publishedPages[notePath] = {
+        ...pageState,
+        isUnpublished: true,
+      };
+      await plugin.saveSettings();
+
+      plugin.publishBarEl.setText("Publish");
+      new Notice("Unpublished \"" + noteTitle + "\". You can republish at any time.");
+    } catch (e) {
+      plugin.publishBarEl.setText("Publish");
+      new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
     }
   }
 

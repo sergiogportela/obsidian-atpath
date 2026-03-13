@@ -344,4 +344,14 @@ function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabe
   return htmlPage(title, `${buttons}\n<div class="container">\n${backNav}\n${bodyHtml}\n</div>`);
 }
 
-module.exports = { buildMainPage, buildAtPathPage, slugifyPath, AT_PATH_RE };
+function buildUnpublishedPage(noteTitle) {
+  const bodyContent = `<div class="container" style="display:flex;justify-content:center;align-items:center;min-height:80vh">
+<div style="text-align:center">
+<h1>${escapeHtml(noteTitle)}</h1>
+<p style="color:#888;font-size:1.1em">Content unpublished by owner.</p>
+</div>
+</div>`;
+  return htmlPage(noteTitle, bodyContent);
+}
+
+module.exports = { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE, CSS_TEMPLATE };

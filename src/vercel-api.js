@@ -78,9 +78,70 @@ async function ensureProject(token, slug) {
   }
 }
 
-async function deployToVercel(token, noteTitle, files) {
+async function setEnvVars(token, projectSlug, vars) {
+  // List existing env vars
+  const { data: existing } = await apiCall(token, "GET", `/v9/projects/${projectSlug}/env`);
+  const envList = (existing && existing.envs) || [];
+  const envMap = {};
+  for (const e of envList) {
+    envMap[e.key] = e.id;
+  }
+
+  for (const [key, value] of Object.entries(vars)) {
+    if (envMap[key]) {
+      // Update existing
+      await apiCall(token, "PATCH", `/v9/projects/${projectSlug}/env/${envMap[key]}`, {
+        value,
+        type: "encrypted",
+        target: ["production"],
+      });
+    } else {
+      // Create new
+      await apiCall(token, "POST", `/v10/projects/${projectSlug}/env`, {
+        key,
+        value,
+        type: "encrypted",
+        target: ["production"],
+      });
+    }
+  }
+}
+
+function generateAuthSecret() {
+  return require("crypto").randomBytes(32).toString("hex");
+}
+
+async function provisionUpstashRedis(upstashApiKey) {
+  const resp = await requestUrl({
+    url: "https://api.upstash.com/v2/redis/database",
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + upstashApiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "atpath-auth",
+      region: "global",
+      tls: true,
+    }),
+  });
+  const data = resp.json;
+  return {
+    endpoint: data.endpoint,
+    password: data.password,
+    restUrl: "https://" + data.endpoint,
+    restToken: data.rest_token,
+  };
+}
+
+async function deployToVercel(token, noteTitle, files, opts) {
   const slug = slugify(noteTitle);
   const projectName = await ensureProject(token, slug);
+
+  // Set environment variables for private pages
+  if (opts && opts.isPrivate && opts.envVars) {
+    await setEnvVars(token, projectName, opts.envVars);
+  }
 
   // Prepare file entries for the deployment API
   const fileEntries = files.map(f => ({
@@ -99,4 +160,4 @@ async function deployToVercel(token, noteTitle, files) {
   return { url: "https://" + projectName + ".vercel.app", projectName };
 }
 
-module.exports = { slugify, deployToVercel };
+module.exports = { slugify, deployToVercel, setEnvVars, generateAuthSecret, provisionUpstashRedis };

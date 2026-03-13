@@ -26,3 +26,39 @@
   font-style: italic;
   pointer-events: none;
 }
+
+.atpath-hidden { display: none; }
+
+/* Status block in publish modal */
+.atpath-publish-status { font-size: 0.9em; margin-bottom: 0.75em; }
+.atpath-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.atpath-status-dot--live { background-color: var(--color-green); }
+.atpath-status-dot--unpublished { background-color: var(--color-orange); }
+
+/* Auth section container (bordered, grouped) */
+.atpath-auth-section {
+  border-left: 2px solid var(--interactive-accent);
+  padding-left: 1em;
+  margin-top: 0.5em;
+}
+
+/* Approved emails textarea */
+.atpath-approved-emails textarea {
+  width: 100%;
+  min-height: 80px;
+  font-family: monospace;
+  font-size: 0.85em;
+}
+
+/* Fix existing PublishResultModal inline styles (compliance) */
+.atpath-error-pre {
+  white-space: pre-wrap;
+  color: var(--text-error);
+}
