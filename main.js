@@ -7666,7 +7666,7 @@ var require_vercel_api = __commonJS({
       const resp = await requestUrl(options);
       return { status: resp.status, data: resp.json };
     }
-    async function ensureProject(token, slug) {
+    async function ensureProject2(token, slug) {
       try {
         const { status, data } = await apiCall(token, "GET", `/v9/projects/${slug}`);
         if (status === 200 && data && data.id) {
@@ -7749,7 +7749,7 @@ var require_vercel_api = __commonJS({
     }
     async function deployToVercel2(token, noteTitle, files, opts) {
       const slug = slugify2(noteTitle);
-      const projectName = await ensureProject(token, slug);
+      const projectName = await ensureProject2(token, slug);
       if (opts && opts.isPrivate && opts.envVars) {
         await setEnvVars(token, projectName, opts.envVars);
       }
@@ -7766,7 +7766,7 @@ var require_vercel_api = __commonJS({
       });
       return { url: "https://" + projectName + ".vercel.app", projectName };
     }
-    module2.exports = { slugify: slugify2, deployToVercel: deployToVercel2, setEnvVars, generateAuthSecret: generateAuthSecret2, provisionUpstashRedis: provisionUpstashRedis2 };
+    module2.exports = { slugify: slugify2, ensureProject: ensureProject2, deployToVercel: deployToVercel2, setEnvVars, generateAuthSecret: generateAuthSecret2, provisionUpstashRedis: provisionUpstashRedis2 };
   }
 });
 
@@ -8203,15 +8203,23 @@ function confirmationPage(title, message) {
 // --- Handler ---
 
 module.exports = async function handler(req, res) {
-  const action = req.query && req.query.action;
   const secret = process.env.AUTH_SECRET;
+
+  // For POST requests, action may be in JSON body instead of query string
+  let action = req.query && req.query.action;
+  let parsedBody = null;
+  if (!action && req.method === "POST") {
+    parsedBody = await parseBody(req);
+    action = parsedBody.action;
+  }
 
   // ---- send-link (POST) ----
   if (action === "send-link" && req.method === "POST") {
-    const body = await parseBody(req);
+    const body = parsedBody || await parseBody(req);
     const email = (body.email || "").toLowerCase().trim();
     const approved = APPROVED_EMAILS.includes(email);
 
+    const start = Date.now();
     if (approved) {
       const tokenId = crypto.randomUUID();
       await redisSet("link:" + tokenId, "1", 300);
@@ -8228,8 +8236,13 @@ module.exports = async function handler(req, res) {
           "<p>This link expires in 5 minutes and can only be used once.</p>"
       );
     } else {
-      // Constant-time: mimic same work even if email is not approved
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // Pad both paths to consistent timing to prevent email enumeration
+    const elapsed = Date.now() - start;
+    const minTime = 1500;
+    if (elapsed < minTime) {
+      await new Promise((r) => setTimeout(r, minTime - elapsed));
     }
 
     res.status(200).json({ status: approved ? "sent" : "not_approved" });
@@ -8266,7 +8279,7 @@ module.exports = async function handler(req, res) {
 
   // ---- request-access (POST) ----
   if (action === "request-access" && req.method === "POST") {
-    const body = await parseBody(req);
+    const body = parsedBody || await parseBody(req);
     const email = (body.email || "").toLowerCase().trim();
     const publisherEmail = process.env.PUBLISHER_EMAIL;
 
@@ -8318,11 +8331,11 @@ module.exports = async function handler(req, res) {
     }
     await redisDel("approval:" + payload.jti);
 
-    // Send magic link to the approved reader (30-day session)
+    // Send magic link to the approved reader (link expires in 5 min, session lasts 30 days)
     const tokenId = crypto.randomUUID();
-    await redisSet("link:" + tokenId, "30d", 604800);
+    await redisSet("link:" + tokenId, "30d", 300);
     const magicJWT = signJWT(
-      { sub: email, jti: tokenId, longSession: true, exp: Math.floor(Date.now() / 1000) + 604800 },
+      { sub: email, jti: tokenId, longSession: true, exp: Math.floor(Date.now() / 1000) + 300 },
       secret
     );
     const magicLink = SITE_URL + "/api/auth?action=access&token=" + magicJWT;
@@ -8332,7 +8345,7 @@ module.exports = async function handler(req, res) {
       "You've been approved for " + NOTE_TITLE,
       "<p>Your access request has been approved.</p>" +
         '<p><a href="' + magicLink + '">Click here to access ' + NOTE_TITLE + "</a></p>" +
-        "<p>This link expires in 7 days.</p>"
+        "<p>This link expires in 5 minutes.</p>"
     );
 
     res.status(200).send(
@@ -8549,7 +8562,7 @@ function formatTokens(n) {
   return Math.round(n / 1e3) + "k";
 }
 var { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require_html_builder();
-var { deployToVercel, slugify, generateAuthSecret, provisionUpstashRedis } = require_vercel_api();
+var { deployToVercel, ensureProject, slugify, generateAuthSecret, provisionUpstashRedis } = require_vercel_api();
 var { buildAuthShell } = require_auth_shell_builder();
 var { buildAuthFunction } = require_auth_function_template();
 var DEFAULT_SETTINGS = {
@@ -9508,7 +9521,8 @@ var AtPathPlugin = class extends Plugin {
           this.settings.upstashRestToken = redis.restToken;
         }
         await this.saveSettings();
-        const siteUrl = "https://" + slugify(noteTitle) + ".vercel.app";
+        const projectName = await ensureProject(token, slugify(noteTitle));
+        const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
         const authShellHtml = buildAuthShell(noteTitle);
         const authFunctionSrc = buildAuthFunction({
@@ -9580,8 +9594,9 @@ var AtPathPlugin = class extends Plugin {
     try {
       const placeholderHtml = buildUnpublishedPage(noteTitle);
       const files = [{ path: "index.html", content: placeholderHtml }];
-      await deployToVercel(token, noteTitle, files);
       const pageState = plugin.settings.publishedPages[notePath] || {};
+      const deployName = pageState.projectName || noteTitle;
+      await deployToVercel(token, deployName, files);
       plugin.settings.publishedPages[notePath] = {
         ...pageState,
         isUnpublished: true

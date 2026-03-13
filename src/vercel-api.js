@@ -160,4 +160,4 @@ async function deployToVercel(token, noteTitle, files, opts) {
   return { url: "https://" + projectName + ".vercel.app", projectName };
 }
 
-module.exports = { slugify, deployToVercel, setEnvVars, generateAuthSecret, provisionUpstashRedis };
+module.exports = { slugify, ensureProject, deployToVercel, setEnvVars, generateAuthSecret, provisionUpstashRedis };

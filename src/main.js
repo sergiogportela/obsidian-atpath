@@ -71,7 +71,7 @@ function formatTokens(n) {
 }
 
 const { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
-const { deployToVercel, slugify, generateAuthSecret, provisionUpstashRedis } = require("./vercel-api");
+const { deployToVercel, ensureProject, slugify, generateAuthSecret, provisionUpstashRedis } = require("./vercel-api");
 const { buildAuthShell } = require("./auth-shell-builder");
 const { buildAuthFunction } = require("./auth-function-template");
 
@@ -1269,7 +1269,9 @@ class AtPathPlugin extends Plugin {
 
         await this.saveSettings();
 
-        const siteUrl = "https://" + slugify(noteTitle) + ".vercel.app";
+        // Resolve the actual project name (may have collision suffix)
+        const projectName = await ensureProject(token, slugify(noteTitle));
+        const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
 
         const authShellHtml = buildAuthShell(noteTitle);
@@ -1358,9 +1360,11 @@ class AtPathPlugin extends Plugin {
     try {
       const placeholderHtml = buildUnpublishedPage(noteTitle);
       const files = [{ path: "index.html", content: placeholderHtml }];
-      await deployToVercel(token, noteTitle, files);
-
+      // Use stored projectName to handle collision-suffixed names
       const pageState = plugin.settings.publishedPages[notePath] || {};
+      const deployName = pageState.projectName || noteTitle;
+      await deployToVercel(token, deployName, files);
+
       plugin.settings.publishedPages[notePath] = {
         ...pageState,
         isUnpublished: true,

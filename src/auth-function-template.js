@@ -188,15 +188,23 @@ function confirmationPage(title, message) {
 // --- Handler ---
 
 module.exports = async function handler(req, res) {
-  const action = req.query && req.query.action;
   const secret = process.env.AUTH_SECRET;
+
+  // For POST requests, action may be in JSON body instead of query string
+  let action = req.query && req.query.action;
+  let parsedBody = null;
+  if (!action && req.method === "POST") {
+    parsedBody = await parseBody(req);
+    action = parsedBody.action;
+  }
 
   // ---- send-link (POST) ----
   if (action === "send-link" && req.method === "POST") {
-    const body = await parseBody(req);
+    const body = parsedBody || await parseBody(req);
     const email = (body.email || "").toLowerCase().trim();
     const approved = APPROVED_EMAILS.includes(email);
 
+    const start = Date.now();
     if (approved) {
       const tokenId = crypto.randomUUID();
       await redisSet("link:" + tokenId, "1", 300);
@@ -213,8 +221,13 @@ module.exports = async function handler(req, res) {
           "<p>This link expires in 5 minutes and can only be used once.</p>"
       );
     } else {
-      // Constant-time: mimic same work even if email is not approved
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // Pad both paths to consistent timing to prevent email enumeration
+    const elapsed = Date.now() - start;
+    const minTime = 1500;
+    if (elapsed < minTime) {
+      await new Promise((r) => setTimeout(r, minTime - elapsed));
     }
 
     res.status(200).json({ status: approved ? "sent" : "not_approved" });
@@ -251,7 +264,7 @@ module.exports = async function handler(req, res) {
 
   // ---- request-access (POST) ----
   if (action === "request-access" && req.method === "POST") {
-    const body = await parseBody(req);
+    const body = parsedBody || await parseBody(req);
     const email = (body.email || "").toLowerCase().trim();
     const publisherEmail = process.env.PUBLISHER_EMAIL;
 
@@ -303,11 +316,11 @@ module.exports = async function handler(req, res) {
     }
     await redisDel("approval:" + payload.jti);
 
-    // Send magic link to the approved reader (30-day session)
+    // Send magic link to the approved reader (link expires in 5 min, session lasts 30 days)
     const tokenId = crypto.randomUUID();
-    await redisSet("link:" + tokenId, "30d", 604800);
+    await redisSet("link:" + tokenId, "30d", 300);
     const magicJWT = signJWT(
-      { sub: email, jti: tokenId, longSession: true, exp: Math.floor(Date.now() / 1000) + 604800 },
+      { sub: email, jti: tokenId, longSession: true, exp: Math.floor(Date.now() / 1000) + 300 },
       secret
     );
     const magicLink = SITE_URL + "/api/auth?action=access&token=" + magicJWT;
@@ -317,7 +330,7 @@ module.exports = async function handler(req, res) {
       "You've been approved for " + NOTE_TITLE,
       "<p>Your access request has been approved.</p>" +
         '<p><a href="' + magicLink + '">Click here to access ' + NOTE_TITLE + "</a></p>" +
-        "<p>This link expires in 7 days.</p>"
+        "<p>This link expires in 5 minutes.</p>"
     );
 
     res.status(200).send(
