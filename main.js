@@ -7653,6 +7653,23 @@ var require_vercel_api = __commonJS({
       }
       return Math.abs(hash).toString(16).slice(0, 4);
     }
+    function buildRequestError(service, method, path, status, detail) {
+      let message = service + " " + method + " " + path + " failed";
+      if (status != null) message += ", status " + status;
+      if (detail) message += ": " + detail;
+      const err = new Error(message);
+      if (status != null) err.status = status;
+      return err;
+    }
+    function extractErrorDetail(data, text) {
+      if (data && typeof data === "object") {
+        if (typeof data.error === "string") return data.error;
+        if (data.error && typeof data.error.message === "string") return data.error.message;
+        if (typeof data.message === "string") return data.message;
+      }
+      if (typeof text === "string" && text.trim()) return text.trim();
+      return "";
+    }
     async function apiCall(token, method, path, body) {
       const options = {
         url: VERCEL_API + path,
@@ -7663,7 +7680,16 @@ var require_vercel_api = __commonJS({
         }
       };
       if (body) options.body = JSON.stringify(body);
-      const resp = await requestUrl(options);
+      let resp;
+      try {
+        resp = await requestUrl(options);
+      } catch (e) {
+        const status = typeof e.status === "number" ? e.status : null;
+        throw buildRequestError("Vercel API", method, path, status, e.message || "");
+      }
+      if (resp.status >= 400) {
+        throw buildRequestError("Vercel API", method, path, resp.status, extractErrorDetail(resp.json, resp.text));
+      }
       return { status: resp.status, data: resp.json };
     }
     async function ensureProject2(token, slug) {
@@ -7725,31 +7751,44 @@ var require_vercel_api = __commonJS({
     function generateAuthSecret2() {
       return require("crypto").randomBytes(32).toString("hex");
     }
-    async function provisionUpstashRedis2(upstashApiKey) {
-      const resp = await requestUrl({
-        url: "https://api.upstash.com/v2/redis/database",
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + upstashApiKey,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          name: "atpath-auth",
-          region: "global",
-          tls: true
-        })
-      });
+    async function provisionUpstashRedis2(upstashEmail, upstashApiKey) {
+      if (!upstashEmail) {
+        throw new Error("Upstash account email is required to provision Redis.");
+      }
+      const basicAuth = Buffer.from(upstashEmail + ":" + upstashApiKey).toString("base64");
+      let resp;
+      try {
+        resp = await requestUrl({
+          url: "https://api.upstash.com/v2/redis/database",
+          method: "POST",
+          headers: {
+            Authorization: "Basic " + basicAuth,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            database_name: "atpath-auth",
+            region: "global",
+            primary_region: "us-east-1",
+            tls: true
+          })
+        });
+      } catch (e) {
+        const status = typeof e.status === "number" ? e.status : null;
+        throw buildRequestError("Upstash API", "POST", "/v2/redis/database", status, e.message || "");
+      }
+      if (resp.status >= 400) {
+        throw buildRequestError("Upstash API", "POST", "/v2/redis/database", resp.status, extractErrorDetail(resp.json, resp.text));
+      }
       const data = resp.json;
       return {
         endpoint: data.endpoint,
         password: data.password,
-        restUrl: "https://" + data.endpoint,
+        restUrl: data.rest_url || "https://" + data.endpoint,
         restToken: data.rest_token
       };
     }
     async function deployToVercel2(token, noteTitle, files, opts) {
-      const slug = slugify2(noteTitle);
-      const projectName = await ensureProject2(token, slug);
+      const projectName = opts && opts.projectName || await ensureProject2(token, slugify2(noteTitle));
       if (opts && opts.isPrivate && opts.envVars) {
         await setEnvVars(token, projectName, opts.envVars);
       }
@@ -8573,6 +8612,7 @@ var DEFAULT_SETTINGS = {
   contactLabel: "Entre em contato",
   resendApiKey: "",
   upstashApiKey: "",
+  upstashEmail: "",
   upstashRestUrl: "",
   upstashRestToken: "",
   publisherEmail: "",
@@ -8908,6 +8948,12 @@ var AtPathSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new Setting(containerEl).setName("Upstash account email").setDesc("Used with the Upstash API key when auto-provisioning Redis.").addText(
+      (text) => text.setPlaceholder("you@example.com").setValue(this.plugin.settings.upstashEmail).onChange(async (value) => {
+        this.plugin.settings.upstashEmail = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
     new Setting(containerEl).setName("Publisher email").setDesc("Where access request notifications are sent.").addText(
       (text) => text.setPlaceholder("you@example.com").setValue(this.plugin.settings.publisherEmail).onChange(async (value) => {
         this.plugin.settings.publisherEmail = value.trim();
@@ -9005,6 +9051,14 @@ var PublishConfirmModal = class extends Modal {
         })
       );
     }
+    let upstashEmail = plugin.settings.upstashEmail || plugin.settings.publisherEmail;
+    if (!plugin.settings.upstashEmail) {
+      new Setting(authSectionEl).setName("Upstash account email").setDesc("Used only to auto-provision Redis via the Upstash Developer API").addText(
+        (text) => text.setPlaceholder("you@example.com").setValue(upstashEmail).onChange((value) => {
+          upstashEmail = value.trim();
+        })
+      );
+    }
     let publisherEmail = plugin.settings.publisherEmail;
     if (!publisherEmail) {
       new Setting(authSectionEl).setName("Publisher email").addText(
@@ -9057,6 +9111,10 @@ var PublishConfirmModal = class extends Modal {
             new Notice("Please enter an Upstash API key.");
             return;
           }
+          if (!plugin.settings.upstashRestUrl && !(upstashEmail || publisherEmail)) {
+            new Notice("Please enter your Upstash account email.");
+            return;
+          }
           if (!publisherEmail) {
             new Notice("Please enter a publisher email.");
             return;
@@ -9067,6 +9125,7 @@ var PublishConfirmModal = class extends Modal {
             approvedEmails: emails,
             resendApiKey: resendKey,
             upstashApiKey: upstashKey,
+            upstashEmail: upstashEmail || publisherEmail,
             publisherEmail
           });
         } else {
@@ -9459,7 +9518,8 @@ var AtPathPlugin = class extends Plugin {
     const notePath = activeFile.path;
     const content = mdView.editor.getValue();
     const atPathFiles = await this.collectAtPathFiles(content, activeFile);
-    const domain = slugify(noteTitle) + ".vercel.app";
+    const existingPageState = this.settings.publishedPages[notePath];
+    const domain = (existingPageState && existingPageState.projectName || slugify(noteTitle)) + ".vercel.app";
     const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, domain, plugin: this };
     const onConfirm = (token, compactLinks, privateOpts) => {
       this._executePublish(publishData, { token, compactLinks, ...privateOpts });
@@ -9473,7 +9533,7 @@ var AtPathPlugin = class extends Plugin {
   }
   async _executePublish(publishData, opts) {
     const { noteTitle, notePath, content, activeFile, atPathFiles } = publishData;
-    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, publisherEmail } = opts;
+    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, upstashEmail, publisherEmail } = opts;
     const { contactUrl, contactLabel } = this.settings;
     if (token !== this.settings.vercelToken) {
       this.settings.vercelToken = token;
@@ -9501,6 +9561,8 @@ var AtPathPlugin = class extends Plugin {
         }
       }
       let result;
+      const pageState = this.settings.publishedPages[notePath] || {};
+      const projectName = pageState.projectName || await ensureProject(token, slugify(noteTitle));
       if (isPrivate) {
         if (resendApiKey) {
           this.settings.resendApiKey = resendApiKey;
@@ -9508,20 +9570,22 @@ var AtPathPlugin = class extends Plugin {
         if (publisherEmail) {
           this.settings.publisherEmail = publisherEmail;
         }
-        const pageState = this.settings.publishedPages[notePath] || {};
+        if (upstashEmail) {
+          this.settings.upstashEmail = upstashEmail;
+        }
         if (!pageState.authSecret) {
           pageState.authSecret = generateAuthSecret();
         }
         if (!this.settings.upstashRestUrl && (upstashApiKey || this.settings.upstashApiKey)) {
           const key = upstashApiKey || this.settings.upstashApiKey;
+          const email = upstashEmail || this.settings.upstashEmail || this.settings.publisherEmail;
           this.settings.upstashApiKey = key;
           new Notice("Provisioning Upstash Redis database...");
-          const redis = await provisionUpstashRedis(key);
+          const redis = await provisionUpstashRedis(email, key);
           this.settings.upstashRestUrl = redis.restUrl;
           this.settings.upstashRestToken = redis.restToken;
         }
         await this.saveSettings();
-        const projectName = await ensureProject(token, slugify(noteTitle));
         const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
         const authShellHtml = buildAuthShell(noteTitle);
@@ -9549,7 +9613,11 @@ var AtPathPlugin = class extends Plugin {
           UPSTASH_REDIS_REST_URL: this.settings.upstashRestUrl,
           UPSTASH_REDIS_REST_TOKEN: this.settings.upstashRestToken
         };
-        result = await deployToVercel(token, noteTitle, privateFiles, { isPrivate: true, envVars });
+        result = await deployToVercel(token, noteTitle, privateFiles, {
+          isPrivate: true,
+          envVars,
+          projectName
+        });
         this.settings.publishedPages[notePath] = {
           ...pageState,
           url: result.url,
@@ -9562,8 +9630,9 @@ var AtPathPlugin = class extends Plugin {
         await this.saveSettings();
       } else {
         deployFiles.unshift({ path: "index.html", content: mainHtml });
-        result = await deployToVercel(token, noteTitle, deployFiles);
+        result = await deployToVercel(token, noteTitle, deployFiles, { projectName });
         this.settings.publishedPages[notePath] = {
+          ...pageState,
           url: result.url,
           projectName: result.projectName,
           publishedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -9596,7 +9665,7 @@ var AtPathPlugin = class extends Plugin {
       const files = [{ path: "index.html", content: placeholderHtml }];
       const pageState = plugin.settings.publishedPages[notePath] || {};
       const deployName = pageState.projectName || noteTitle;
-      await deployToVercel(token, deployName, files);
+      await deployToVercel(token, noteTitle, files, { projectName: deployName });
       plugin.settings.publishedPages[notePath] = {
         ...pageState,
         isUnpublished: true

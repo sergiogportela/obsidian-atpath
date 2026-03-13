@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS = {
   contactLabel: "Entre em contato",
   resendApiKey: "",
   upstashApiKey: "",
+  upstashEmail: "",
   upstashRestUrl: "",
   upstashRestToken: "",
   publisherEmail: "",
@@ -529,6 +530,19 @@ class AtPathSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Upstash account email")
+      .setDesc("Used with the Upstash API key when auto-provisioning Redis.")
+      .addText((text) =>
+        text
+          .setPlaceholder("you@example.com")
+          .setValue(this.plugin.settings.upstashEmail)
+          .onChange(async (value) => {
+            this.plugin.settings.upstashEmail = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Publisher email")
       .setDesc("Where access request notifications are sent.")
       .addText((text) =>
@@ -659,6 +673,19 @@ class PublishConfirmModal extends Modal {
         );
     }
 
+    let upstashEmail = plugin.settings.upstashEmail || plugin.settings.publisherEmail;
+    if (!plugin.settings.upstashEmail) {
+      new Setting(authSectionEl)
+        .setName("Upstash account email")
+        .setDesc("Used only to auto-provision Redis via the Upstash Developer API")
+        .addText((text) =>
+          text
+            .setPlaceholder("you@example.com")
+            .setValue(upstashEmail)
+            .onChange((value) => { upstashEmail = value.trim(); })
+        );
+    }
+
     let publisherEmail = plugin.settings.publisherEmail;
     if (!publisherEmail) {
       new Setting(authSectionEl)
@@ -720,6 +747,10 @@ class PublishConfirmModal extends Modal {
             new Notice("Please enter an Upstash API key.");
             return;
           }
+          if (!plugin.settings.upstashRestUrl && !(upstashEmail || publisherEmail)) {
+            new Notice("Please enter your Upstash account email.");
+            return;
+          }
           if (!publisherEmail) {
             new Notice("Please enter a publisher email.");
             return;
@@ -731,6 +762,7 @@ class PublishConfirmModal extends Modal {
             approvedEmails: emails,
             resendApiKey: resendKey,
             upstashApiKey: upstashKey,
+            upstashEmail: upstashEmail || publisherEmail,
             publisherEmail,
           });
         } else {
@@ -1187,7 +1219,8 @@ class AtPathPlugin extends Plugin {
     const notePath = activeFile.path;
     const content = mdView.editor.getValue();
     const atPathFiles = await this.collectAtPathFiles(content, activeFile);
-    const domain = slugify(noteTitle) + ".vercel.app";
+    const existingPageState = this.settings.publishedPages[notePath];
+    const domain = ((existingPageState && existingPageState.projectName) || slugify(noteTitle)) + ".vercel.app";
 
     const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, domain, plugin: this };
 
@@ -1206,7 +1239,7 @@ class AtPathPlugin extends Plugin {
 
   async _executePublish(publishData, opts) {
     const { noteTitle, notePath, content, activeFile, atPathFiles } = publishData;
-    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, publisherEmail } = opts;
+    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, upstashEmail, publisherEmail } = opts;
     const { contactUrl, contactLabel } = this.settings;
 
     if (token !== this.settings.vercelToken) {
@@ -1241,6 +1274,8 @@ class AtPathPlugin extends Plugin {
       }
 
       let result;
+      const pageState = this.settings.publishedPages[notePath] || {};
+      const projectName = pageState.projectName || await ensureProject(token, slugify(noteTitle));
 
       if (isPrivate) {
         // Save auth-related settings
@@ -1250,9 +1285,11 @@ class AtPathPlugin extends Plugin {
         if (publisherEmail) {
           this.settings.publisherEmail = publisherEmail;
         }
+        if (upstashEmail) {
+          this.settings.upstashEmail = upstashEmail;
+        }
 
         // Auto-generate auth secret per-note if not already set
-        const pageState = this.settings.publishedPages[notePath] || {};
         if (!pageState.authSecret) {
           pageState.authSecret = generateAuthSecret();
         }
@@ -1260,17 +1297,16 @@ class AtPathPlugin extends Plugin {
         // Auto-provision Upstash Redis if needed
         if (!this.settings.upstashRestUrl && (upstashApiKey || this.settings.upstashApiKey)) {
           const key = upstashApiKey || this.settings.upstashApiKey;
+          const email = upstashEmail || this.settings.upstashEmail || this.settings.publisherEmail;
           this.settings.upstashApiKey = key;
           new Notice("Provisioning Upstash Redis database...");
-          const redis = await provisionUpstashRedis(key);
+          const redis = await provisionUpstashRedis(email, key);
           this.settings.upstashRestUrl = redis.restUrl;
           this.settings.upstashRestToken = redis.restToken;
         }
 
         await this.saveSettings();
 
-        // Resolve the actual project name (may have collision suffix)
-        const projectName = await ensureProject(token, slugify(noteTitle));
         const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
 
@@ -1303,7 +1339,11 @@ class AtPathPlugin extends Plugin {
           UPSTASH_REDIS_REST_TOKEN: this.settings.upstashRestToken,
         };
 
-        result = await deployToVercel(token, noteTitle, privateFiles, { isPrivate: true, envVars });
+        result = await deployToVercel(token, noteTitle, privateFiles, {
+          isPrivate: true,
+          envVars,
+          projectName,
+        });
 
         // Save page state
         this.settings.publishedPages[notePath] = {
@@ -1319,9 +1359,10 @@ class AtPathPlugin extends Plugin {
       } else {
         // Public publish (existing path)
         deployFiles.unshift({ path: "index.html", content: mainHtml });
-        result = await deployToVercel(token, noteTitle, deployFiles);
+        result = await deployToVercel(token, noteTitle, deployFiles, { projectName });
 
         this.settings.publishedPages[notePath] = {
+          ...pageState,
           url: result.url,
           projectName: result.projectName,
           publishedAt: new Date().toISOString(),
@@ -1363,7 +1404,7 @@ class AtPathPlugin extends Plugin {
       // Use stored projectName to handle collision-suffixed names
       const pageState = plugin.settings.publishedPages[notePath] || {};
       const deployName = pageState.projectName || noteTitle;
-      await deployToVercel(token, deployName, files);
+      await deployToVercel(token, noteTitle, files, { projectName: deployName });
 
       plugin.settings.publishedPages[notePath] = {
         ...pageState,

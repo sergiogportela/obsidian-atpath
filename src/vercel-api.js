@@ -24,6 +24,25 @@ function sha1Hex(str) {
   return Math.abs(hash).toString(16).slice(0, 4);
 }
 
+function buildRequestError(service, method, path, status, detail) {
+  let message = service + " " + method + " " + path + " failed";
+  if (status != null) message += ", status " + status;
+  if (detail) message += ": " + detail;
+  const err = new Error(message);
+  if (status != null) err.status = status;
+  return err;
+}
+
+function extractErrorDetail(data, text) {
+  if (data && typeof data === "object") {
+    if (typeof data.error === "string") return data.error;
+    if (data.error && typeof data.error.message === "string") return data.error.message;
+    if (typeof data.message === "string") return data.message;
+  }
+  if (typeof text === "string" && text.trim()) return text.trim();
+  return "";
+}
+
 async function apiCall(token, method, path, body) {
   const options = {
     url: VERCEL_API + path,
@@ -35,7 +54,16 @@ async function apiCall(token, method, path, body) {
   };
   if (body) options.body = JSON.stringify(body);
 
-  const resp = await requestUrl(options);
+  let resp;
+  try {
+    resp = await requestUrl(options);
+  } catch (e) {
+    const status = typeof e.status === "number" ? e.status : null;
+    throw buildRequestError("Vercel API", method, path, status, e.message || "");
+  }
+  if (resp.status >= 400) {
+    throw buildRequestError("Vercel API", method, path, resp.status, extractErrorDetail(resp.json, resp.text));
+  }
   return { status: resp.status, data: resp.json };
 }
 
@@ -111,32 +139,45 @@ function generateAuthSecret() {
   return require("crypto").randomBytes(32).toString("hex");
 }
 
-async function provisionUpstashRedis(upstashApiKey) {
-  const resp = await requestUrl({
-    url: "https://api.upstash.com/v2/redis/database",
-    method: "POST",
-    headers: {
-      Authorization: "Bearer " + upstashApiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: "atpath-auth",
-      region: "global",
-      tls: true,
-    }),
-  });
+async function provisionUpstashRedis(upstashEmail, upstashApiKey) {
+  if (!upstashEmail) {
+    throw new Error("Upstash account email is required to provision Redis.");
+  }
+  const basicAuth = Buffer.from(upstashEmail + ":" + upstashApiKey).toString("base64");
+  let resp;
+  try {
+    resp = await requestUrl({
+      url: "https://api.upstash.com/v2/redis/database",
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + basicAuth,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        database_name: "atpath-auth",
+        region: "global",
+        primary_region: "us-east-1",
+        tls: true,
+      }),
+    });
+  } catch (e) {
+    const status = typeof e.status === "number" ? e.status : null;
+    throw buildRequestError("Upstash API", "POST", "/v2/redis/database", status, e.message || "");
+  }
+  if (resp.status >= 400) {
+    throw buildRequestError("Upstash API", "POST", "/v2/redis/database", resp.status, extractErrorDetail(resp.json, resp.text));
+  }
   const data = resp.json;
   return {
     endpoint: data.endpoint,
     password: data.password,
-    restUrl: "https://" + data.endpoint,
+    restUrl: data.rest_url || ("https://" + data.endpoint),
     restToken: data.rest_token,
   };
 }
 
 async function deployToVercel(token, noteTitle, files, opts) {
-  const slug = slugify(noteTitle);
-  const projectName = await ensureProject(token, slug);
+  const projectName = (opts && opts.projectName) || await ensureProject(token, slugify(noteTitle));
 
   // Set environment variables for private pages
   if (opts && opts.isPrivate && opts.envVars) {
