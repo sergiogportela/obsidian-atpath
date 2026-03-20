@@ -8914,43 +8914,52 @@ function resolveWikilinkHref(plugin, href) {
   if (resolved instanceof TFile) return resolved.path;
   return href;
 }
-function buildWikilinkViewPlugin(plugin) {
-  function processDOM(dom) {
-    const links = dom.querySelectorAll("a.internal-link");
-    for (const link of links) {
-      if (!link.textContent.startsWith("@")) continue;
-      link.classList.add("atpath-link");
-      const rawHref = link.dataset.href || link.getAttribute("href") || "";
-      const vaultPath = resolveWikilinkHref(plugin, rawHref);
-      link.dataset.atpath = vaultPath;
-      if (plugin.settings.showTokenCounts && !link.dataset.tokens) {
-        const cached = plugin.tokenCache.get(vaultPath);
-        if (cached) {
-          link.dataset.tokens = formatTokens(cached.tokens);
-        } else {
-          plugin.getTokenCount(vaultPath).then((tokens) => {
-            if (tokens != null) {
-              link.dataset.tokens = formatTokens(tokens);
-            }
-          });
-        }
-      }
-      if (!link._atpathContextMenu) {
-        link._atpathContextMenu = true;
-        link.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          showAtPathMenu(plugin, e, vaultPath);
+function processWikilinkAtPaths(plugin, root) {
+  const links = root.querySelectorAll("a.internal-link, a[data-href], .internal-link a, .cm-hmd-internal-link a");
+  for (const link of links) {
+    const text = link.textContent || "";
+    if (!text.startsWith("@")) continue;
+    if (link.dataset._atpathProcessed) continue;
+    link.dataset._atpathProcessed = "1";
+    link.classList.add("atpath-link");
+    const rawHref = link.dataset.href || link.getAttribute("href") || link.getAttribute("data-href") || "";
+    const vaultPath = resolveWikilinkHref(plugin, rawHref);
+    link.dataset.atpath = vaultPath;
+    if (plugin.settings.showTokenCounts) {
+      const cached = plugin.tokenCache.get(vaultPath);
+      if (cached) {
+        link.dataset.tokens = formatTokens(cached.tokens);
+      } else {
+        plugin.getTokenCount(vaultPath).then((tokens) => {
+          if (tokens != null) {
+            link.dataset.tokens = formatTokens(tokens);
+          }
         });
       }
     }
+    link.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showAtPathMenu(plugin, e, vaultPath);
+    });
   }
+}
+function buildWikilinkViewPlugin(plugin) {
   return ViewPlugin.define(
     (view) => {
-      requestAnimationFrame(() => processDOM(view.contentDOM));
+      const dom = view.contentDOM;
+      const observer = new MutationObserver(() => {
+        processWikilinkAtPaths(plugin, dom);
+      });
+      observer.observe(dom, { childList: true, subtree: true });
+      processWikilinkAtPaths(plugin, dom);
+      setTimeout(() => processWikilinkAtPaths(plugin, dom), 200);
       return {
         decorations: Decoration.none,
-        update(update) {
-          requestAnimationFrame(() => processDOM(update.view.contentDOM));
+        update() {
+          processWikilinkAtPaths(plugin, dom);
+        },
+        destroy() {
+          observer.disconnect();
         }
       };
     },
