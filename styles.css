@@ -1,6 +1,16 @@
 .atpath-link { color: var(--text-accent); cursor: pointer; text-decoration: underline dotted; }
 .atpath-link:hover { text-decoration: underline solid; }
 
+/* Wikilink-rendered @path links (a.internal-link decorated by plugin) */
+a.internal-link.atpath-link { color: var(--text-accent); text-decoration: underline dotted; }
+a.internal-link.atpath-link:hover { text-decoration: underline solid; }
+a.internal-link.atpath-link[data-tokens]::after {
+  content: " (" attr(data-tokens) ")";
+  font-size: 0.85em;
+  opacity: 0.5;
+  font-style: italic;
+}
+
 /* Live Preview: CSS pseudo-element after the mark */
 .atpath-link[data-tokens]::after {
   content: " (" attr(data-tokens) ")";

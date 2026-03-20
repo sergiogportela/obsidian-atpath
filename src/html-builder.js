@@ -271,10 +271,23 @@ function slugifyPath(filePath) {
 // ─── @path replacement in markdown ───────────────────────────────────
 
 const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
+const WIKILINK_ATPATH_RE = /\[\[([^\]|]+)\|@([^\]]+)\]\]/g;
 
 function replaceAtPathsWithLinks(md, atPathSlugs, compactLinks) {
+  // Pass 1: wikilink format — [[vaultPath|@display]]
+  let result = md.replace(new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags), (match, _target, display) => {
+    const slug = atPathSlugs.get(display);
+    if (slug) {
+      const linkText = compactLinks ? display.split("/").pop() : "@" + display;
+      return `<a href="atpath/${slug}.html" class="atpath-ref">${linkText}</a>`;
+    }
+    // Unresolvable — strip to plain @display
+    return "@" + display;
+  });
+
+  // Pass 2: legacy format
   const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
-  return md.replace(regex, (match, relPath) => {
+  result = result.replace(regex, (match, relPath) => {
     const slug = atPathSlugs.get(relPath);
     if (slug) {
       const linkText = compactLinks ? relPath.split("/").pop() : "@" + relPath;
@@ -282,13 +295,23 @@ function replaceAtPathsWithLinks(md, atPathSlugs, compactLinks) {
     }
     return match;
   });
+
+  return result;
 }
 
 function replaceNestedAtPaths(md) {
+  // Pass 1: wikilink format
+  let result = md.replace(new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags), (_, _target, display) => {
+    return `<span class="atpath-nested">@${escapeHtml(display)}</span>`;
+  });
+
+  // Pass 2: legacy format
   const regex = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
-  return md.replace(regex, (match, relPath) => {
+  result = result.replace(regex, (match, relPath) => {
     return `<span class="atpath-nested">@${escapeHtml(relPath)}</span>`;
   });
+
+  return result;
 }
 
 // ─── Pipeline ────────────────────────────────────────────────────────
