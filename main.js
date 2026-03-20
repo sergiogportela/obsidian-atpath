@@ -8907,53 +8907,52 @@ function buildAtPathViewPlugin(plugin) {
     }
   );
 }
+function resolveWikilinkHref(plugin, href) {
+  const direct = plugin.app.vault.getAbstractFileByPath(href);
+  if (direct instanceof TFile) return direct.path;
+  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, "");
+  if (resolved instanceof TFile) return resolved.path;
+  return href;
+}
 function buildWikilinkViewPlugin(plugin) {
-  return ViewPlugin.define(
-    (view) => {
-      const inst = {
-        decorations: Decoration.none,
-        update(update) {
-          if (update.docChanged || update.viewportChanged || plugin.tokenCacheDirty) {
-            inst.processDOM(update.view);
-          }
-        },
-        processDOM(view2) {
-          queueMicrotask(() => {
-            const dom = view2.contentDOM;
-            const links = dom.querySelectorAll("a.internal-link");
-            for (const link of links) {
-              if (!link.textContent.startsWith("@")) continue;
-              link.classList.add("atpath-link");
-              const href = link.dataset.href || link.getAttribute("href") || "";
-              link.dataset.atpath = href;
-              if (plugin.settings.showTokenCounts && !link.dataset.tokens) {
-                const vaultPath = href;
-                const cached = plugin.tokenCache.get(vaultPath);
-                if (cached) {
-                  link.dataset.tokens = formatTokens(cached.tokens);
-                } else {
-                  plugin.getTokenCount(vaultPath).then((tokens) => {
-                    if (tokens != null) {
-                      link.dataset.tokens = formatTokens(tokens);
-                      plugin.tokenCacheDirty = true;
-                      plugin._scheduleRefresh();
-                    }
-                  });
-                }
-              }
-              if (!link._atpathContextMenu) {
-                link._atpathContextMenu = true;
-                link.addEventListener("contextmenu", (e) => {
-                  e.preventDefault();
-                  showAtPathMenu(plugin, e, href);
-                });
-              }
+  function processDOM(dom) {
+    const links = dom.querySelectorAll("a.internal-link");
+    for (const link of links) {
+      if (!link.textContent.startsWith("@")) continue;
+      link.classList.add("atpath-link");
+      const rawHref = link.dataset.href || link.getAttribute("href") || "";
+      const vaultPath = resolveWikilinkHref(plugin, rawHref);
+      link.dataset.atpath = vaultPath;
+      if (plugin.settings.showTokenCounts && !link.dataset.tokens) {
+        const cached = plugin.tokenCache.get(vaultPath);
+        if (cached) {
+          link.dataset.tokens = formatTokens(cached.tokens);
+        } else {
+          plugin.getTokenCount(vaultPath).then((tokens) => {
+            if (tokens != null) {
+              link.dataset.tokens = formatTokens(tokens);
             }
           });
         }
+      }
+      if (!link._atpathContextMenu) {
+        link._atpathContextMenu = true;
+        link.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showAtPathMenu(plugin, e, vaultPath);
+        });
+      }
+    }
+  }
+  return ViewPlugin.define(
+    (view) => {
+      requestAnimationFrame(() => processDOM(view.contentDOM));
+      return {
+        decorations: Decoration.none,
+        update(update) {
+          requestAnimationFrame(() => processDOM(update.view.contentDOM));
+        }
       };
-      queueMicrotask(() => inst.processDOM(view));
-      return inst;
     },
     { decorations: () => Decoration.none }
   );
@@ -8964,19 +8963,20 @@ function registerPostProcessor(plugin) {
     for (const link of internalLinks) {
       if (!link.textContent.startsWith("@")) continue;
       link.classList.add("atpath-link");
-      const href = link.dataset.href || link.getAttribute("href") || "";
+      const rawHref = link.dataset.href || link.getAttribute("href") || "";
+      const vaultPath = resolveWikilinkHref(plugin, rawHref);
       link.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        showAtPathMenu(plugin, e, href);
+        showAtPathMenu(plugin, e, vaultPath);
       });
       if (plugin.settings.showTokenCounts) {
         const tokenSpan = document.createElement("span");
         tokenSpan.className = "atpath-token-count";
-        const cached = plugin.tokenCache.get(href);
+        const cached = plugin.tokenCache.get(vaultPath);
         if (cached) {
           tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
         } else {
-          plugin.getTokenCount(href).then((tokens) => {
+          plugin.getTokenCount(vaultPath).then((tokens) => {
             if (tokens != null) {
               tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
             }

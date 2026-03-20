@@ -430,59 +430,62 @@ function buildAtPathViewPlugin(plugin) {
 
 // ─── C2) CM6 ViewPlugin — Wikilink @path decoration in Live Preview ──
 
+function resolveWikilinkHref(plugin, href) {
+  // data-href from Obsidian may be the raw link target; resolve it to a vault path
+  const direct = plugin.app.vault.getAbstractFileByPath(href);
+  if (direct instanceof TFile) return direct.path;
+  // Try Obsidian's link resolver (handles shortest-path links, etc.)
+  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, "");
+  if (resolved instanceof TFile) return resolved.path;
+  return href;
+}
+
 function buildWikilinkViewPlugin(plugin) {
-  return ViewPlugin.define(
-    (view) => {
-      const inst = {
-        decorations: Decoration.none,
-        update(update) {
-          if (update.docChanged || update.viewportChanged || plugin.tokenCacheDirty) {
-            inst.processDOM(update.view);
-          }
-        },
-        processDOM(view) {
-          // Schedule a microtask so the DOM has rendered
-          queueMicrotask(() => {
-            const dom = view.contentDOM;
-            const links = dom.querySelectorAll("a.internal-link");
-            for (const link of links) {
-              if (!link.textContent.startsWith("@")) continue;
-              link.classList.add("atpath-link");
-              const href = link.dataset.href || link.getAttribute("href") || "";
-              link.dataset.atpath = href;
+  function processDOM(dom) {
+    const links = dom.querySelectorAll("a.internal-link");
+    for (const link of links) {
+      if (!link.textContent.startsWith("@")) continue;
+      link.classList.add("atpath-link");
+      const rawHref = link.dataset.href || link.getAttribute("href") || "";
+      const vaultPath = resolveWikilinkHref(plugin, rawHref);
+      link.dataset.atpath = vaultPath;
 
-              // Token count
-              if (plugin.settings.showTokenCounts && !link.dataset.tokens) {
-                const vaultPath = href;
-                const cached = plugin.tokenCache.get(vaultPath);
-                if (cached) {
-                  link.dataset.tokens = formatTokens(cached.tokens);
-                } else {
-                  plugin.getTokenCount(vaultPath).then((tokens) => {
-                    if (tokens != null) {
-                      link.dataset.tokens = formatTokens(tokens);
-                      plugin.tokenCacheDirty = true;
-                      plugin._scheduleRefresh();
-                    }
-                  });
-                }
-              }
-
-              // Context menu
-              if (!link._atpathContextMenu) {
-                link._atpathContextMenu = true;
-                link.addEventListener("contextmenu", (e) => {
-                  e.preventDefault();
-                  showAtPathMenu(plugin, e, href);
-                });
-              }
+      // Token count
+      if (plugin.settings.showTokenCounts && !link.dataset.tokens) {
+        const cached = plugin.tokenCache.get(vaultPath);
+        if (cached) {
+          link.dataset.tokens = formatTokens(cached.tokens);
+        } else {
+          plugin.getTokenCount(vaultPath).then((tokens) => {
+            if (tokens != null) {
+              link.dataset.tokens = formatTokens(tokens);
             }
           });
+        }
+      }
+
+      // Context menu
+      if (!link._atpathContextMenu) {
+        link._atpathContextMenu = true;
+        link.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showAtPathMenu(plugin, e, vaultPath);
+        });
+      }
+    }
+  }
+
+  return ViewPlugin.define(
+    (view) => {
+      // Use RAF for initial render to let Obsidian finish rendering widgets
+      requestAnimationFrame(() => processDOM(view.contentDOM));
+      return {
+        decorations: Decoration.none,
+        update(update) {
+          // Re-scan DOM on any view update (Obsidian may re-render widgets)
+          requestAnimationFrame(() => processDOM(update.view.contentDOM));
         },
       };
-      // Initial run
-      queueMicrotask(() => inst.processDOM(view));
-      return inst;
     },
     { decorations: () => Decoration.none }
   );
@@ -497,20 +500,21 @@ function registerPostProcessor(plugin) {
     for (const link of internalLinks) {
       if (!link.textContent.startsWith("@")) continue;
       link.classList.add("atpath-link");
-      const href = link.dataset.href || link.getAttribute("href") || "";
+      const rawHref = link.dataset.href || link.getAttribute("href") || "";
+      const vaultPath = resolveWikilinkHref(plugin, rawHref);
       link.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        showAtPathMenu(plugin, e, href);
+        showAtPathMenu(plugin, e, vaultPath);
       });
       // Token count
       if (plugin.settings.showTokenCounts) {
         const tokenSpan = document.createElement("span");
         tokenSpan.className = "atpath-token-count";
-        const cached = plugin.tokenCache.get(href);
+        const cached = plugin.tokenCache.get(vaultPath);
         if (cached) {
           tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
         } else {
-          plugin.getTokenCount(href).then((tokens) => {
+          plugin.getTokenCount(vaultPath).then((tokens) => {
             if (tokens != null) {
               tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
             }
