@@ -1,7 +1,7 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
@@ -220,6 +220,38 @@ function resolveAtPath(relPath, plugin) {
   return resolveAtPathFromSource(relPath, activeFile.path, plugin);
 }
 
+/** Broad resolution for migration only — tries multiple strategies to find the file. */
+function resolveAtPathBroad(relPath, sourceFilePath, plugin) {
+  // 1. Try existing exact resolution
+  const exact = resolveAtPathFromSource(relPath, sourceFilePath, plugin);
+  if (plugin.app.vault.getAbstractFileByPath(exact) instanceof TFile) return exact;
+
+  // 2. Obsidian's link resolver (indexed, handles basename + shortest-unique-path)
+  const linked = plugin.app.metadataCache.getFirstLinkpathDest(relPath, sourceFilePath);
+  if (linked) return linked.path;
+
+  // 3. All-repo scan: try every discovered repo root
+  const sourceRepoRoot = getRepoRoot(sourceFilePath);
+  const allRoots = discoverRepoRoots(plugin);
+  for (const [, root] of allRoots) {
+    if (root === sourceRepoRoot) continue;
+    const candidate = root + "/" + relPath;
+    const file = plugin.app.vault.getAbstractFileByPath(candidate);
+    if (file instanceof TFile) return candidate;
+  }
+
+  // 4. Suffix match (last resort — linear scan, fine for one-time migration)
+  const suffix = "/" + relPath;
+  const matches = plugin.app.vault.getFiles().filter(f => f.path.endsWith(suffix));
+  if (matches.length === 1) return matches[0].path;
+  if (matches.length > 1 && sourceRepoRoot) {
+    const sameRepo = matches.find(f => f.path.startsWith(sourceRepoRoot + "/"));
+    if (sameRepo) return sameRepo.path;
+  }
+  // Ambiguous or not found: return null
+  return null;
+}
+
 // ─── B) EditorSuggest — Autocomplete ─────────────────────────────────
 
 class AtPathSuggest extends EditorSuggest {
@@ -333,14 +365,54 @@ const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][
 // ─── Wikilink @path regex ─────────────────────────────────────────────
 const WIKILINK_ATPATH_RE = /\[\[([^\]|]+)\|@([^\]]+)\]\]/g;
 
+// ─── Excluded ranges — code blocks, inline code, YAML frontmatter ────
+function buildExcludedRanges(content) {
+  const ranges = [];
+  // YAML frontmatter
+  if (content.startsWith("---\n") || content.startsWith("---\r\n")) {
+    const endIdx = content.indexOf("\n---", 3);
+    if (endIdx !== -1) ranges.push([0, endIdx + 4]);
+  }
+  // Fenced code blocks (``` or ~~~)
+  const fenceRe = /^(`{3,}|~{3,}).*$/gm;
+  let fence;
+  let openFence = null;
+  while ((fence = fenceRe.exec(content)) !== null) {
+    if (!openFence) {
+      openFence = { start: fence.index, marker: fence[1][0], len: fence[1].length };
+    } else if (fence[1][0] === openFence.marker && fence[1].length >= openFence.len) {
+      ranges.push([openFence.start, fence.index + fence[0].length]);
+      openFence = null;
+    }
+  }
+  if (openFence) ranges.push([openFence.start, content.length]);
+  // Inline code (backtick runs)
+  const inlineRe = /(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
+  let inl;
+  while ((inl = inlineRe.exec(content)) !== null) {
+    ranges.push([inl.index, inl.index + inl[0].length]);
+  }
+  return ranges;
+}
+
+function isInExcludedRange(pos, ranges) {
+  for (const [start, end] of ranges) {
+    if (pos >= start && pos < end) return true;
+    if (start > pos) break;
+  }
+  return false;
+}
+
 // ─── Unified scanner — finds both wikilink and legacy @path refs ──────
 function scanAtPathRefs(content, app, sourcePath) {
   const results = [];
+  const excluded = buildExcludedRanges(content);
 
   // Pass 1: wikilink format
   const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
   let m;
   while ((m = wlRe.exec(content)) !== null) {
+    if (isInExcludedRange(m.index, excluded)) continue;
     let vaultPath = m[1];
     if (app) {
       const resolved = app.metadataCache.getFirstLinkpathDest(vaultPath, sourcePath || "");
@@ -361,6 +433,7 @@ function scanAtPathRefs(content, app, sourcePath) {
   while ((m = legacyRe.exec(content)) !== null) {
     const start = m.index;
     const end = start + m[0].length;
+    if (isInExcludedRange(start, excluded)) continue;
     const overlaps = results.some(r => start < r.end && end > r.start);
     if (overlaps) continue;
     results.push({
@@ -1105,6 +1178,95 @@ class PublishResultModal extends Modal {
   }
 }
 
+class MigrationPreviewModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h2", { text: "Migrate @paths to wikilinks" });
+
+    const statusEl = contentEl.createEl("p", { text: "Scanning files...", cls: "atpath-migration-status" });
+
+    const mdFiles = this.app.vault.getMarkdownFiles();
+    let totalResolvable = 0;
+    let totalUnresolvable = 0;
+    const fileResults = [];
+
+    for (const mdFile of mdFiles) {
+      const content = await this.app.vault.cachedRead(mdFile);
+      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy");
+      if (refs.length === 0) continue;
+      let resolvable = 0;
+      let unresolvable = 0;
+      for (const ref of refs) {
+        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this.plugin);
+        if (!vaultPath) { unresolvable++; continue; }
+        const file = this.app.vault.getAbstractFileByPath(vaultPath);
+        if (file instanceof TFile) resolvable++;
+        else unresolvable++;
+      }
+      totalResolvable += resolvable;
+      totalUnresolvable += unresolvable;
+      fileResults.push({ path: mdFile.path, resolvable, unresolvable });
+    }
+
+    const totalRefs = totalResolvable + totalUnresolvable;
+
+    if (totalRefs === 0) {
+      statusEl.setText("No legacy @path references found.");
+      new Setting(contentEl)
+        .addButton((btn) => btn.setButtonText("Close").onClick(() => this.close()));
+      return;
+    }
+
+    statusEl.setText(
+      totalRefs + " legacy @path ref(s) in " + fileResults.length + " file(s) \u2014 " +
+      totalResolvable + " resolvable, " + totalUnresolvable + " unresolvable"
+    );
+
+    // File list
+    const listContainer = contentEl.createDiv({ cls: "atpath-migration-list" });
+    if (fileResults.length > 10) {
+      const details = listContainer.createEl("details");
+      details.createEl("summary", { text: "Show " + fileResults.length + " files" });
+      const ul = details.createEl("ul");
+      for (const f of fileResults) {
+        ul.createEl("li", { text: f.path + " (" + f.resolvable + " resolvable, " + f.unresolvable + " unresolvable)" });
+      }
+    } else {
+      const ul = listContainer.createEl("ul");
+      for (const f of fileResults) {
+        ul.createEl("li", { text: f.path + " (" + f.resolvable + " resolvable, " + f.unresolvable + " unresolvable)" });
+      }
+    }
+
+    if (totalUnresolvable > 0) {
+      contentEl.createEl("p", {
+        text: "Unresolvable references will be skipped.",
+        cls: "atpath-migration-note",
+      });
+    }
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Cancel").onClick(() => this.close())
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Convert all").setCta().onClick(async () => {
+          this.close();
+          await this.plugin.migrateToWikilinks();
+        })
+      );
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 // ─── G) Plugin lifecycle ─────────────────────────────────────────────
 
 class AtPathPlugin extends Plugin {
@@ -1191,13 +1353,33 @@ class AtPathPlugin extends Plugin {
       callback: () => this.migrateToWikilinks(),
     });
 
-    // Publish button in status bar
-    this.publishBarEl = this.addStatusBarItem();
-    this.publishBarEl.addClass("mod-clickable", "atpath-publish-btn");
-    this.publishBarEl.setText("Publish");
-    this.publishBarEl.addEventListener("click", () => this.publishToVercel());
+    // Tray menu button in status bar
+    this.trayBarEl = this.addStatusBarItem();
+    this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
+    this.trayBarEl.setText("@Path");
+    this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
 
     this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+
+    // Upstash keep-alive ping on load
+    void this.pingUpstash();
+  }
+
+  showTrayMenu(event) {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item.setTitle("Migrate @paths to wikilinks").setIcon("replace-all")
+        .onClick(() => new MigrationPreviewModal(this.app, this).open())
+    );
+    menu.addItem((item) =>
+      item.setTitle("Publish to Vercel").setIcon("upload")
+        .onClick(() => this.publishToVercel())
+    );
+    menu.addItem((item) =>
+      item.setTitle("Copy with @path contents").setIcon("clipboard-copy")
+        .onClick(() => this.copyNoteWithAtPaths())
+    );
+    menu.showAtMouseEvent(event);
   }
 
   async loadSettings() {
@@ -1490,7 +1672,7 @@ class AtPathPlugin extends Plugin {
       await this.saveSettings();
     }
 
-    this.publishBarEl.setText("Publishing...");
+    this.trayBarEl.setText("...");
 
     try {
       const atPathSlugs = new Map();
@@ -1616,7 +1798,7 @@ class AtPathPlugin extends Plugin {
         await this.saveSettings();
       }
 
-      this.publishBarEl.setText("Publish");
+      this.trayBarEl.setText("@Path");
 
       const linkedCount = atPathFiles.length;
       const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "")
@@ -1624,7 +1806,7 @@ class AtPathPlugin extends Plugin {
 
       new PublishResultModal(this.app, { success: true, url: result.url, summary }).open();
     } catch (e) {
-      this.publishBarEl.setText("Publish");
+      this.trayBarEl.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
@@ -1639,7 +1821,7 @@ class AtPathPlugin extends Plugin {
       return;
     }
 
-    plugin.publishBarEl.setText("Unpublishing...");
+    plugin.trayBarEl.setText("...");
 
     try {
       const placeholderHtml = buildUnpublishedPage(noteTitle);
@@ -1655,11 +1837,30 @@ class AtPathPlugin extends Plugin {
       };
       await plugin.saveSettings();
 
-      plugin.publishBarEl.setText("Publish");
+      plugin.trayBarEl.setText("@Path");
       new Notice("Unpublished \"" + noteTitle + "\". You can republish at any time.");
     } catch (e) {
-      plugin.publishBarEl.setText("Publish");
+      plugin.trayBarEl.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
+    }
+  }
+
+  async pingUpstash() {
+    const { upstashRestUrl, upstashRestToken } = this.settings;
+    if (!upstashRestUrl || !upstashRestToken) return;
+    try {
+      const resp = await requestUrl({
+        url: upstashRestUrl + "/PING",
+        method: "GET",
+        headers: { Authorization: "Bearer " + upstashRestToken },
+      });
+      if (resp.status >= 400) throw new Error("status " + resp.status);
+      console.debug("AtPath: Upstash keep-alive OK");
+    } catch (e) {
+      console.warn("AtPath: Upstash keep-alive failed, clearing credentials:", e.message || e);
+      this.settings.upstashRestUrl = "";
+      this.settings.upstashRestToken = "";
+      await this.saveSettings();
     }
   }
 
@@ -1675,7 +1876,8 @@ class AtPathPlugin extends Plugin {
       if (refs.length === 0) continue;
       filesAffected++;
       for (const ref of refs) {
-        const vaultPath = resolveAtPathFromSource(ref.displayPath, mdFile.path, this);
+        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this);
+        if (!vaultPath) { unresolvable++; continue; }
         const file = this.app.vault.getAbstractFileByPath(vaultPath);
         if (file instanceof TFile) {
           resolvable++;
@@ -1708,7 +1910,8 @@ class AtPathPlugin extends Plugin {
       // Process in reverse order so indices stay valid
       for (let i = refs.length - 1; i >= 0; i--) {
         const ref = refs[i];
-        const vaultPath = resolveAtPathFromSource(ref.displayPath, mdFile.path, this);
+        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this);
+        if (!vaultPath) { skipped++; continue; }
         const file = this.app.vault.getAbstractFileByPath(vaultPath);
         if (!(file instanceof TFile)) {
           skipped++;

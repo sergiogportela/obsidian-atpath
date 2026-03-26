@@ -19,14 +19,20 @@ a.internal-link.atpath-link[data-tokens]::after {
   font-style: italic;
 }
 
-/* Publish button in status bar */
-.atpath-publish-btn {
+/* Tray menu button in status bar */
+.atpath-tray-btn {
   cursor: pointer;
   opacity: 0.7;
+  font-weight: bold;
 }
-.atpath-publish-btn:hover {
+.atpath-tray-btn:hover {
   opacity: 1;
 }
+
+/* Migration preview modal */
+.atpath-migration-status { font-size: 0.9em; margin-bottom: 0.75em; }
+.atpath-migration-list { max-height: 300px; overflow-y: auto; margin-bottom: 0.75em; }
+.atpath-migration-note { font-size: 0.85em; opacity: 0.7; font-style: italic; }
 
 /* Reading Mode: span inserted after the <a> */
 .atpath-token-count {
