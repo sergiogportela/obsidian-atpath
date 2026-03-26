@@ -2,7 +2,7 @@
 
 # AtPath
 
-**Reference any file in your vault with `@path/to/file` — the same syntax used by AI coding tools.**
+**Reference any file in your vault with `@path/to/file` or `[[wikilinks]]` — bridging AI coding tools and Obsidian's native link graph.**
 
 Autocomplete, click-to-open, token counting, one-click publish to the web, and cross-repo support.
 
@@ -26,6 +26,10 @@ Type `@` and pick any file. Works across repos — files from the current repo a
 <p align="center">
   <img src="screenshots/autocomplete.png" width="350" alt="Autocomplete dropdown showing file suggestions" />
 </p>
+
+### Wikilink format
+
+The plugin optionally wraps references as `[[path|@display]]`, giving you full integration with Obsidian's graph view, backlinks, and automatic rename tracking while keeping the `@` visual style. The link path respects your "New link format" vault setting (shortest path when possible, relative, or absolute). A settings toggle lets you choose between legacy `@path` (agent-friendly, plain text) and the wikilink format. Both formats work everywhere: Live Preview, Reading mode, token counts, copy to clipboard, and publish. Migration commands let you convert existing `@path` references to wikilinks in bulk.
 
 ### Clickable Links
 
@@ -75,6 +79,7 @@ Rename or move a file and all `@path` references across the vault update automat
 | Max file size (MB) | 5 | Skip token counting above this |
 | Vercel API token | — | For one-click publishing |
 | Contact URL | — | Button link on published pages |
+| Preferred insert format | Legacy @path | Wikilink (`[[path\|@display]]`) or legacy `@path` |
 | Contact button label | Entre em contato | Button text |
 
 ## Install
