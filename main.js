@@ -8514,7 +8514,6 @@ module.exports = async function handler(req, res) {
 // src/main.js
 var { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-var { RangeSetBuilder } = require("@codemirror/state");
 var { encode } = require_gpt_4o();
 var AtPathWidget = class extends WidgetType {
   constructor(fullMatch, path, tokenCount) {
@@ -8534,8 +8533,30 @@ var AtPathWidget = class extends WidgetType {
     if (this.tokenCount) span.dataset.tokens = this.tokenCount;
     return span;
   }
-  ignoreEvent() {
-    return false;
+  ignoreEvent(event) {
+    return event.type !== "mousedown";
+  }
+};
+var WikilinkAtPathWidget = class extends WidgetType {
+  constructor(displayPath, vaultPath, tokenCount) {
+    super();
+    this.displayPath = displayPath;
+    this.vaultPath = vaultPath;
+    this.tokenCount = tokenCount;
+  }
+  eq(other) {
+    return this.displayPath === other.displayPath && this.vaultPath === other.vaultPath && this.tokenCount === other.tokenCount;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "atpath-link";
+    span.textContent = "@" + this.displayPath;
+    span.dataset.atpath = this.vaultPath;
+    if (this.tokenCount) span.dataset.tokens = this.tokenCount;
+    return span;
+  }
+  ignoreEvent(event) {
+    return event.type !== "mousedown";
   }
 };
 var BINARY_EXTENSIONS = /* @__PURE__ */ new Set([
@@ -8795,7 +8816,14 @@ var AtPathSuggest = class extends EditorSuggest {
     const { editor } = this.context;
     const { start, end } = this.context;
     if (this.plugin.settings.linkFormat === "wikilink") {
-      editor.replaceRange("[[" + value.file.path + "|@" + value.display + "]] ", start, end);
+      const sourcePath = this.context.file?.path || "";
+      const link = this.plugin.app.fileManager.generateMarkdownLink(
+        value.file,
+        sourcePath,
+        void 0,
+        "@" + value.display
+      );
+      editor.replaceRange(link + " ", start, end);
     } else {
       editor.replaceRange("@" + value.display + " ", start, end);
     }
@@ -8803,13 +8831,18 @@ var AtPathSuggest = class extends EditorSuggest {
 };
 var AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
 var WIKILINK_ATPATH_RE = /\[\[([^\]|]+)\|@([^\]]+)\]\]/g;
-function scanAtPathRefs(content) {
+function scanAtPathRefs(content, app, sourcePath) {
   const results = [];
   const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
   let m;
   while ((m = wlRe.exec(content)) !== null) {
+    let vaultPath = m[1];
+    if (app) {
+      const resolved = app.metadataCache.getFirstLinkpathDest(vaultPath, sourcePath || "");
+      if (resolved) vaultPath = resolved.path;
+    }
     results.push({
-      vaultPath: m[1],
+      vaultPath,
       displayPath: m[2],
       format: "wikilink",
       fullMatch: m[0],
@@ -8876,7 +8909,7 @@ function buildAtPathViewPlugin(plugin) {
     {
       decorations: (v) => v.decorations,
       eventHandlers: {
-        click(event, view) {
+        mousedown(event, view) {
           const target = event.target;
           if (!target.classList.contains("atpath-link")) return false;
           const relPath = target.dataset.atpath;
@@ -8907,63 +8940,77 @@ function buildAtPathViewPlugin(plugin) {
     }
   );
 }
-function resolveWikilinkHref(plugin, href) {
+function resolveWikilinkHref(plugin, href, sourcePath) {
   const direct = plugin.app.vault.getAbstractFileByPath(href);
   if (direct instanceof TFile) return direct.path;
-  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, "");
+  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, sourcePath || "");
   if (resolved instanceof TFile) return resolved.path;
   return href;
 }
-function processWikilinkAtPaths(plugin, root) {
-  const links = root.querySelectorAll("a.internal-link, a[data-href], .internal-link a, .cm-hmd-internal-link a");
-  for (const link of links) {
-    const text = link.textContent || "";
-    if (!text.startsWith("@")) continue;
-    if (link.dataset._atpathProcessed) continue;
-    link.dataset._atpathProcessed = "1";
-    link.classList.add("atpath-link");
-    const rawHref = link.dataset.href || link.getAttribute("href") || link.getAttribute("data-href") || "";
-    const vaultPath = resolveWikilinkHref(plugin, rawHref);
-    link.dataset.atpath = vaultPath;
-    if (plugin.settings.showTokenCounts) {
-      const cached = plugin.tokenCache.get(vaultPath);
-      if (cached) {
-        link.dataset.tokens = formatTokens(cached.tokens);
-      } else {
-        plugin.getTokenCount(vaultPath).then((tokens) => {
-          if (tokens != null) {
-            link.dataset.tokens = formatTokens(tokens);
-          }
+function buildWikilinkViewPlugin(plugin) {
+  const decorator = new MatchDecorator({
+    regexp: WIKILINK_ATPATH_RE,
+    decoration: (match, view, pos) => {
+      const end = pos + match[0].length;
+      const cursorInside = view.state.selection.ranges.some(
+        (r) => r.from >= pos && r.to <= end
+      );
+      const linkTarget = match[1];
+      const displayPath = match[2];
+      const activeFile = plugin.app.workspace.getActiveFile();
+      const sourcePath = activeFile?.path || "";
+      const resolved = plugin.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+      const vaultPath = resolved?.path || linkTarget;
+      let tokenStr = null;
+      if (plugin.settings.showTokenCounts) {
+        const cached = plugin.tokenCache.get(vaultPath);
+        if (cached) tokenStr = formatTokens(cached.tokens);
+        else plugin.scheduleTokenFetch(vaultPath, view);
+      }
+      if (!cursorInside) {
+        return Decoration.replace({
+          widget: new WikilinkAtPathWidget(displayPath, vaultPath, tokenStr)
         });
       }
+      return null;
     }
-    link.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      showAtPathMenu(plugin, e, vaultPath);
-    });
-  }
-}
-function buildWikilinkViewPlugin(plugin) {
+  });
   return ViewPlugin.define(
-    (view) => {
-      const dom = view.contentDOM;
-      const observer = new MutationObserver(() => {
-        processWikilinkAtPaths(plugin, dom);
-      });
-      observer.observe(dom, { childList: true, subtree: true });
-      processWikilinkAtPaths(plugin, dom);
-      setTimeout(() => processWikilinkAtPaths(plugin, dom), 200);
-      return {
-        decorations: Decoration.none,
-        update() {
-          processWikilinkAtPaths(plugin, dom);
-        },
-        destroy() {
-          observer.disconnect();
+    (view) => ({
+      decorations: decorator.createDeco(view),
+      update(update) {
+        if (plugin.tokenCacheDirty || update.selectionSet) {
+          this.decorations = decorator.createDeco(update.view);
+          plugin.tokenCacheDirty = false;
+        } else {
+          this.decorations = decorator.updateDeco(update, this.decorations);
         }
-      };
-    },
-    { decorations: () => Decoration.none }
+      }
+    }),
+    {
+      decorations: (v) => v.decorations,
+      eventHandlers: {
+        mousedown(event, view) {
+          const target = event.target;
+          if (!target.classList.contains("atpath-link")) return false;
+          const vaultPath = target.dataset.atpath;
+          if (!vaultPath) return false;
+          event.preventDefault();
+          const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
+          if (resolved instanceof TFile) openFileByViewState(plugin, resolved);
+          return true;
+        },
+        contextmenu(event, view) {
+          const target = event.target;
+          if (!target.classList.contains("atpath-link")) return false;
+          const vaultPath = target.dataset.atpath;
+          if (!vaultPath) return false;
+          event.preventDefault();
+          showAtPathMenu(plugin, event, vaultPath);
+          return true;
+        }
+      }
+    }
   );
 }
 function registerPostProcessor(plugin) {
@@ -8973,7 +9020,7 @@ function registerPostProcessor(plugin) {
       if (!link.textContent.startsWith("@")) continue;
       link.classList.add("atpath-link");
       const rawHref = link.dataset.href || link.getAttribute("href") || "";
-      const vaultPath = resolveWikilinkHref(plugin, rawHref);
+      const vaultPath = resolveWikilinkHref(plugin, rawHref, ctx.sourcePath);
       link.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         showAtPathMenu(plugin, e, vaultPath);
@@ -9533,7 +9580,7 @@ var AtPathPlugin = class extends Plugin {
     }
     const noteTokens = await this.getTokenCount(activeFile.path) || 0;
     if (gen !== this._statusBarGen) return;
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seenPaths = /* @__PURE__ */ new Set();
     let linkedTokens = 0;
     let linkedCount = 0;
@@ -9575,7 +9622,7 @@ var AtPathPlugin = class extends Plugin {
       new Notice("No active file.");
       return;
     }
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = /* @__PURE__ */ new Set();
     const resolved = [];
     const failed = [];
@@ -9659,7 +9706,7 @@ var AtPathPlugin = class extends Plugin {
     return discoverRepoRoots(this);
   }
   async collectAtPathFiles(content, activeFile) {
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = /* @__PURE__ */ new Set();
     const atPathFiles = [];
     for (const ref of refs) {
@@ -9898,7 +9945,12 @@ var AtPathPlugin = class extends Plugin {
           skipped++;
           continue;
         }
-        const wikilink = "[[" + file.path + "|@" + ref.displayPath + "]]";
+        const wikilink = this.app.fileManager.generateMarkdownLink(
+          file,
+          mdFile.path,
+          void 0,
+          "@" + ref.displayPath
+        );
         updated = updated.substring(0, ref.start) + wikilink + updated.substring(ref.end);
         converted++;
       }
@@ -9935,23 +9987,30 @@ var AtPathPlugin = class extends Plugin {
     if (!isFolder) {
       for (const mdFile of mdFiles) {
         const content = await this.app.vault.read(mdFile);
-        const wlRe = new RegExp(
-          "\\[\\[" + file.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\|@([^\\]]+)\\]\\]",
-          "g"
-        );
-        if (!wlRe.test(content)) continue;
-        wlRe.lastIndex = 0;
-        const refRepoRoot = getRepoRoot(mdFile.path);
-        let correctDisplay;
-        if (newRepoRoot && refRepoRoot === newRepoRoot) {
-          correctDisplay = toRepoRelative(file.path, newRepoRoot);
-        } else if (newRepoRoot) {
-          const repoName = newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1);
-          correctDisplay = repoName + "/" + toRepoRelative(file.path, newRepoRoot);
-        } else {
-          correctDisplay = file.path;
+        const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
+        let match;
+        let updated = content;
+        let offset = 0;
+        while ((match = wlRe.exec(content)) !== null) {
+          const linkTarget = match[1];
+          const resolved = this.app.metadataCache.getFirstLinkpathDest(linkTarget, mdFile.path);
+          if (!resolved || resolved.path !== file.path) continue;
+          const refRepoRoot = getRepoRoot(mdFile.path);
+          let correctDisplay;
+          if (newRepoRoot && refRepoRoot === newRepoRoot) {
+            correctDisplay = toRepoRelative(file.path, newRepoRoot);
+          } else if (newRepoRoot) {
+            const repoName = newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1);
+            correctDisplay = repoName + "/" + toRepoRelative(file.path, newRepoRoot);
+          } else {
+            correctDisplay = file.path;
+          }
+          const replacement = "[[" + linkTarget + "|@" + correctDisplay + "]]";
+          const start = match.index + offset;
+          const end = start + match[0].length;
+          updated = updated.substring(0, start) + replacement + updated.substring(end);
+          offset += replacement.length - match[0].length;
         }
-        const updated = content.replace(wlRe, "[[" + file.path + "|@" + correctDisplay + "]]");
         if (updated !== content) {
           await this.app.vault.modify(mdFile, updated);
         }

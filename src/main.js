@@ -3,7 +3,6 @@
 
 const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-const { RangeSetBuilder } = require("@codemirror/state");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
 // ─── AtPathWidget — renders @path as a single span immune to emphasis splitting
@@ -26,7 +25,30 @@ class AtPathWidget extends WidgetType {
     if (this.tokenCount) span.dataset.tokens = this.tokenCount;
     return span;
   }
-  ignoreEvent() { return false; }
+  ignoreEvent(event) { return event.type !== "mousedown"; }
+}
+
+class WikilinkAtPathWidget extends WidgetType {
+  constructor(displayPath, vaultPath, tokenCount) {
+    super();
+    this.displayPath = displayPath;
+    this.vaultPath = vaultPath;
+    this.tokenCount = tokenCount;
+  }
+  eq(other) {
+    return this.displayPath === other.displayPath
+      && this.vaultPath === other.vaultPath
+      && this.tokenCount === other.tokenCount;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "atpath-link";
+    span.textContent = "@" + this.displayPath;
+    span.dataset.atpath = this.vaultPath;
+    if (this.tokenCount) span.dataset.tokens = this.tokenCount;
+    return span;
+  }
+  ignoreEvent(event) { return event.type !== "mousedown"; }
 }
 
 // ─── Token counting helpers ──────────────────────────────────────────
@@ -293,7 +315,11 @@ class AtPathSuggest extends EditorSuggest {
     const { editor } = this.context;
     const { start, end } = this.context;
     if (this.plugin.settings.linkFormat === "wikilink") {
-      editor.replaceRange("[[" + value.file.path + "|@" + value.display + "]] ", start, end);
+      const sourcePath = this.context.file?.path || "";
+      const link = this.plugin.app.fileManager.generateMarkdownLink(
+        value.file, sourcePath, undefined, "@" + value.display
+      );
+      editor.replaceRange(link + " ", start, end);
     } else {
       editor.replaceRange("@" + value.display + " ", start, end);
     }
@@ -308,15 +334,20 @@ const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][
 const WIKILINK_ATPATH_RE = /\[\[([^\]|]+)\|@([^\]]+)\]\]/g;
 
 // ─── Unified scanner — finds both wikilink and legacy @path refs ──────
-function scanAtPathRefs(content) {
+function scanAtPathRefs(content, app, sourcePath) {
   const results = [];
 
   // Pass 1: wikilink format
   const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
   let m;
   while ((m = wlRe.exec(content)) !== null) {
+    let vaultPath = m[1];
+    if (app) {
+      const resolved = app.metadataCache.getFirstLinkpathDest(vaultPath, sourcePath || "");
+      if (resolved) vaultPath = resolved.path;
+    }
     results.push({
-      vaultPath: m[1],
+      vaultPath,
       displayPath: m[2],
       format: "wikilink",
       fullMatch: m[0],
@@ -392,7 +423,7 @@ function buildAtPathViewPlugin(plugin) {
     {
       decorations: (v) => v.decorations,
       eventHandlers: {
-        click(event, view) {
+        mousedown(event, view) {
           const target = event.target;
           if (!target.classList.contains("atpath-link")) return false;
           const relPath = target.dataset.atpath;
@@ -430,78 +461,85 @@ function buildAtPathViewPlugin(plugin) {
 
 // ─── C2) CM6 ViewPlugin — Wikilink @path decoration in Live Preview ──
 
-function resolveWikilinkHref(plugin, href) {
+function resolveWikilinkHref(plugin, href, sourcePath) {
   // data-href from Obsidian may be the raw link target; resolve it to a vault path
   const direct = plugin.app.vault.getAbstractFileByPath(href);
   if (direct instanceof TFile) return direct.path;
   // Try Obsidian's link resolver (handles shortest-path links, etc.)
-  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, "");
+  const resolved = plugin.app.metadataCache.getFirstLinkpathDest(href, sourcePath || "");
   if (resolved instanceof TFile) return resolved.path;
   return href;
 }
 
-function processWikilinkAtPaths(plugin, root) {
-  // Try multiple selectors — Obsidian's internal link rendering varies
-  const links = root.querySelectorAll("a.internal-link, a[data-href], .internal-link a, .cm-hmd-internal-link a");
-  for (const link of links) {
-    const text = link.textContent || "";
-    if (!text.startsWith("@")) continue;
-    if (link.dataset._atpathProcessed) continue;
-    link.dataset._atpathProcessed = "1";
+function buildWikilinkViewPlugin(plugin) {
+  const decorator = new MatchDecorator({
+    regexp: WIKILINK_ATPATH_RE,
+    decoration: (match, view, pos) => {
+      const end = pos + match[0].length;
+      const cursorInside = view.state.selection.ranges.some(
+        r => r.from >= pos && r.to <= end
+      );
+      const linkTarget = match[1];  // group 1 = link target (may be short)
+      const displayPath = match[2]; // group 2 = @display path
 
-    link.classList.add("atpath-link");
-    const rawHref = link.dataset.href || link.getAttribute("href") || link.getAttribute("data-href") || "";
-    const vaultPath = resolveWikilinkHref(plugin, rawHref);
-    link.dataset.atpath = vaultPath;
+      // Resolve short link target to full vault path
+      const activeFile = plugin.app.workspace.getActiveFile();
+      const sourcePath = activeFile?.path || "";
+      const resolved = plugin.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+      const vaultPath = resolved?.path || linkTarget;
 
-    // Token count
-    if (plugin.settings.showTokenCounts) {
-      const cached = plugin.tokenCache.get(vaultPath);
-      if (cached) {
-        link.dataset.tokens = formatTokens(cached.tokens);
-      } else {
-        plugin.getTokenCount(vaultPath).then((tokens) => {
-          if (tokens != null) {
-            link.dataset.tokens = formatTokens(tokens);
-          }
+      let tokenStr = null;
+      if (plugin.settings.showTokenCounts) {
+        const cached = plugin.tokenCache.get(vaultPath);
+        if (cached) tokenStr = formatTokens(cached.tokens);
+        else plugin.scheduleTokenFetch(vaultPath, view);
+      }
+
+      if (!cursorInside) {
+        return Decoration.replace({
+          widget: new WikilinkAtPathWidget(displayPath, vaultPath, tokenStr),
         });
       }
-    }
-
-    // Context menu
-    link.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      showAtPathMenu(plugin, e, vaultPath);
-    });
-  }
-}
-
-function buildWikilinkViewPlugin(plugin) {
-  return ViewPlugin.define(
-    (view) => {
-      const dom = view.contentDOM;
-
-      // MutationObserver catches Obsidian's async widget rendering
-      const observer = new MutationObserver(() => {
-        processWikilinkAtPaths(plugin, dom);
-      });
-      observer.observe(dom, { childList: true, subtree: true });
-
-      // Also process immediately and after a short delay for initial load
-      processWikilinkAtPaths(plugin, dom);
-      setTimeout(() => processWikilinkAtPaths(plugin, dom), 200);
-
-      return {
-        decorations: Decoration.none,
-        update() {
-          processWikilinkAtPaths(plugin, dom);
-        },
-        destroy() {
-          observer.disconnect();
-        },
-      };
+      return null;
     },
-    { decorations: () => Decoration.none }
+  });
+
+  return ViewPlugin.define(
+    (view) => ({
+      decorations: decorator.createDeco(view),
+      update(update) {
+        if (plugin.tokenCacheDirty || update.selectionSet) {
+          this.decorations = decorator.createDeco(update.view);
+          plugin.tokenCacheDirty = false;
+        } else {
+          this.decorations = decorator.updateDeco(update, this.decorations);
+        }
+      },
+    }),
+    {
+      decorations: (v) => v.decorations,
+      eventHandlers: {
+        mousedown(event, view) {
+          const target = event.target;
+          if (!target.classList.contains("atpath-link")) return false;
+          const vaultPath = target.dataset.atpath;
+          if (!vaultPath) return false;
+          event.preventDefault();
+          const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
+          if (resolved instanceof TFile) openFileByViewState(plugin, resolved);
+          return true;
+        },
+        contextmenu(event, view) {
+          const target = event.target;
+          if (!target.classList.contains("atpath-link")) return false;
+          const vaultPath = target.dataset.atpath;
+          if (!vaultPath) return false;
+          event.preventDefault();
+          showAtPathMenu(plugin, event, vaultPath);
+          return true;
+        },
+      },
+    }
   );
 }
 
@@ -515,7 +553,7 @@ function registerPostProcessor(plugin) {
       if (!link.textContent.startsWith("@")) continue;
       link.classList.add("atpath-link");
       const rawHref = link.dataset.href || link.getAttribute("href") || "";
-      const vaultPath = resolveWikilinkHref(plugin, rawHref);
+      const vaultPath = resolveWikilinkHref(plugin, rawHref, ctx.sourcePath);
       link.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         showAtPathMenu(plugin, e, vaultPath);
@@ -1244,7 +1282,7 @@ class AtPathPlugin extends Plugin {
     if (gen !== this._statusBarGen) return;
 
     // Find all @paths (both formats) and count their tokens
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seenPaths = new Set();
     let linkedTokens = 0;
     let linkedCount = 0;
@@ -1290,7 +1328,7 @@ class AtPathPlugin extends Plugin {
       return;
     }
 
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = new Set();
     const resolved = [];
     const failed = [];
@@ -1388,7 +1426,7 @@ class AtPathPlugin extends Plugin {
   }
 
   async collectAtPathFiles(content, activeFile) {
-    const refs = scanAtPathRefs(content);
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = new Set();
     const atPathFiles = [];
 
@@ -1676,7 +1714,9 @@ class AtPathPlugin extends Plugin {
           skipped++;
           continue;
         }
-        const wikilink = "[[" + file.path + "|@" + ref.displayPath + "]]";
+        const wikilink = this.app.fileManager.generateMarkdownLink(
+          file, mdFile.path, undefined, "@" + ref.displayPath
+        );
         updated = updated.substring(0, ref.start) + wikilink + updated.substring(ref.end);
         converted++;
       }
@@ -1717,34 +1757,39 @@ class AtPathPlugin extends Plugin {
     const mdFiles = this.app.vault.getMarkdownFiles();
 
     // Pass 0: Wikilink alias repair
-    // Obsidian updates link targets: [[old/path|@display]] → [[new/path|@display]]
+    // Obsidian updates link targets (short or full): [[target|@display]] → [[new_target|@display]]
     // We fix the display alias to match the new relative path
     if (!isFolder) {
       for (const mdFile of mdFiles) {
         const content = await this.app.vault.read(mdFile);
-        // Look for [[new-vault-path|@staleDisplay]]
-        const wlRe = new RegExp(
-          '\\[\\[' + file.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\|@([^\\]]+)\\]\\]',
-          'g'
-        );
-        if (!wlRe.test(content)) continue;
-        wlRe.lastIndex = 0;
+        const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
+        let match;
+        let updated = content;
+        let offset = 0;
+        while ((match = wlRe.exec(content)) !== null) {
+          const linkTarget = match[1];
+          // Resolve the (possibly short) link target to check if it points to the renamed file
+          const resolved = this.app.metadataCache.getFirstLinkpathDest(linkTarget, mdFile.path);
+          if (!resolved || resolved.path !== file.path) continue;
 
-        // Compute correct display for this referencing file
-        const refRepoRoot = getRepoRoot(mdFile.path);
-        let correctDisplay;
-        if (newRepoRoot && refRepoRoot === newRepoRoot) {
-          // Same repo → repo-relative
-          correctDisplay = toRepoRelative(file.path, newRepoRoot);
-        } else if (newRepoRoot) {
-          // Cross-repo → repoName/rel
-          const repoName = newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1);
-          correctDisplay = repoName + "/" + toRepoRelative(file.path, newRepoRoot);
-        } else {
-          correctDisplay = file.path;
+          // Compute correct display for this referencing file
+          const refRepoRoot = getRepoRoot(mdFile.path);
+          let correctDisplay;
+          if (newRepoRoot && refRepoRoot === newRepoRoot) {
+            correctDisplay = toRepoRelative(file.path, newRepoRoot);
+          } else if (newRepoRoot) {
+            const repoName = newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1);
+            correctDisplay = repoName + "/" + toRepoRelative(file.path, newRepoRoot);
+          } else {
+            correctDisplay = file.path;
+          }
+
+          const replacement = "[[" + linkTarget + "|@" + correctDisplay + "]]";
+          const start = match.index + offset;
+          const end = start + match[0].length;
+          updated = updated.substring(0, start) + replacement + updated.substring(end);
+          offset += replacement.length - match[0].length;
         }
-
-        const updated = content.replace(wlRe, '[[' + file.path + '|@' + correctDisplay + ']]');
         if (updated !== content) {
           await this.app.vault.modify(mdFile, updated);
         }
