@@ -8016,9 +8016,10 @@ var require_auth_shell_builder = __commonJS({
       var body;
       try { body = await resp.json(); } catch(e) { body = {}; }
       var approvalUrl = body.approvalUrl || '';
+      var siteUrl = approvalUrl ? new URL(approvalUrl).origin : '';
       var email = (clerk.user.primaryEmailAddress && clerk.user.primaryEmailAddress.emailAddress) || '';
-      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso: ${title}');
-      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : ''));
+      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso');
+      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nAprovar: ' + approvalUrl : ''));
       authMsg.textContent = 'Voc\\u00ea n\\u00e3o tem acesso a esta p\\u00e1gina.';
 
       var wrapper = document.createElement('div');
@@ -8026,7 +8027,7 @@ var require_auth_shell_builder = __commonJS({
 
       // Primary: WhatsApp button (when publisherWhatsapp + approvalUrl available)
       if (publisherWhatsapp && approvalUrl) {
-        var waText = encodeURIComponent('Ol\\u00e1! Gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + '\\n\\nLink para aprovar:\\n' + approvalUrl);
+        var waText = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + '\\n\\nAprovar: ' + approvalUrl);
         var waBtn = document.createElement('a');
         waBtn.href = 'https://wa.me/' + publisherWhatsapp + '?text=' + waText;
         waBtn.target = '_blank';
@@ -8043,7 +8044,7 @@ var require_auth_shell_builder = __commonJS({
         emailLabel.textContent = 'Entre em contato: ' + publisherEmail;
         wrapper.appendChild(emailLabel);
 
-        var copyText = 'Solicita\\u00e7\\u00e3o de acesso: ${title}\\n\\nOl\\u00e1, gostaria de ter acesso a ${title}.\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : '');
+        var copyText = 'Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nAprovar: ' + approvalUrl : '');
         var copyBtn = document.createElement('button');
         copyBtn.textContent = 'Copiar solicita\\u00e7\\u00e3o';
         copyBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#a88bfa;color:#1e1e1e;border-radius:6px;font-weight:600;border:none;cursor:pointer;font-size:1em;';
@@ -8229,10 +8230,14 @@ export default async function handler(req, res) {
     }
     function buildApproveFunction2(config) {
       const projectNameJSON = JSON.stringify(config.projectName);
+      const publishableKeyJSON = JSON.stringify(config.clerkPublishableKey);
+      const publisherEmailJSON = JSON.stringify((config.publisherEmail || "").toLowerCase().trim());
       return `import { createHmac, timingSafeEqual } from "crypto";
-import { createClerkClient } from "@clerk/backend";
+import { verifyToken, createClerkClient } from "@clerk/backend";
 
 const PROJECT_NAME = ${projectNameJSON};
+const CLERK_PUBLISHABLE_KEY = ${publishableKeyJSON};
+const PUBLISHER_EMAIL = ${publisherEmailJSON};
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 function verifySignedToken(raw) {
@@ -8247,6 +8252,10 @@ function verifySignedToken(raw) {
   return payload;
 }
 
+function escapeHtml(str) {
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
 function htmlPage(title, message, ok) {
   return \`<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8257,37 +8266,147 @@ h1{font-size:1.3em;margin:0 0 .5em}p{color:#555;margin:0}</style></head>
 <body><div class="card"><h1>\${title}</h1><p>\${message}</p></div></body></html>\`;
 }
 
+function approvalPage(email, token) {
+  var safeEmail = escapeHtml(email);
+  return \`<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aprovar acesso</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f8fafc;color:#1e1e1e}
+.card{background:#fff;border-radius:12px;padding:2em 2.5em;max-width:480px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h1{font-size:1.3em;margin:0 0 .5em}p{color:#555;margin:.5em 0}
+#clerk-auth{margin:1.5em 0}
+#status{color:#888;font-style:italic}
+.ok{color:#16a34a}.err{color:#dc2626}</style></head>
+<body><div class="card">
+<h1>Aprovar acesso</h1>
+<p>Aprovar acesso para <strong>\${safeEmail}</strong>?</p>
+<div id="clerk-auth"></div>
+<p id="status">Carregando...</p>
+</div>
+<script>
+var hmacToken = \${JSON.stringify(token)};
+var publisherEmail = \${JSON.stringify(PUBLISHER_EMAIL)};
+
+function setStatus(msg, cls) {
+  var el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = cls || "";
+}
+
+function doApprove(sessionToken) {
+  setStatus("Aprovando...");
+  fetch("/api/approve", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + sessionToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: hmacToken })
+  }).then(function(r) { return r.json().then(function(b) { return { ok: r.ok, body: b }; }); })
+    .then(function(res) {
+      if (res.ok) {
+        setStatus("Acesso aprovado \\u2705", "ok");
+        document.querySelector("h1").textContent = "Acesso aprovado \\u2705";
+      } else {
+        setStatus(res.body.error || "Erro ao aprovar", "err");
+      }
+    })
+    .catch(function() { setStatus("Erro de rede", "err"); });
+}
+
+function checkAndApprove() {
+  if (!window.Clerk) return;
+  var user = window.Clerk.user;
+  if (!user) {
+    setStatus("Fa\\u00e7a login para continuar");
+    var el = document.getElementById("clerk-auth");
+    if (el && window.Clerk.mountSignIn) window.Clerk.mountSignIn(el);
+    window.Clerk.addListener(function() {
+      if (window.Clerk.user) checkAndApprove();
+    });
+    return;
+  }
+  var email = (user.primaryEmailAddress && user.primaryEmailAddress.emailAddress || "").toLowerCase();
+  if (email !== publisherEmail) {
+    setStatus("Apenas o propriet\\u00e1rio do site pode aprovar acessos.", "err");
+    return;
+  }
+  window.Clerk.session.getToken().then(doApprove);
+}
+
+(function() {
+  var s = document.createElement("script");
+  s.src = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.min.js";
+  s.setAttribute("data-clerk-publishable-key", \${JSON.stringify(CLERK_PUBLISHABLE_KEY)});
+  s.addEventListener("load", function() {
+    window.Clerk.load().then(checkAndApprove);
+  });
+  document.head.appendChild(s);
+})();
+</script></body></html>\`;
+}
+
 export default async function handler(req, res) {
-  var raw = req.query && req.query.token;
-  if (!raw) {
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token ausente.", false));
-  }
-
-  var payload = verifySignedToken(raw);
-  if (!payload) {
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token expirado ou inv\\u00e1lido.", false));
-  }
-
-  try {
-    var result = await clerkClient.users.getUserList({ emailAddress: [payload.email] });
-    var user = result.data && result.data[0];
-    if (!user) {
+  if (req.method === "GET") {
+    var raw = req.query && req.query.token;
+    if (!raw) {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      return res.status(404).send(htmlPage("Usu\\u00e1rio n\\u00e3o encontrado", "O usu\\u00e1rio " + payload.email + " ainda n\\u00e3o criou uma conta.", false));
+      return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token ausente.", false));
     }
 
-    await clerkClient.users.updateUserMetadata(user.id, {
-      privateMetadata: { ["approved:" + PROJECT_NAME]: true }
-    });
+    var payload = verifySignedToken(raw);
+    if (!payload) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token expirado ou inv\\u00e1lido.", false));
+    }
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(htmlPage("Acesso aprovado \\u2705", payload.email + " agora tem acesso a esta p\\u00e1gina.", true));
-  } catch(e) {
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(500).send(htmlPage("Erro", "Falha ao aprovar usu\\u00e1rio. Tente novamente.", false));
+    return res.status(200).send(approvalPage(payload.email, raw));
   }
+
+  if (req.method === "POST") {
+    var auth = (req.headers.authorization || "").replace(/^Bearer\\s+/, "");
+    if (!auth) return res.status(401).json({ error: "Not authenticated" });
+
+    var claims;
+    try {
+      claims = await verifyToken(auth, { secretKey: process.env.CLERK_SECRET_KEY });
+    } catch {
+      return res.status(401).json({ error: "Invalid session" });
+    }
+
+    var callerUser;
+    try {
+      callerUser = await clerkClient.users.getUser(claims.sub);
+    } catch {
+      return res.status(500).json({ error: "Failed to resolve user" });
+    }
+    var primary = callerUser.emailAddresses.find(function(e) { return e.id === callerUser.primaryEmailAddressId; });
+    var callerEmail = (primary && primary.emailAddress || "").toLowerCase();
+
+    if (callerEmail !== PUBLISHER_EMAIL) {
+      return res.status(403).json({ error: "Only the site owner can approve access" });
+    }
+
+    var tokenStr = req.body && req.body.token;
+    if (!tokenStr) return res.status(400).json({ error: "Token missing" });
+
+    var tokenPayload = verifySignedToken(tokenStr);
+    if (!tokenPayload) return res.status(400).json({ error: "Token expired or invalid" });
+
+    try {
+      var result = await clerkClient.users.getUserList({ emailAddress: [tokenPayload.email] });
+      var user = result.data && result.data[0];
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      await clerkClient.users.updateUserMetadata(user.id, {
+        privateMetadata: { ["approved:" + PROJECT_NAME]: true }
+      });
+
+      return res.status(200).json({ success: true });
+    } catch(e) {
+      return res.status(500).json({ error: "Failed to approve user" });
+    }
+  }
+
+  return res.status(405).json({ error: "Method not allowed" });
 };
 `;
     }
@@ -9846,7 +9965,11 @@ var AtPathPlugin = class extends Plugin {
           pages,
           projectName
         });
-        const approveFunctionSrc = buildApproveFunction({ projectName });
+        const approveFunctionSrc = buildApproveFunction({
+          projectName,
+          clerkPublishableKey: this.settings.clerkPublishableKey,
+          publisherEmail: pubEmail
+        });
         const packageJson = JSON.stringify({
           type: "module",
           dependencies: { "@clerk/backend": "^2" }

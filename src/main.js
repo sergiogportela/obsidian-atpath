@@ -1857,7 +1857,11 @@ class AtPathPlugin extends Plugin {
           pages,
           projectName,
         });
-        const approveFunctionSrc = buildApproveFunction({ projectName });
+        const approveFunctionSrc = buildApproveFunction({
+          projectName,
+          clerkPublishableKey: this.settings.clerkPublishableKey,
+          publisherEmail: pubEmail,
+        });
 
         const packageJson = JSON.stringify({
           type: "module",

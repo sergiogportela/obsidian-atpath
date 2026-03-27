@@ -111,7 +111,11 @@ function testAuthFunctionSource() {
 function testApproveFunctionSource() {
   console.log("\n--- buildApproveFunction ---\n");
 
-  const src = buildApproveFunction({ projectName: "my-site" });
+  const src = buildApproveFunction({
+    projectName: "my-site",
+    clerkPublishableKey: "pk_test_abc123",
+    publisherEmail: "Owner@Example.com",
+  });
 
   // Test 1: Uses timingSafeEqual
   try {
@@ -147,10 +151,10 @@ function testApproveFunctionSource() {
     log("FAIL", "Approve function checks token expiry", e.message);
   }
 
-  // Test 5: Looks up user by email
+  // Test 5: Looks up user by email in POST branch
   try {
     assert.ok(src.includes("getUserList"), "calls getUserList");
-    assert.ok(src.includes("emailAddress: [payload.email]"), "filters by email");
+    assert.ok(src.includes("emailAddress: [tokenPayload.email]"), "filters by email from token");
     log("PASS", "Approve function looks up user by email");
   } catch (e) {
     log("FAIL", "Approve function looks up user by email", e.message);
@@ -165,23 +169,69 @@ function testApproveFunctionSource() {
     log("FAIL", "Approve function sets privateMetadata['approved:{site}'] = true", e.message);
   }
 
-  // Test 7: Returns HTML responses (not JSON)
+  // Test 7: Dispatches on req.method (GET vs POST)
   try {
-    assert.ok(src.includes("text/html"), "returns HTML content type");
-    assert.ok(src.includes("Acesso aprovado"), "success page text");
-    assert.ok(src.includes("Link inv"), "invalid token page text");
-    assert.ok(src.includes("n\\u00e3o encontrado"), "user not found page text");
-    log("PASS", "Approve function returns styled HTML pages");
+    assert.ok(src.includes('req.method === "GET"'), "checks for GET method");
+    assert.ok(src.includes('req.method === "POST"'), "checks for POST method");
+    assert.ok(src.includes("405"), "returns 405 for other methods");
+    log("PASS", "Approve function dispatches on req.method (GET/POST/405)");
   } catch (e) {
-    log("FAIL", "Approve function returns styled HTML pages", e.message);
+    log("FAIL", "Approve function dispatches on req.method (GET/POST/405)", e.message);
   }
 
-  // Test 8: PROJECT_NAME is embedded
+  // Test 8: GET branch serves HTML with Clerk JS
+  try {
+    assert.ok(src.includes("approvalPage"), "GET serves approval page HTML");
+    assert.ok(src.includes("clerk-js@5"), "loads Clerk JS SDK");
+    assert.ok(src.includes("clerk-publishable-key"), "sets Clerk publishable key");
+    assert.ok(src.includes("mountSignIn"), "mounts Clerk sign-in widget");
+    log("PASS", "GET branch serves HTML page with Clerk JS authentication");
+  } catch (e) {
+    log("FAIL", "GET branch serves HTML page with Clerk JS authentication", e.message);
+  }
+
+  // Test 9: POST branch requires Clerk session (verifyToken)
+  try {
+    assert.ok(src.includes('import { verifyToken, createClerkClient } from "@clerk/backend"'), "imports verifyToken");
+    assert.ok(src.includes("verifyToken(auth,"), "POST calls verifyToken");
+    assert.ok(src.includes('res.status(401)'), "returns 401 for missing/invalid session");
+    log("PASS", "POST branch requires Clerk session via verifyToken");
+  } catch (e) {
+    log("FAIL", "POST branch requires Clerk session via verifyToken", e.message);
+  }
+
+  // Test 10: POST checks caller email against PUBLISHER_EMAIL
+  try {
+    assert.ok(src.includes("callerEmail !== PUBLISHER_EMAIL"), "compares caller to publisher");
+    assert.ok(src.includes('res.status(403)'), "returns 403 for non-publisher");
+    log("PASS", "POST branch checks caller email against PUBLISHER_EMAIL");
+  } catch (e) {
+    log("FAIL", "POST branch checks caller email against PUBLISHER_EMAIL", e.message);
+  }
+
+  // Test 11: PUBLISHER_EMAIL is embedded (case-insensitive)
+  try {
+    assert.ok(src.includes('const PUBLISHER_EMAIL = "owner@example.com"'), "PUBLISHER_EMAIL lowercased");
+    log("PASS", "PUBLISHER_EMAIL is embedded and lowercased");
+  } catch (e) {
+    log("FAIL", "PUBLISHER_EMAIL is embedded and lowercased", e.message);
+  }
+
+  // Test 12: PROJECT_NAME is embedded
   try {
     assert.ok(src.includes('const PROJECT_NAME = "my-site"'), "PROJECT_NAME embedded");
     log("PASS", "Approve function embeds PROJECT_NAME");
   } catch (e) {
     log("FAIL", "Approve function embeds PROJECT_NAME", e.message);
+  }
+
+  // Test 13: Email in approval page is HTML-escaped (XSS prevention)
+  try {
+    assert.ok(src.includes("escapeHtml"), "has escapeHtml function");
+    assert.ok(src.includes("escapeHtml(email)"), "escapes email in approval page");
+    log("PASS", "Approval page HTML-escapes email (XSS prevention)");
+  } catch (e) {
+    log("FAIL", "Approval page HTML-escapes email (XSS prevention)", e.message);
   }
 }
 

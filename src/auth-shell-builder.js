@@ -135,9 +135,10 @@ function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publishe
       var body;
       try { body = await resp.json(); } catch(e) { body = {}; }
       var approvalUrl = body.approvalUrl || '';
+      var siteUrl = approvalUrl ? new URL(approvalUrl).origin : '';
       var email = (clerk.user.primaryEmailAddress && clerk.user.primaryEmailAddress.emailAddress) || '';
-      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso: ${title}');
-      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : ''));
+      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso');
+      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nAprovar: ' + approvalUrl : ''));
       authMsg.textContent = 'Voc\\u00ea n\\u00e3o tem acesso a esta p\\u00e1gina.';
 
       var wrapper = document.createElement('div');
@@ -145,7 +146,7 @@ function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publishe
 
       // Primary: WhatsApp button (when publisherWhatsapp + approvalUrl available)
       if (publisherWhatsapp && approvalUrl) {
-        var waText = encodeURIComponent('Ol\\u00e1! Gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + '\\n\\nLink para aprovar:\\n' + approvalUrl);
+        var waText = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + '\\n\\nAprovar: ' + approvalUrl);
         var waBtn = document.createElement('a');
         waBtn.href = 'https://wa.me/' + publisherWhatsapp + '?text=' + waText;
         waBtn.target = '_blank';
@@ -162,7 +163,7 @@ function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publishe
         emailLabel.textContent = 'Entre em contato: ' + publisherEmail;
         wrapper.appendChild(emailLabel);
 
-        var copyText = 'Solicita\\u00e7\\u00e3o de acesso: ${title}\\n\\nOl\\u00e1, gostaria de ter acesso a ${title}.\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : '');
+        var copyText = 'Ol\\u00e1, gostaria de ter acesso a ' + siteUrl + '\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nAprovar: ' + approvalUrl : '');
         var copyBtn = document.createElement('button');
         copyBtn.textContent = 'Copiar solicita\\u00e7\\u00e3o';
         copyBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#a88bfa;color:#1e1e1e;border-radius:6px;font-weight:600;border:none;cursor:pointer;font-size:1em;';
