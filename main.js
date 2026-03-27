@@ -7359,10 +7359,23 @@ var require_html_builder = __commonJS({
       return mdi.render(preprocessObsidianImages(md));
     }
     var HEADING_RE = /^<(h[1-4])>(.*?)<\/\1>$/i;
+    function slugifyHeading(text) {
+      return text.replace(/<[^>]+>/g, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\w\s-]/g, "").replace(/[\s_]+/g, "-").replace(/-{2,}/g, "-").replace(/^-|-$/g, "");
+    }
     function wrapSections(html) {
       const lines = html.split("\n");
       const out = [];
       const stack = [];
+      const usedSlugs = /* @__PURE__ */ new Set();
+      function uniqueSlug(base) {
+        let slug = base;
+        let n = 2;
+        while (usedSlugs.has(slug)) {
+          slug = base + "-" + n++;
+        }
+        usedSlugs.add(slug);
+        return slug;
+      }
       for (const line of lines) {
         const m = line.match(HEADING_RE);
         if (!m) {
@@ -7372,8 +7385,9 @@ var require_html_builder = __commonJS({
         const tag = m[1].toLowerCase();
         const level = parseInt(tag[1], 10);
         const content = m[2];
+        const slug = uniqueSlug(slugifyHeading(content));
         if (level === 1) {
-          out.push(line);
+          out.push(`<${tag} id="${slug}">${content}</${tag}>`);
           continue;
         }
         while (stack.length > 0 && stack[stack.length - 1] >= level) {
@@ -7381,7 +7395,7 @@ var require_html_builder = __commonJS({
           out.push("</details>");
         }
         stack.push(level);
-        out.push(`<details>`);
+        out.push(`<details id="${slug}">`);
         out.push(`<summary><${tag}>${content}</${tag}></summary>`);
       }
       while (stack.length > 0) {
@@ -7557,6 +7571,31 @@ ${bodyContent}
     mermaid.initialize({ startOnLoad: false, theme: 'dark' });
     mermaid.run();
   } catch(e) {}
+  // Anchor navigation for collapsed <details> sections
+  (function() {
+    function openTarget(hash) {
+      if (!hash) return;
+      var el = document.getElementById(hash.replace(/^#/, ''));
+      if (!el) return;
+      var node = el;
+      while (node) {
+        if (node.tagName === 'DETAILS') node.open = true;
+        node = node.parentElement;
+      }
+      if (el.tagName === 'DETAILS') el.open = true;
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
+    if (location.hash) openTarget(location.hash);
+    document.addEventListener('click', function(e) {
+      var a = e.target.closest('a[href^="#"]');
+      if (!a) return;
+      e.preventDefault();
+      var href = a.getAttribute('href');
+      history.pushState(null, '', href);
+      openTarget(href);
+    });
+    window.addEventListener('hashchange', function() { openTarget(location.hash); });
+  })();
 })();
 </script>
 </body>
@@ -7646,7 +7685,7 @@ ${bodyHtml}
 </div>`;
       return htmlPage(noteTitle, bodyContent);
     }
-    module2.exports = { buildMainPage: buildMainPage2, buildAtPathPage: buildAtPathPage2, buildUnpublishedPage: buildUnpublishedPage2, slugifyPath: slugifyPath2, AT_PATH_RE: AT_PATH_RE2, CSS_TEMPLATE };
+    module2.exports = { buildMainPage: buildMainPage2, buildAtPathPage: buildAtPathPage2, buildUnpublishedPage: buildUnpublishedPage2, slugifyPath: slugifyPath2, slugifyHeading, AT_PATH_RE: AT_PATH_RE2, CSS_TEMPLATE };
   }
 });
 
@@ -7657,15 +7696,6 @@ var require_vercel_api = __commonJS({
     var VERCEL_API = "https://api.vercel.com";
     function slugify2(title) {
       return title.toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-{2,}/g, "-").replace(/^-|-$/g, "");
-    }
-    function sha1Hex(str) {
-      let hash = 0;
-      for (let i = 0; i < str.length; i++) {
-        const ch = str.charCodeAt(i);
-        hash = (hash << 5) - hash + ch;
-        hash |= 0;
-      }
-      return Math.abs(hash).toString(16).slice(0, 4);
     }
     function buildRequestError(service, method, path, status, detail) {
       let message = service + " " + method + " " + path + " failed";
@@ -7706,6 +7736,16 @@ var require_vercel_api = __commonJS({
       }
       return { status: resp.status, data: resp.json };
     }
+    async function checkProjectAvailability2(token, slug) {
+      try {
+        const { status, data } = await apiCall(token, "GET", `/v9/projects/${slug}`);
+        if (status === 200 && data && data.id) return "ours";
+      } catch (e) {
+        if (e.status === 404) return "available";
+        throw e;
+      }
+      return "available";
+    }
     async function ensureProject2(token, slug) {
       try {
         const { status, data } = await apiCall(token, "GET", `/v9/projects/${slug}`);
@@ -7728,12 +7768,7 @@ var require_vercel_api = __commonJS({
         return slug;
       } catch (e) {
         if (e.status === 409 || e.message && e.message.includes("already")) {
-          const fallback = slug + "-" + sha1Hex(slug + Date.now());
-          await apiCall(token, "POST", "/v10/projects", {
-            name: fallback,
-            framework: null
-          });
-          return fallback;
+          throw new Error('The project name "' + slug + '" is already taken on Vercel. Please choose a different name.');
         }
         throw new Error("Failed to create Vercel project: " + (e.message || e.status));
       }
@@ -7762,54 +7797,52 @@ var require_vercel_api = __commonJS({
         }
       }
     }
-    function generateAuthSecret2() {
-      return require("crypto").randomBytes(32).toString("hex");
+    async function waitForDeployment(token, deploymentId, onProgress, timeoutMs) {
+      if (!timeoutMs) timeoutMs = 6e4;
+      const interval = 3e3;
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const { data } = await apiCall(token, "GET", `/v13/deployments/${deploymentId}`);
+        const state = data && data.readyState;
+        if (state === "READY") return { ready: true, url: data.url, state };
+        if (state === "ERROR" || state === "CANCELED") {
+          const detail = data.errorMessage || state;
+          return { ready: false, url: data.url, state, error: detail };
+        }
+        if (onProgress) {
+          const label = state === "BUILDING" ? "Building..." : "Deploying...";
+          onProgress(label);
+        }
+        await new Promise((r) => setTimeout(r, interval));
+      }
+      return { ready: false, state: "TIMEOUT", error: "Deployment timed out after " + timeoutMs / 1e3 + "s" };
     }
-    async function provisionUpstashRedis2(upstashEmail, upstashApiKey) {
-      if (!upstashEmail) {
-        throw new Error("Upstash account email is required to provision Redis.");
-      }
-      const basicAuth = Buffer.from(upstashEmail + ":" + upstashApiKey).toString("base64");
-      let resp;
+    async function healthCheck(url) {
+      await new Promise((r) => setTimeout(r, 2e3));
       try {
-        resp = await requestUrl2({
-          url: "https://api.upstash.com/v2/redis/database",
-          method: "POST",
-          headers: {
-            Authorization: "Basic " + basicAuth,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            database_name: "atpath-auth",
-            region: "global",
-            primary_region: "us-east-1",
-            tls: true
-          })
-        });
+        const resp = await requestUrl2({ url, method: "GET" });
+        const text = typeof resp.text === "string" ? resp.text : "";
+        if (text.includes("NOT_FOUND") || text.includes("DEPLOYMENT_NOT_FOUND")) {
+          return { ok: false, status: resp.status, detail: "Vercel returned NOT_FOUND at deployed URL" };
+        }
+        if (resp.status >= 400) {
+          return { ok: false, status: resp.status, detail: "HTTP " + resp.status };
+        }
+        return { ok: true, status: resp.status };
       } catch (e) {
-        const status = typeof e.status === "number" ? e.status : null;
-        throw buildRequestError("Upstash API", "POST", "/v2/redis/database", status, e.message || "");
+        return { ok: false, status: null, detail: e.message || String(e) };
       }
-      if (resp.status >= 400) {
-        throw buildRequestError("Upstash API", "POST", "/v2/redis/database", resp.status, extractErrorDetail(resp.json, resp.text));
-      }
-      const data = resp.json;
-      return {
-        endpoint: data.endpoint,
-        password: data.password,
-        restUrl: data.rest_url || "https://" + data.endpoint,
-        restToken: data.rest_token
-      };
     }
     async function deployToVercel2(token, noteTitle, files, opts) {
       const projectName = opts && opts.projectName || await ensureProject2(token, slugify2(noteTitle));
+      const onProgress = opts && opts.onProgress;
       if (opts && opts.isPrivate && opts.envVars) {
         await setEnvVars(token, projectName, opts.envVars);
       }
       const fileEntries = files.map((f) => ({
         file: f.path,
         data: f.content,
-        encoding: "utf-8"
+        encoding: f.encoding || "utf-8"
       }));
       const { data } = await apiCall(token, "POST", "/v13/deployments", {
         name: projectName,
@@ -7817,9 +7850,43 @@ var require_vercel_api = __commonJS({
         projectSettings: { framework: null },
         files: fileEntries
       });
-      return { url: "https://" + projectName + ".vercel.app", projectName };
+      const deploymentId = data && data.id;
+      const fallbackUrl = "https://" + projectName + ".vercel.app";
+      const result = { url: fallbackUrl, projectName, deploymentState: "UNKNOWN" };
+      if (!deploymentId) return result;
+      const readyState = data.readyState;
+      if (readyState === "READY") {
+        result.deploymentState = "READY";
+      } else if (readyState === "ERROR" || readyState === "CANCELED") {
+        result.deploymentState = readyState;
+        result.deploymentError = data.errorMessage || readyState;
+      } else {
+        if (onProgress) onProgress("Building...");
+        const poll = await waitForDeployment(token, deploymentId, onProgress);
+        result.deploymentState = poll.state || "UNKNOWN";
+        if (poll.error) result.deploymentError = poll.error;
+      }
+      if (result.deploymentState === "READY") {
+        try {
+          const { data: projData } = await apiCall(token, "GET", `/v9/projects/${projectName}`);
+          const aliases = projData && projData.targets && projData.targets.production && projData.targets.production.alias;
+          const expectedAlias = projectName + ".vercel.app";
+          const vercelAlias = aliases && aliases.find((a) => a.endsWith(".vercel.app"));
+          if (vercelAlias && vercelAlias !== expectedAlias) {
+            result.deploymentState = "NAME_TRUNCATED";
+            result.deploymentError = 'The project name "' + projectName + '" is too long for a .vercel.app URL. Vercel shortened it to "' + vercelAlias.replace(".vercel.app", "") + '". Please shorten the note title and try again.';
+            result.url = "https://" + vercelAlias;
+          } else {
+            result.url = vercelAlias ? "https://" + vercelAlias : result.url;
+            result.healthCheck = await healthCheck(result.url);
+          }
+        } catch (_) {
+          result.healthCheck = await healthCheck(result.url);
+        }
+      }
+      return result;
     }
-    module2.exports = { slugify: slugify2, ensureProject: ensureProject2, deployToVercel: deployToVercel2, setEnvVars, generateAuthSecret: generateAuthSecret2, provisionUpstashRedis: provisionUpstashRedis2 };
+    module2.exports = { slugify: slugify2, ensureProject: ensureProject2, checkProjectAvailability: checkProjectAvailability2, deployToVercel: deployToVercel2, setEnvVars };
   }
 });
 
@@ -7827,62 +7894,14 @@ var require_vercel_api = __commonJS({
 var require_auth_shell_builder = __commonJS({
   "src/auth-shell-builder.js"(exports2, module2) {
     var { CSS_TEMPLATE } = require_html_builder();
-    var HLJS_CSS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
-    var HLJS_JS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js";
-    var MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
     function escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
-    var AUTH_CSS = `
-#auth-ui {
-  max-width: 400px;
-  margin: 2em auto;
-  text-align: center;
-}
-#auth-ui .auth-input {
-  width: 100%;
-  padding: 0.6em 0.8em;
-  margin-bottom: 0.8em;
-  background: #2d2d2d;
-  color: #dcddde;
-  border: 1px solid #444;
-  border-radius: 6px;
-  font-size: 1em;
-  outline: none;
-}
-#auth-ui .auth-input:focus {
-  border-color: #a88bfa;
-}
-#auth-ui .auth-btn {
-  display: inline-block;
-  padding: 0.6em 1.4em;
-  background: #a88bfa;
-  color: #1e1e1e;
-  border: none;
-  border-radius: 6px;
-  font-size: 1em;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-#auth-ui .auth-btn:hover {
-  background: #9370f0;
-}
-#auth-ui .auth-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-#auth-ui .auth-msg {
-  color: #888;
-  font-size: 0.95em;
-  margin: 1em 0;
-}
-#auth-ui .auth-msg.error {
-  color: #e06c75;
-}
-`;
-    function buildAuthShell2(noteTitle) {
+    function buildAuthShell2(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp) {
       const title = escapeHtml(noteTitle);
+      const pubKeyJSON = JSON.stringify(clerkPublishableKey);
+      const publisherEmailJSON = JSON.stringify(publisherEmail || "");
+      const publisherWhatsappJSON = JSON.stringify(publisherWhatsapp || "");
       return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -7890,182 +7909,244 @@ var require_auth_shell_builder = __commonJS({
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>${CSS_TEMPLATE}</style>
-<style>${AUTH_CSS}</style>
-<link rel="stylesheet" href="${HLJS_CSS}">
 </head>
 <body>
 <div class="container">
   <h1>${title}</h1>
   <div id="auth-ui">
-    <p class="auth-msg">Checking session...</p>
+    <p id="auth-msg" style="text-align:center;color:#888">Carregando...</p>
   </div>
-  <div id="content" style="display:none"></div>
 </div>
 
-<script src="${HLJS_JS}"></script>
-<script src="${MERMAID_JS}"></script>
 <script>
-(function() {
+(async function() {
   var authUI  = document.getElementById('auth-ui');
-  var content = document.getElementById('content');
+  var authMsg = document.getElementById('auth-msg');
+  var publishableKey = ${pubKeyJSON};
+  var publisherEmail = ${publisherEmailJSON};
+  var publisherWhatsapp = ${publisherWhatsappJSON};
+  var pollTimer = null;
 
-  // \u2500\u2500 Derive pageKey from URL \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  var path = window.location.pathname.replace(/^\\//, '').replace(/\\.html$/, '');
+  // Derive pageKey from URL
+  var path = window.location.pathname.replace(/^\\//, '').replace(/\\.html?$/, '');
   var pageKey = path || 'main';
   if (pageKey === 'index') pageKey = 'main';
 
-  // \u2500\u2500 State: email the user typed (persisted across states) \u2500\u2500\u2500\u2500\u2500\u2500
-  var currentEmail = '';
-
-  // \u2500\u2500 Renderers for each auth state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-  function showLoading() {
-    authUI.innerHTML = '<p class="auth-msg">Checking session...</p>';
-  }
-
-  function showLoginForm() {
-    authUI.innerHTML =
-      '<input id="email-input" class="auth-input" type="email" placeholder="Email address" value="' + escapeAttr(currentEmail) + '">' +
-      '<button id="send-link-btn" class="auth-btn">Send magic link</button>';
-
-    document.getElementById('send-link-btn').addEventListener('click', handleSendLink);
-    document.getElementById('email-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') handleSendLink();
+  // Load Clerk JS SDK \u2014 data-clerk-publishable-key triggers auto-init of window.Clerk
+  var script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js';
+  script.crossOrigin = 'anonymous';
+  script.setAttribute('data-clerk-publishable-key', publishableKey);
+  script.onload = function() {
+    initClerk().catch(function(e) {
+      authMsg.style.display = '';
+      authMsg.textContent = 'Erro de autentica\\u00e7\\u00e3o: ' + (e.message || e);
     });
+  };
+  script.onerror = function() { authMsg.textContent = 'Falha ao carregar autentica\\u00e7\\u00e3o.'; };
+  document.head.appendChild(script);
+
+  function fallbackCopy(text, btn) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); btn.textContent = 'Copiado!'; } catch(e) { btn.textContent = 'Falha ao copiar'; }
+    document.body.removeChild(ta);
   }
 
-  function showLinkSent() {
-    authUI.innerHTML = '<p class="auth-msg">Check your email for the login link.</p>';
+  function showContent(html) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    document.open();
+    document.write(html);
+    document.close();
   }
 
-  function showNotApproved() {
-    authUI.innerHTML =
-      '<p class="auth-msg">Your account has not been approved yet.</p>' +
-      '<button id="request-btn" class="auth-btn">Request access</button>';
-
-    document.getElementById('request-btn').addEventListener('click', handleRequestAccess);
-  }
-
-  function showAccessRequested() {
-    authUI.innerHTML = '<p class="auth-msg">Request sent, you\\u2019ll receive an email when approved.</p>';
-  }
-
-  function showError(msg) {
-    authUI.innerHTML = '<p class="auth-msg error">' + escapeText(msg) + '</p>';
-  }
-
-  function showAuthenticated(html) {
-    authUI.style.display = 'none';
-    content.innerHTML = html;
-    content.style.display = '';
-
-    // Syntax highlighting
-    try {
-      document.querySelectorAll('#content pre code').forEach(function(el) {
-        if (!el.classList.contains('language-mermaid')) hljs.highlightElement(el);
-      });
-    } catch(e) {}
-
-    // Mermaid diagrams
-    try {
-      document.querySelectorAll('#content pre code.language-mermaid').forEach(function(el) {
-        var div = document.createElement('div');
-        div.className = 'mermaid';
-        div.textContent = el.textContent;
-        el.closest('pre').replaceWith(div);
-      });
-      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
-      mermaid.run();
-    } catch(e) {}
-  }
-
-  // \u2500\u2500 Escape helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-  function escapeAttr(s) {
-    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function escapeText(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  // \u2500\u2500 API helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-  function apiGet(url) {
-    return fetch(url, { credentials: 'include' }).then(function(r) {
-      return r.text().then(function(body) {
-        return { status: r.status, body: body };
-      });
-    });
-  }
-
-  function apiPost(url, data) {
-    return fetch(url, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(function(r) { return r.json(); });
-  }
-
-  // \u2500\u2500 Action handlers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-  function handleSendLink() {
-    var input = document.getElementById('email-input');
-    var email = (input && input.value || '').trim();
-    if (!email) return;
-    currentEmail = email;
-
-    var btn = document.getElementById('send-link-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
-
-    apiPost('/api/auth', { action: 'send-link', email: email })
-      .then(function(data) {
-        if (data.status === 'sent') {
-          showLinkSent();
-        } else if (data.status === 'not_approved') {
-          showNotApproved();
-        } else {
-          showError('Unexpected response. Please try again.');
+  function startApprovalPoll(clerk) {
+    if (pollTimer) return;
+    pollTimer = setInterval(async function() {
+      try {
+        var session = clerk.session;
+        if (!session) return;
+        var t = await session.getToken();
+        var r = await fetch('/api/auth?page=' + encodeURIComponent(pageKey), {
+          headers: { 'Authorization': 'Bearer ' + t }
+        });
+        if (r.status === 200) {
+          var html = await r.text();
+          showContent(html);
         }
-      })
-      .catch(function() {
-        showError('Network error. Please try again.');
-      });
+      } catch(e) {}
+    }, 15000);
   }
 
-  function handleRequestAccess() {
-    var btn = document.getElementById('request-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+  async function fetchContent(clerk) {
+    authMsg.textContent = 'Verificando acesso...';
+    authMsg.style.display = '';
 
-    apiPost('/api/auth', { action: 'request-access', email: currentEmail })
-      .then(function(data) {
-        if (data.status === 'requested') {
-          showAccessRequested();
-        } else {
-          showError('Unexpected response. Please try again.');
-        }
-      })
-      .catch(function() {
-        showError('Network error. Please try again.');
+    var session = clerk.session;
+    if (!session) {
+      authMsg.textContent = 'Sess\\u00e3o inativa. Atualize a p\\u00e1gina e entre novamente.';
+      return;
+    }
+
+    var token;
+    try {
+      token = await session.getToken();
+    } catch(e) {
+      authMsg.textContent = 'Falha ao obter token de sess\\u00e3o.';
+      return;
+    }
+
+    var resp;
+    try {
+      resp = await fetch('/api/auth?page=' + encodeURIComponent(pageKey), {
+        headers: { 'Authorization': 'Bearer ' + token }
       });
-  }
+    } catch(e) {
+      authMsg.textContent = 'Erro de rede. Tente novamente.';
+      return;
+    }
 
-  // \u2500\u2500 Boot: check session then show correct state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if (resp.status === 200) {
+      var html = await resp.text();
+      showContent(html);
+    } else if (resp.status === 403) {
+      var body;
+      try { body = await resp.json(); } catch(e) { body = {}; }
+      var approvalUrl = body.approvalUrl || '';
+      var email = (clerk.user.primaryEmailAddress && clerk.user.primaryEmailAddress.emailAddress) || '';
+      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso: ${title}');
+      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : ''));
+      authMsg.textContent = 'Voc\\u00ea n\\u00e3o tem acesso a esta p\\u00e1gina.';
 
-  showLoading();
+      var wrapper = document.createElement('div');
+      wrapper.style.cssText = 'text-align:center;margin-top:1em;';
 
-  apiGet('/api/auth?action=content&page=' + encodeURIComponent(pageKey))
-    .then(function(res) {
-      if (res.status === 200) {
-        showAuthenticated(res.body);
-      } else {
-        showLoginForm();
+      // Primary: WhatsApp button (when publisherWhatsapp + approvalUrl available)
+      if (publisherWhatsapp && approvalUrl) {
+        var waText = encodeURIComponent('Ol\\u00e1! Gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + '\\n\\nLink para aprovar:\\n' + approvalUrl);
+        var waBtn = document.createElement('a');
+        waBtn.href = 'https://wa.me/' + publisherWhatsapp + '?text=' + waText;
+        waBtn.target = '_blank';
+        waBtn.rel = 'noopener';
+        waBtn.textContent = 'Solicitar acesso via WhatsApp';
+        waBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#25D366;color:#fff;border-radius:6px;font-weight:600;text-decoration:none;font-size:1em;';
+        wrapper.appendChild(waBtn);
       }
-    })
-    .catch(function() {
-      showLoginForm();
+
+      // Fallback: copy + mailto (when publisherEmail available)
+      if (publisherEmail) {
+        var emailLabel = document.createElement('p');
+        emailLabel.style.cssText = 'color:#888;font-size:0.9em;margin-top:1em;margin-bottom:0.5em;';
+        emailLabel.textContent = 'Entre em contato: ' + publisherEmail;
+        wrapper.appendChild(emailLabel);
+
+        var copyText = 'Solicita\\u00e7\\u00e3o de acesso: ${title}\\n\\nOl\\u00e1, gostaria de ter acesso a ${title}.\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : '');
+        var copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copiar solicita\\u00e7\\u00e3o';
+        copyBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#a88bfa;color:#1e1e1e;border-radius:6px;font-weight:600;border:none;cursor:pointer;font-size:1em;';
+        copyBtn.addEventListener('click', function() {
+          try {
+            navigator.clipboard.writeText(copyText).then(function() {
+              copyBtn.textContent = 'Copiado!';
+            }, function() {
+              fallbackCopy(copyText, copyBtn);
+            });
+          } catch(e) {
+            fallbackCopy(copyText, copyBtn);
+          }
+        });
+        wrapper.appendChild(copyBtn);
+
+        var mailLink = document.createElement('a');
+        mailLink.href = 'mailto:' + publisherEmail + '?subject=' + subject + '&body=' + mailBody;
+        mailLink.textContent = 'Abrir cliente de email';
+        mailLink.style.cssText = 'display:block;margin-top:0.75em;font-size:0.85em;color:#888;text-decoration:underline;';
+        wrapper.appendChild(mailLink);
+      }
+
+      if (wrapper.children.length > 0) {
+        authUI.appendChild(wrapper);
+      }
+
+      // Auto-poll: check every 15s if user has been approved
+      var pollStatus = document.createElement('p');
+      pollStatus.style.cssText = 'text-align:center;color:#888;font-size:0.8em;margin-top:1.2em;';
+      pollStatus.textContent = 'Aguardando aprova\\u00e7\\u00e3o...';
+      authUI.appendChild(pollStatus);
+      startApprovalPoll(clerk);
+    } else {
+      authMsg.textContent = 'Autentica\\u00e7\\u00e3o falhou. Atualize a p\\u00e1gina e tente novamente.';
+    }
+  }
+
+  async function initClerk() {
+    var clerk = window.Clerk;
+    if (!clerk) { authMsg.textContent = 'Falha ao inicializar autentica\\u00e7\\u00e3o.'; return; }
+    await clerk.load({
+      localization: {
+        socialButtonsBlockButton: 'Continuar com {{provider|titleize}}',
+        dividerText: 'ou',
+        formButtonPrimary: 'Continuar',
+        formFieldLabel__emailAddress: 'Endere\\u00e7o de e-mail',
+        formFieldLabel__firstName: 'Primeiro nome',
+        formFieldLabel__lastName: 'Sobrenome',
+        formFieldLabel__password: 'Senha',
+        formFieldInputPlaceholder__emailAddress: 'Digite seu e-mail',
+        formFieldInputPlaceholder__firstName: 'Primeiro nome',
+        formFieldInputPlaceholder__lastName: 'Sobrenome',
+        formFieldInputPlaceholder__password: 'Digite sua senha',
+        signUp: {
+          start: {
+            title: 'Criar sua conta',
+            subtitle: 'Bem-vindo! Preencha os dados para continuar.',
+            actionText: 'J\\u00e1 possui uma conta?',
+            actionLink: 'Entrar',
+          },
+          emailCode: {
+            title: 'Verifique seu e-mail',
+            subtitle: 'para continuar',
+            formTitle: 'C\\u00f3digo de verifica\\u00e7\\u00e3o',
+            formSubtitle: 'Insira o c\\u00f3digo enviado para seu e-mail',
+            resendButton: 'N\\u00e3o recebeu? Reenviar c\\u00f3digo',
+          },
+        },
+        signIn: {
+          start: {
+            title: 'Entrar',
+            subtitle: 'Bem-vindo de volta!',
+            actionText: 'N\\u00e3o possui uma conta?',
+            actionLink: 'Cadastrar-se',
+          },
+        },
+      }
     });
+
+    if (clerk.user) {
+      // Already signed in \u2014 fetch content directly
+      await fetchContent(clerk);
+    } else {
+      // Mount sign-in component inline (no redirect loop)
+      authMsg.style.display = 'none';
+      var signInDiv = document.createElement('div');
+      signInDiv.id = 'clerk-sign-in';
+      authUI.appendChild(signInDiv);
+      clerk.mountSignUp(signInDiv, { fallbackRedirectUrl: window.location.href });
+
+      // Wait for sign-in to complete via listener
+      await new Promise(function(resolve) {
+        clerk.addListener(function(res) {
+          if (res.user) resolve();
+        });
+      });
+
+      // Clean up sign-in UI and fetch content
+      signInDiv.remove();
+      await fetchContent(clerk);
+    }
+  }
 })();
 </script>
 </body>
@@ -8081,433 +8162,136 @@ var require_auth_function_template = __commonJS({
     function buildAuthFunction2(config) {
       const approvedEmailsJSON = JSON.stringify(config.approvedEmails);
       const pagesJSON = JSON.stringify(config.pages);
-      const noteTitleJSON = JSON.stringify(config.noteTitle);
-      const siteUrlJSON = JSON.stringify(config.siteUrl);
-      return `const crypto = require("crypto");
+      const projectNameJSON = JSON.stringify(config.projectName);
+      return `import { createHmac } from "crypto";
+import { verifyToken, createClerkClient } from "@clerk/backend";
 
 // --- Embedded config (generated at build time) ---
 const APPROVED_EMAILS = ${approvedEmailsJSON};
 const PAGES = ${pagesJSON};
-const NOTE_TITLE = ${noteTitleJSON};
-const SITE_URL = ${siteUrlJSON};
+const PROJECT_NAME = ${projectNameJSON};
 
-// --- JWT helpers (manual, no library) ---
+const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
-function base64url(buf) {
-  return Buffer.from(buf)
-    .toString("base64")
-    .replace(/\\+/g, "-")
-    .replace(/\\//g, "_")
-    .replace(/=+$/, "");
+function signToken(payload) {
+  var data = JSON.stringify(payload);
+  var sig = createHmac("sha256", process.env.CLERK_SECRET_KEY).update(data).digest("hex");
+  return Buffer.from(data).toString("base64url") + "." + sig;
 }
 
-function base64urlDecode(str) {
-  str = str.replace(/-/g, "+").replace(/_/g, "/");
-  while (str.length % 4) str += "=";
-  return Buffer.from(str, "base64");
-}
+export default async function handler(req, res) {
+  const auth = (req.headers.authorization || "").replace(/^Bearer\\s+/, "");
+  if (!auth) return res.status(401).json({ error: "Not authenticated" });
 
-function signJWT(payload, secret) {
-  const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64url(JSON.stringify(payload));
-  const signature = base64url(
-    crypto.createHmac("sha256", secret).update(header + "." + body).digest()
-  );
-  return header + "." + body + "." + signature;
-}
-
-function verifyJWT(token, secret) {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [header, body, sig] = parts;
-  const expected = Buffer.from(
-    base64url(
-      crypto.createHmac("sha256", secret).update(header + "." + body).digest()
-    )
-  );
-  const actual = Buffer.from(sig);
-  if (expected.length !== actual.length) return null;
-  if (!crypto.timingSafeEqual(expected, actual)) return null;
-  const payload = JSON.parse(base64urlDecode(body).toString("utf8"));
-  if (payload.exp && Date.now() / 1000 > payload.exp) return null;
-  return payload;
-}
-
-// --- Upstash Redis REST helpers ---
-
-async function redis(command) {
-  const res = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer " + process.env.UPSTASH_REDIS_REST_TOKEN,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(command),
-  });
-  return res.json();
-}
-
-async function redisSet(key, value, exSeconds) {
-  return redis(["SET", key, value, "EX", String(exSeconds)]);
-}
-
-async function redisGet(key) {
-  const data = await redis(["GET", key]);
-  return data.result;
-}
-
-async function redisDel(key) {
-  return redis(["DEL", key]);
-}
-
-// --- Resend email helper ---
-
-async function sendEmail(to, subject, html) {
-  await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer " + process.env.RESEND_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: "AtPath <onboarding@resend.dev>",
-      to: [to],
-      subject: subject,
-      html: html,
-    }),
-  });
-}
-
-// --- Body parser ---
-
-function parseBody(req) {
-  return new Promise((resolve) => {
-    if (req.body && typeof req.body === "object") {
-      resolve(req.body);
-      return;
-    }
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(data));
-      } catch {
-        resolve({});
-      }
-    });
-  });
-}
-
-// --- Cookie helpers ---
-
-function parseCookies(req) {
-  const header = req.headers.cookie || "";
-  const cookies = {};
-  header.split(";").forEach((pair) => {
-    const [key, ...rest] = pair.trim().split("=");
-    if (key) cookies[key.trim()] = rest.join("=").trim();
-  });
-  return cookies;
-}
-
-// --- Confirmation HTML template ---
-
-function confirmationPage(title, message) {
-  return \`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>\${title}</title>
-<style>
-  body {
-    background: #1e1e1e;
-    color: #d4d4d4;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    margin: 0;
-    padding: 1rem;
-  }
-  .card {
-    background: #2d2d2d;
-    border-radius: 8px;
-    padding: 2rem 2.5rem;
-    max-width: 480px;
-    text-align: center;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
-  }
-  h1 { color: #e0e0e0; font-size: 1.3rem; margin-top: 0; }
-  p { line-height: 1.6; }
-  a { color: #7cafc2; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>\${title}</h1>
-  <p>\${message}</p>
-</div>
-</body>
-</html>\`;
-}
-
-// --- Handler ---
-
-module.exports = async function handler(req, res) {
-  const secret = process.env.AUTH_SECRET;
-
-  // For POST requests, action may be in JSON body instead of query string
-  let action = req.query && req.query.action;
-  let parsedBody = null;
-  if (!action && req.method === "POST") {
-    parsedBody = await parseBody(req);
-    action = parsedBody.action;
+  let claims;
+  try {
+    claims = await verifyToken(auth, { secretKey: process.env.CLERK_SECRET_KEY });
+  } catch {
+    return res.status(401).json({ error: "Invalid session" });
   }
 
-  // ---- send-link (POST) ----
-  if (action === "send-link" && req.method === "POST") {
-    const body = parsedBody || await parseBody(req);
-    const email = (body.email || "").toLowerCase().trim();
-    const approved = APPROVED_EMAILS.includes(email);
-
-    const start = Date.now();
-    if (approved) {
-      const tokenId = crypto.randomUUID();
-      await redisSet("link:" + tokenId, "1", 300);
-      const jwt = signJWT(
-        { sub: email, jti: tokenId, exp: Math.floor(Date.now() / 1000) + 300 },
-        secret
-      );
-      const link = SITE_URL + "/api/auth?action=verify-link&token=" + jwt;
-      await sendEmail(
-        email,
-        "Your login link for " + NOTE_TITLE,
-        "<p>Click the link below to sign in:</p>" +
-          '<p><a href="' + link + '">Sign in to ' + NOTE_TITLE + "</a></p>" +
-          "<p>This link expires in 5 minutes and can only be used once.</p>"
-      );
-    } else {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    // Pad both paths to consistent timing to prevent email enumeration
-    const elapsed = Date.now() - start;
-    const minTime = 1500;
-    if (elapsed < minTime) {
-      await new Promise((r) => setTimeout(r, minTime - elapsed));
-    }
-
-    res.status(200).json({ status: approved ? "sent" : "not_approved" });
-    return;
+  // Fetch user to get email (not in default JWT claims)
+  let email, user;
+  try {
+    user = await clerkClient.users.getUser(claims.sub);
+    const primary = user.emailAddresses.find(function(e) { return e.id === user.primaryEmailAddressId; });
+    email = (primary && primary.emailAddress || "").toLowerCase();
+  } catch {
+    return res.status(500).json({ error: "Failed to resolve user" });
   }
 
-  // ---- verify-link (GET) ----
-  if (action === "verify-link" && req.method === "GET") {
-    const token = req.query.token;
-    const payload = verifyJWT(token || "", secret);
-    if (!payload || !payload.jti) {
-      res.status(401).send("Invalid or expired link.");
-      return;
+  // Check approved emails list
+  var isApproved = APPROVED_EMAILS.includes(email);
+
+  // Check privateMetadata approval
+  if (!isApproved) {
+    var meta = user.privateMetadata || {};
+    if (meta["approved:" + PROJECT_NAME] === true) {
+      isApproved = true;
     }
-
-    const stored = await redisGet("link:" + payload.jti);
-    if (!stored) {
-      res.status(401).send("Link already used or expired.");
-      return;
-    }
-    await redisDel("link:" + payload.jti);
-
-    const sessionId = crypto.randomUUID();
-    await redisSet("session:" + sessionId, payload.sub, 604800);
-
-    res.setHeader(
-      "Set-Cookie",
-      "session=" + sessionId + "; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800"
-    );
-    res.writeHead(302, { Location: "/" });
-    res.end();
-    return;
   }
 
-  // ---- request-access (POST) ----
-  if (action === "request-access" && req.method === "POST") {
-    const body = parsedBody || await parseBody(req);
-    const email = (body.email || "").toLowerCase().trim();
-    const publisherEmail = process.env.PUBLISHER_EMAIL;
-
-    const approveId = crypto.randomUUID();
-    const denyId = crypto.randomUUID();
-
-    await Promise.all([
-      redisSet("approval:" + approveId, email, 604800),
-      redisSet("approval:" + denyId, email, 604800),
-    ]);
-
-    const approveJWT = signJWT(
-      { action: "approve", jti: approveId, email: email, exp: Math.floor(Date.now() / 1000) + 604800 },
-      secret
-    );
-    const denyJWT = signJWT(
-      { action: "deny", jti: denyId, email: email, exp: Math.floor(Date.now() / 1000) + 604800 },
-      secret
-    );
-
-    const approveLink = SITE_URL + "/api/auth?action=approve&token=" + approveJWT;
-    const denyLink = SITE_URL + "/api/auth?action=deny&token=" + denyJWT;
-
-    await sendEmail(
-      publisherEmail,
-      "Access request for " + NOTE_TITLE,
-      "<p><strong>" + email + "</strong> is requesting access to <strong>" + NOTE_TITLE + "</strong>.</p>" +
-        '<p><a href="' + approveLink + '">Approve</a> | <a href="' + denyLink + '">Deny</a></p>' +
-        "<p>These links expire in 7 days.</p>"
-    );
-
-    res.status(200).json({ status: "requested" });
-    return;
+  if (!isApproved) {
+    var token = signToken({ email: email, site: PROJECT_NAME, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+    var approvalUrl = "https://" + PROJECT_NAME + ".vercel.app/api/approve?token=" + encodeURIComponent(token);
+    return res.status(403).json({ error: "Access denied", approvalUrl: approvalUrl });
   }
 
-  // ---- approve (GET) ----
-  if (action === "approve" && req.method === "GET") {
-    const token = req.query.token;
-    const payload = verifyJWT(token || "", secret);
-    if (!payload || payload.action !== "approve" || !payload.jti) {
-      res.status(401).send(confirmationPage("Invalid link", "This approval link is invalid or has expired."));
-      return;
-    }
+  const pageKey = (req.query && req.query.page) || "main";
+  const html = PAGES[pageKey];
+  if (!html) return res.status(404).json({ error: "Page not found" });
 
-    const email = await redisGet("approval:" + payload.jti);
-    if (!email) {
-      res.status(401).send(confirmationPage("Already used", "This approval link has already been used or has expired."));
-      return;
-    }
-    await redisDel("approval:" + payload.jti);
-
-    // Send magic link to the approved reader (link expires in 5 min, session lasts 30 days)
-    const tokenId = crypto.randomUUID();
-    await redisSet("link:" + tokenId, "30d", 300);
-    const magicJWT = signJWT(
-      { sub: email, jti: tokenId, longSession: true, exp: Math.floor(Date.now() / 1000) + 300 },
-      secret
-    );
-    const magicLink = SITE_URL + "/api/auth?action=access&token=" + magicJWT;
-
-    await sendEmail(
-      email,
-      "You've been approved for " + NOTE_TITLE,
-      "<p>Your access request has been approved.</p>" +
-        '<p><a href="' + magicLink + '">Click here to access ' + NOTE_TITLE + "</a></p>" +
-        "<p>This link expires in 5 minutes.</p>"
-    );
-
-    res.status(200).send(
-      confirmationPage(
-        "Access approved",
-        "<strong>" + email + "</strong> has been approved. A sign-in link has been sent to their email."
-      )
-    );
-    return;
-  }
-
-  // ---- deny (GET) ----
-  if (action === "deny" && req.method === "GET") {
-    const token = req.query.token;
-    const payload = verifyJWT(token || "", secret);
-    if (!payload || payload.action !== "deny" || !payload.jti) {
-      res.status(401).send(confirmationPage("Invalid link", "This denial link is invalid or has expired."));
-      return;
-    }
-
-    const email = await redisGet("approval:" + payload.jti);
-    if (!email) {
-      res.status(401).send(confirmationPage("Already used", "This denial link has already been used or has expired."));
-      return;
-    }
-    await redisDel("approval:" + payload.jti);
-
-    await sendEmail(
-      email,
-      "Access request for " + NOTE_TITLE,
-      "<p>Your access request for <strong>" + NOTE_TITLE + "</strong> has been denied.</p>" +
-        "<p>If you believe this is a mistake, please contact the publisher.</p>"
-    );
-
-    res.status(200).send(
-      confirmationPage(
-        "Access denied",
-        "<strong>" + email + "</strong> has been denied access. A notification email has been sent."
-      )
-    );
-    return;
-  }
-
-  // ---- access (GET) ----
-  if (action === "access" && req.method === "GET") {
-    const token = req.query.token;
-    const payload = verifyJWT(token || "", secret);
-    if (!payload || !payload.jti) {
-      res.status(401).send("Invalid or expired link.");
-      return;
-    }
-
-    const stored = await redisGet("link:" + payload.jti);
-    if (!stored) {
-      res.status(401).send("Link already used or expired.");
-      return;
-    }
-    await redisDel("link:" + payload.jti);
-
-    const sessionTTL = payload.longSession ? 2592000 : 604800;
-    const sessionId = crypto.randomUUID();
-    await redisSet("session:" + sessionId, payload.sub, sessionTTL);
-
-    res.setHeader(
-      "Set-Cookie",
-      "session=" + sessionId + "; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=" + sessionTTL
-    );
-    res.writeHead(302, { Location: "/" });
-    res.end();
-    return;
-  }
-
-  // ---- content (GET) ----
-  if (action === "content" && req.method === "GET") {
-    const cookies = parseCookies(req);
-    const sessionId = cookies.session;
-    if (!sessionId) {
-      res.status(401).json({ error: "Not authenticated" });
-      return;
-    }
-
-    const email = await redisGet("session:" + sessionId);
-    if (!email) {
-      res.status(401).json({ error: "Session expired" });
-      return;
-    }
-
-    const pageKey = req.query.page || "main";
-    const html = PAGES[pageKey];
-    if (!html) {
-      res.status(404).json({ error: "Page not found" });
-      return;
-    }
-
-    res.setHeader("Cache-Control", "no-store, private");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(html);
-    return;
-  }
-
-  // ---- Unknown action ----
-  res.status(400).json({ error: "Unknown action" });
+  res.setHeader("Cache-Control", "no-store, private");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.status(200).send(html);
 };
 `;
     }
-    module2.exports = { buildAuthFunction: buildAuthFunction2 };
+    function buildApproveFunction2(config) {
+      const projectNameJSON = JSON.stringify(config.projectName);
+      return `import { createHmac, timingSafeEqual } from "crypto";
+import { createClerkClient } from "@clerk/backend";
+
+const PROJECT_NAME = ${projectNameJSON};
+const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+
+function verifySignedToken(raw) {
+  var parts = raw.split(".");
+  if (parts.length !== 2) return null;
+  var data = Buffer.from(parts[0], "base64url");
+  var expected = createHmac("sha256", process.env.CLERK_SECRET_KEY).update(data).digest("hex");
+  if (!timingSafeEqual(Buffer.from(parts[1]), Buffer.from(expected))) return null;
+  var payload = JSON.parse(data.toString());
+  if (payload.site !== PROJECT_NAME) return null;
+  if (Date.now() > payload.exp) return null;
+  return payload;
+}
+
+function htmlPage(title, message, ok) {
+  return \`<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>\${title}</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:\${ok?"#f0fdf4":"#fef2f2"};color:#1e1e1e}
+.card{background:#fff;border-radius:12px;padding:2em 2.5em;max-width:420px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h1{font-size:1.3em;margin:0 0 .5em}p{color:#555;margin:0}</style></head>
+<body><div class="card"><h1>\${title}</h1><p>\${message}</p></div></body></html>\`;
+}
+
+export default async function handler(req, res) {
+  var raw = req.query && req.query.token;
+  if (!raw) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token ausente.", false));
+  }
+
+  var payload = verifySignedToken(raw);
+  if (!payload) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(400).send(htmlPage("Link inv\\u00e1lido", "Token expirado ou inv\\u00e1lido.", false));
+  }
+
+  try {
+    var result = await clerkClient.users.getUserList({ emailAddress: [payload.email] });
+    var user = result.data && result.data[0];
+    if (!user) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.status(404).send(htmlPage("Usu\\u00e1rio n\\u00e3o encontrado", "O usu\\u00e1rio " + payload.email + " ainda n\\u00e3o criou uma conta.", false));
+    }
+
+    await clerkClient.users.updateUserMetadata(user.id, {
+      privateMetadata: { ["approved:" + PROJECT_NAME]: true }
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(htmlPage("Acesso aprovado \\u2705", payload.email + " agora tem acesso a esta p\\u00e1gina.", true));
+  } catch(e) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(500).send(htmlPage("Erro", "Falha ao aprovar usu\\u00e1rio. Tente novamente.", false));
+  }
+};
+`;
+    }
+    module2.exports = { buildAuthFunction: buildAuthFunction2, buildApproveFunction: buildApproveFunction2 };
   }
 });
 
@@ -8636,9 +8420,9 @@ function formatTokens(n) {
   return Math.round(n / 1e3) + "k";
 }
 var { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require_html_builder();
-var { deployToVercel, ensureProject, slugify, generateAuthSecret, provisionUpstashRedis } = require_vercel_api();
+var { deployToVercel, ensureProject, checkProjectAvailability, slugify } = require_vercel_api();
 var { buildAuthShell } = require_auth_shell_builder();
-var { buildAuthFunction } = require_auth_function_template();
+var { buildAuthFunction, buildApproveFunction } = require_auth_function_template();
 var DEFAULT_SETTINGS = {
   linkFormat: "legacy",
   showTokenCounts: true,
@@ -8646,11 +8430,8 @@ var DEFAULT_SETTINGS = {
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
-  resendApiKey: "",
-  upstashApiKey: "",
-  upstashEmail: "",
-  upstashRestUrl: "",
-  upstashRestToken: "",
+  clerkPublishableKey: "",
+  clerkSecretKey: "",
   publisherEmail: "",
   publishedPages: {}
 };
@@ -9205,29 +8986,21 @@ var AtPathSettingTab = class extends PluginSettingTab {
       })
     );
     new Setting(containerEl).setHeading().setName("Private publishing");
-    new Setting(containerEl).setName("Resend API key").setDesc("API key for email delivery. Get one free at resend.com/api-keys.").addText(
-      (text) => text.setPlaceholder("Enter key...").setValue(this.plugin.settings.resendApiKey).then((t) => {
+    new Setting(containerEl).setName("Clerk publishable key").setDesc("From your Clerk dashboard (clerk.com). Free tier: 50k users/month.").addText(
+      (text) => text.setPlaceholder("pk_live_...").setValue(this.plugin.settings.clerkPublishableKey).onChange(async (value) => {
+        this.plugin.settings.clerkPublishableKey = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new Setting(containerEl).setName("Clerk secret key").setDesc("Keep this secret. Used server-side to verify session tokens.").addText(
+      (text) => text.setPlaceholder("sk_live_...").setValue(this.plugin.settings.clerkSecretKey).then((t) => {
         t.inputEl.type = "password";
       }).onChange(async (value) => {
-        this.plugin.settings.resendApiKey = value.trim();
+        this.plugin.settings.clerkSecretKey = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new Setting(containerEl).setName("Upstash API key").setDesc("For session storage. Get a free key at console.upstash.com/account/api.").addText(
-      (text) => text.setPlaceholder("Enter key...").setValue(this.plugin.settings.upstashApiKey).then((t) => {
-        t.inputEl.type = "password";
-      }).onChange(async (value) => {
-        this.plugin.settings.upstashApiKey = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new Setting(containerEl).setName("Upstash account email").setDesc("Used with the Upstash API key when auto-provisioning Redis.").addText(
-      (text) => text.setPlaceholder("you@example.com").setValue(this.plugin.settings.upstashEmail).onChange(async (value) => {
-        this.plugin.settings.upstashEmail = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new Setting(containerEl).setName("Publisher email").setDesc("Where access request notifications are sent.").addText(
+    new Setting(containerEl).setName("Publisher email").setDesc("Viewers can request access via email to this address.").addText(
       (text) => text.setPlaceholder("you@example.com").setValue(this.plugin.settings.publisherEmail).onChange(async (value) => {
         this.plugin.settings.publisherEmail = value.trim();
         await this.plugin.saveSettings();
@@ -9285,6 +9058,36 @@ var PublishConfirmModal = class extends Modal {
         })
       );
     }
+    const isExistingProject = pageState && pageState.projectName;
+    let projectNameValue = isExistingProject ? pageState.projectName : slugify(this.publishData.noteTitle);
+    const projectNameSetting = new Setting(contentEl).setName("Project name").setDesc(isExistingProject ? projectNameValue + ".vercel.app" : "");
+    if (isExistingProject) {
+      projectNameSetting.setDesc(projectNameValue + ".vercel.app (already deployed)");
+    } else {
+      projectNameSetting.addText((text) => {
+        const validateProjectName = (val) => {
+          const invalid = val.length > 100 || /[^a-z0-9._-]/.test(val) || val.includes("---") || !val;
+          const tooLong = val.length > 40;
+          text.inputEl.toggleClass("atpath-input-error", invalid);
+          return { valid: !invalid, tooLong };
+        };
+        text.setValue(projectNameValue).onChange((value) => {
+          projectNameValue = value.trim();
+          const result = validateProjectName(projectNameValue);
+          if (!result.valid) {
+            projectNameSetting.setDesc("Invalid: use a-z, 0-9, ., _, - (max 100 chars, no ---)");
+          } else if (result.tooLong) {
+            projectNameSetting.setDesc(projectNameValue + ".vercel.app \u2014 Warning: long names may be shortened by Vercel");
+          } else {
+            projectNameSetting.setDesc(projectNameValue + ".vercel.app");
+          }
+        });
+        const initResult = validateProjectName(projectNameValue);
+        projectNameSetting.setDesc(
+          initResult.tooLong ? projectNameValue + ".vercel.app \u2014 Warning: long names may be shortened by Vercel" : projectNameValue + ".vercel.app"
+        );
+      });
+    }
     let compactLinks = true;
     new Setting(contentEl).setName("Compact @path to file title?").setDesc("Show just the filename (e.g. helpers.py) instead of the full path").addToggle(
       (toggle) => toggle.setValue(true).onChange((value) => {
@@ -9304,39 +9107,21 @@ var PublishConfirmModal = class extends Modal {
       })
     );
     const authSectionEl = contentEl.createDiv({ cls: "atpath-auth-section" + (isPrivate ? "" : " atpath-hidden") });
-    let resendKey = plugin.settings.resendApiKey;
-    if (!resendKey) {
-      new Setting(authSectionEl).setName("Resend API key").addText(
-        (text) => text.setPlaceholder("Enter key...").then((t) => {
+    let clerkPubKey = plugin.settings.clerkPublishableKey;
+    if (!clerkPubKey) {
+      new Setting(authSectionEl).setName("Clerk publishable key").addText(
+        (text) => text.setPlaceholder("pk_live_...").onChange((value) => {
+          clerkPubKey = value.trim();
+        })
+      );
+    }
+    let clerkSecKey = plugin.settings.clerkSecretKey;
+    if (!clerkSecKey) {
+      new Setting(authSectionEl).setName("Clerk secret key").addText(
+        (text) => text.setPlaceholder("sk_live_...").then((t) => {
           t.inputEl.type = "password";
         }).onChange((value) => {
-          resendKey = value.trim();
-        })
-      );
-    }
-    let upstashKey = plugin.settings.upstashApiKey;
-    if (!upstashKey) {
-      new Setting(authSectionEl).setName("Upstash API key").setDesc("Get a free key at console.upstash.com/account/api").addText(
-        (text) => text.setPlaceholder("Enter key...").then((t) => {
-          t.inputEl.type = "password";
-        }).onChange((value) => {
-          upstashKey = value.trim();
-        })
-      );
-    }
-    let upstashEmail = plugin.settings.upstashEmail || plugin.settings.publisherEmail;
-    if (!plugin.settings.upstashEmail) {
-      new Setting(authSectionEl).setName("Upstash account email").setDesc("Used only to auto-provision Redis via the Upstash Developer API").addText(
-        (text) => text.setPlaceholder("you@example.com").setValue(upstashEmail).onChange((value) => {
-          upstashEmail = value.trim();
-        })
-      );
-    }
-    let publisherEmail = plugin.settings.publisherEmail;
-    if (!publisherEmail) {
-      new Setting(authSectionEl).setName("Publisher email").addText(
-        (text) => text.setPlaceholder("you@example.com").onChange((value) => {
-          publisherEmail = value.trim();
+          clerkSecKey = value.trim();
         })
       );
     }
@@ -9370,36 +9155,34 @@ var PublishConfirmModal = class extends Modal {
           new Notice("Please enter a Vercel API token.");
           return;
         }
+        if (!projectNameValue || projectNameValue.length > 100 || /[^a-z0-9._-]/.test(projectNameValue) || projectNameValue.includes("---")) {
+          new Notice("Invalid project name. Use a-z, 0-9, ., _, - (max 100 chars, no ---).");
+          return;
+        }
         if (isPrivate) {
           const emails = approvedEmailsText.split("\n").map((e) => e.trim().toLowerCase()).filter(Boolean);
           if (emails.length === 0) {
             new Notice("Add at least one approved email.");
             return;
           }
-          if (!resendKey) {
-            new Notice("Please enter a Resend API key.");
+          if (!clerkPubKey) {
+            new Notice("Please enter a Clerk publishable key.");
             return;
           }
-          if (!upstashKey && !plugin.settings.upstashRestUrl) {
-            new Notice("Please enter an Upstash API key.");
+          if (!clerkSecKey) {
+            new Notice("Please enter a Clerk secret key.");
             return;
           }
-          if (!plugin.settings.upstashRestUrl && !(upstashEmail || publisherEmail)) {
-            new Notice("Please enter your Upstash account email.");
-            return;
-          }
-          if (!publisherEmail) {
-            new Notice("Please enter a publisher email.");
-            return;
+          if (clerkPubKey.startsWith("pk_test_") || clerkSecKey.startsWith("sk_test_")) {
+            new Notice("Warning: test keys may not work on production. Consider live keys.", 8e3);
           }
           this.close();
           this.onConfirm(tokenValue, compactLinks, {
             isPrivate: true,
             approvedEmails: emails,
-            resendApiKey: resendKey,
-            upstashApiKey: upstashKey,
-            upstashEmail: upstashEmail || publisherEmail,
-            publisherEmail
+            clerkPublishableKey: clerkPubKey,
+            clerkSecretKey: clerkSecKey,
+            projectName: projectNameValue
           });
         } else {
           if (pageState && pageState.isPrivate) {
@@ -9407,7 +9190,7 @@ var PublishConfirmModal = class extends Modal {
             if (!confirmed) return;
           }
           this.close();
-          this.onConfirm(tokenValue, compactLinks, { isPrivate: false });
+          this.onConfirm(tokenValue, compactLinks, { isPrivate: false, projectName: projectNameValue });
         }
       })
     );
@@ -9460,10 +9243,14 @@ var PublishResultModal = class extends Modal {
   }
   onOpen() {
     const { contentEl } = this;
-    const { success, url, summary, error } = this.result;
+    const { success, url, summary, error, warning } = this.result;
     if (success) {
-      contentEl.createEl("h2", { text: "Published successfully" });
+      contentEl.createEl("h2", { text: warning ? "Published with warnings" : "Published successfully" });
       contentEl.createEl("p", { text: summary });
+      if (warning) {
+        const warnDiv = contentEl.createDiv({ cls: "atpath-deploy-warning" });
+        warnDiv.createEl("p", { text: warning });
+      }
       contentEl.createEl("p", { text: url, cls: "atpath-publish-url" });
       new Setting(contentEl).addButton(
         (btn) => btn.setButtonText("Copy URL").setCta().onClick(async () => {
@@ -9639,7 +9426,6 @@ var AtPathPlugin = class extends Plugin {
     this.trayBarEl.setText("@Path");
     this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
     this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
-    void this.pingUpstash();
   }
   showTrayMenu(event) {
     const menu = new Menu();
@@ -9651,6 +9437,12 @@ var AtPathPlugin = class extends Plugin {
     );
     menu.addItem(
       (item) => item.setTitle("Copy with @path contents").setIcon("clipboard-copy").onClick(() => this.copyNoteWithAtPaths())
+    );
+    menu.addItem(
+      (item) => item.setTitle("Settings").setIcon("settings").onClick(() => {
+        this.app.setting.open();
+        this.app.setting.openTabById(this.manifest.id);
+      })
     );
     menu.showAtMouseEvent(event);
   }
@@ -9872,6 +9664,63 @@ var AtPathPlugin = class extends Plugin {
     }
     return atPathFiles;
   }
+  async collectFileProtocolHtmlFiles(content) {
+    const FILE_PROTO_RE = /\[([^\]]*)\]\((file:\/\/\/[^)]+\.html?)\)/gi;
+    const bundles = [];
+    const seen = /* @__PURE__ */ new Set();
+    let m;
+    let fs, pathMod, fileURLToPath;
+    try {
+      fs = require("fs").promises;
+      pathMod = require("path");
+      fileURLToPath = require("url").fileURLToPath;
+    } catch (_) {
+      return bundles;
+    }
+    const MAX_FILES = 500;
+    const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
+    while ((m = FILE_PROTO_RE.exec(content)) !== null) {
+      const url = m[2];
+      if (seen.has(url)) continue;
+      seen.add(url);
+      try {
+        const absPath = fileURLToPath(url);
+        const dirPath = pathMod.dirname(absPath);
+        const entryFilename = pathMod.basename(absPath);
+        const dirName = pathMod.basename(dirPath);
+        const files = [];
+        let totalBytes = 0;
+        async function walk(dir, prefix) {
+          const entries = await fs.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.name.startsWith(".")) continue;
+            const fullPath = pathMod.join(dir, entry.name);
+            const relPath = prefix ? prefix + "/" + entry.name : entry.name;
+            if (entry.isDirectory()) {
+              await walk(fullPath, relPath);
+            } else if (entry.isFile()) {
+              if (files.length >= MAX_FILES) continue;
+              const stat = await fs.stat(fullPath);
+              if (totalBytes + stat.size > MAX_TOTAL_BYTES) continue;
+              totalBytes += stat.size;
+              const ext = (entry.name.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+              if (BINARY_EXTENSIONS.has(ext)) {
+                const buf = await fs.readFile(fullPath);
+                files.push({ relPath, content: buf.toString("base64"), encoding: "base64" });
+              } else {
+                const text = await fs.readFile(fullPath, "utf-8");
+                files.push({ relPath, content: text, encoding: "utf-8" });
+              }
+            }
+          }
+        }
+        await walk(dirPath, "");
+        bundles.push({ url, entryFilename, dirName, files });
+      } catch (_) {
+      }
+    }
+    return bundles;
+  }
   async publishToVercel() {
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) {
@@ -9887,9 +9736,10 @@ var AtPathPlugin = class extends Plugin {
     const notePath = activeFile.path;
     const content = mdView.editor.getValue();
     const atPathFiles = await this.collectAtPathFiles(content, activeFile);
+    const fileProtoFiles = await this.collectFileProtocolHtmlFiles(content);
     const existingPageState = this.settings.publishedPages[notePath];
     const domain = (existingPageState && existingPageState.projectName || slugify(noteTitle)) + ".vercel.app";
-    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, domain, plugin: this };
+    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles, domain, plugin: this };
     const onConfirm = (token, compactLinks, privateOpts) => {
       this._executePublish(publishData, { token, compactLinks, ...privateOpts });
     };
@@ -9901,8 +9751,8 @@ var AtPathPlugin = class extends Plugin {
     new PublishConfirmModal(this.app, publishData, onConfirm, onUnpublish).open();
   }
   async _executePublish(publishData, opts) {
-    const { noteTitle, notePath, content, activeFile, atPathFiles } = publishData;
-    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, upstashEmail, publisherEmail } = opts;
+    const { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles } = publishData;
+    const { token, compactLinks, isPrivate, approvedEmails, clerkPublishableKey, clerkSecretKey, projectName: chosenProjectName } = opts;
     const { contactUrl, contactLabel } = this.settings;
     if (token !== this.settings.vercelToken) {
       this.settings.vercelToken = token;
@@ -9915,77 +9765,113 @@ var AtPathPlugin = class extends Plugin {
         atPathSlugs.set(f.relPath, slugifyPath(f.relPath));
       }
       let resolvedContent = await this.resolveLocalImages(content, activeFile);
+      const fileProtoSlugs = /* @__PURE__ */ new Map();
+      const usedSlugs = new Set(atPathSlugs.values());
+      for (const bundle of fileProtoFiles) {
+        let slug = slugifyPath(bundle.dirName);
+        if (usedSlugs.has(slug)) slug += "-project";
+        usedSlugs.add(slug);
+        fileProtoSlugs.set(bundle.url, { slug, entryFilename: bundle.entryFilename });
+      }
+      resolvedContent = resolvedContent.replace(
+        /\[([^\]]*)\]\((file:\/\/\/[^)]+\.html?)\)/gi,
+        (match, text, url) => {
+          const info = fileProtoSlugs.get(url);
+          return info ? `[${text}](atpath/${info.slug}/${info.entryFilename})` : match;
+        }
+      );
       const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks);
       const subPages = {};
       const deployFiles = [];
       for (const f of atPathFiles) {
         const slug = atPathSlugs.get(f.relPath);
-        const atContent = await this.resolveLocalImages(f.content, activeFile);
-        const pageTitle = f.relPath.split("/").pop();
-        const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
-        if (isPrivate) {
-          subPages["atpath/" + slug] = pageHtml;
+        const ext = f.relPath.split(".").pop().toLowerCase();
+        const isHtmlFile = ext === "html" || ext === "htm";
+        if (isHtmlFile) {
+          if (isPrivate) {
+            subPages["atpath/" + slug] = f.content;
+          } else {
+            deployFiles.push({ path: "atpath/" + slug + ".html", content: f.content });
+          }
         } else {
-          deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+          const atContent = await this.resolveLocalImages(f.content, activeFile);
+          const pageTitle = f.relPath.split("/").pop();
+          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
+          if (isPrivate) {
+            subPages["atpath/" + slug] = pageHtml;
+          } else {
+            deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+          }
+        }
+      }
+      const bundleStaticFiles = [];
+      for (const bundle of fileProtoFiles) {
+        const info = fileProtoSlugs.get(bundle.url);
+        for (const f of bundle.files) {
+          const deployPath = "atpath/" + info.slug + "/" + f.relPath;
+          const ext = (f.relPath.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+          const isHtmlFile = ext === "html" || ext === "htm";
+          if (isPrivate && isHtmlFile) {
+            subPages[deployPath.replace(/\.html?$/, "")] = f.content;
+          } else if (isPrivate) {
+            bundleStaticFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
+          } else {
+            deployFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
+          }
         }
       }
       let result;
       const pageState = this.settings.publishedPages[notePath] || {};
-      const projectName = pageState.projectName || await ensureProject(token, slugify(noteTitle));
+      const projectSlug = pageState.projectName || chosenProjectName || slugify(noteTitle);
+      const projectName = await ensureProject(token, projectSlug);
       if (isPrivate) {
-        if (resendApiKey) {
-          this.settings.resendApiKey = resendApiKey;
+        if (clerkPublishableKey) {
+          this.settings.clerkPublishableKey = clerkPublishableKey;
         }
-        if (publisherEmail) {
-          this.settings.publisherEmail = publisherEmail;
-        }
-        if (upstashEmail) {
-          this.settings.upstashEmail = upstashEmail;
-        }
-        if (!pageState.authSecret) {
-          pageState.authSecret = generateAuthSecret();
-        }
-        if (!this.settings.upstashRestUrl && (upstashApiKey || this.settings.upstashApiKey)) {
-          const key = upstashApiKey || this.settings.upstashApiKey;
-          const email = upstashEmail || this.settings.upstashEmail || this.settings.publisherEmail;
-          this.settings.upstashApiKey = key;
-          new Notice("Provisioning Upstash Redis database...");
-          const redis = await provisionUpstashRedis(email, key);
-          this.settings.upstashRestUrl = redis.restUrl;
-          this.settings.upstashRestToken = redis.restToken;
+        if (clerkSecretKey) {
+          this.settings.clerkSecretKey = clerkSecretKey;
         }
         await this.saveSettings();
-        const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
-        const authShellHtml = buildAuthShell(noteTitle);
+        const allApproved = [...approvedEmails];
+        const pubEmail = (this.settings.publisherEmail || "").toLowerCase().trim();
+        if (pubEmail && !allApproved.includes(pubEmail)) {
+          allApproved.push(pubEmail);
+        }
+        const waMatch = contactUrl.match(/wa\.me\/(\d+)/);
+        const publisherWhatsapp = waMatch ? waMatch[1] : "";
+        const authShellHtml = buildAuthShell(noteTitle, this.settings.clerkPublishableKey, this.settings.publisherEmail, publisherWhatsapp);
         const authFunctionSrc = buildAuthFunction({
-          approvedEmails,
+          approvedEmails: allApproved,
           pages,
-          noteTitle,
-          siteUrl
+          projectName
+        });
+        const approveFunctionSrc = buildApproveFunction({ projectName });
+        const packageJson = JSON.stringify({
+          type: "module",
+          dependencies: { "@clerk/backend": "^2" }
         });
         const vercelJson = JSON.stringify({
           rewrites: [
-            { source: "/api/auth", destination: "/api/auth" },
             { source: "/((?!api/).*)", destination: "/index.html" }
           ]
         });
         const privateFiles = [
           { path: "index.html", content: authShellHtml },
           { path: "api/auth.js", content: authFunctionSrc },
-          { path: "vercel.json", content: vercelJson }
+          { path: "api/approve.js", content: approveFunctionSrc },
+          { path: "package.json", content: packageJson },
+          { path: "vercel.json", content: vercelJson },
+          ...bundleStaticFiles
         ];
         const envVars = {
-          RESEND_API_KEY: this.settings.resendApiKey,
-          AUTH_SECRET: pageState.authSecret,
-          PUBLISHER_EMAIL: this.settings.publisherEmail,
-          UPSTASH_REDIS_REST_URL: this.settings.upstashRestUrl,
-          UPSTASH_REDIS_REST_TOKEN: this.settings.upstashRestToken
+          CLERK_SECRET_KEY: this.settings.clerkSecretKey
         };
         result = await deployToVercel(token, noteTitle, privateFiles, {
           isPrivate: true,
           envVars,
-          projectName
+          projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg)
         });
         this.settings.publishedPages[notePath] = {
           ...pageState,
@@ -9999,7 +9885,10 @@ var AtPathPlugin = class extends Plugin {
         await this.saveSettings();
       } else {
         deployFiles.unshift({ path: "index.html", content: mainHtml });
-        result = await deployToVercel(token, noteTitle, deployFiles, { projectName });
+        result = await deployToVercel(token, noteTitle, deployFiles, {
+          projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg)
+        });
         this.settings.publishedPages[notePath] = {
           ...pageState,
           url: result.url,
@@ -10012,9 +9901,17 @@ var AtPathPlugin = class extends Plugin {
         await this.saveSettings();
       }
       this.trayBarEl.setText("@Path");
-      const linkedCount = atPathFiles.length;
+      const linkedCount = atPathFiles.length + fileProtoFiles.length;
       const summary = 'Deployed "' + noteTitle + '"' + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "") + (isPrivate ? " (private)" : "");
-      new PublishResultModal(this.app, { success: true, url: result.url, summary }).open();
+      let warning = "";
+      if (result.deploymentState && result.deploymentState !== "READY") {
+        warning += "Deployment did not succeed (state: " + result.deploymentState + ").";
+        if (result.deploymentError) warning += " " + result.deploymentError;
+      } else if (result.healthCheck && !result.healthCheck.ok) {
+        warning += "Deployment is live but the health check failed.";
+        if (result.healthCheck.detail) warning += " " + result.healthCheck.detail;
+      }
+      new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
       this.trayBarEl.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
@@ -10045,24 +9942,6 @@ var AtPathPlugin = class extends Plugin {
     } catch (e) {
       plugin.trayBarEl.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
-    }
-  }
-  async pingUpstash() {
-    const { upstashRestUrl, upstashRestToken } = this.settings;
-    if (!upstashRestUrl || !upstashRestToken) return;
-    try {
-      const resp = await requestUrl({
-        url: upstashRestUrl + "/PING",
-        method: "GET",
-        headers: { Authorization: "Bearer " + upstashRestToken }
-      });
-      if (resp.status >= 400) throw new Error("status " + resp.status);
-      console.debug("AtPath: Upstash keep-alive OK");
-    } catch (e) {
-      console.warn("AtPath: Upstash keep-alive failed, clearing credentials:", e.message || e);
-      this.settings.upstashRestUrl = "";
-      this.settings.upstashRestToken = "";
-      await this.saveSettings();
     }
   }
   async dryRunMigration() {

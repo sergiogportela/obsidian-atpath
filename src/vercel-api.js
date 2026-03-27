@@ -13,17 +13,6 @@ function slugify(title) {
     .replace(/^-|-$/g, "");
 }
 
-function sha1Hex(str) {
-  // Simple hash for collision suffix — not cryptographic, just for uniqueness
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + ch;
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(16).slice(0, 4);
-}
-
 function buildRequestError(service, method, path, status, detail) {
   let message = service + " " + method + " " + path + " failed";
   if (status != null) message += ", status " + status;
@@ -67,6 +56,21 @@ async function apiCall(token, method, path, body) {
   return { status: resp.status, data: resp.json };
 }
 
+/**
+ * Check if a project name is available on Vercel.
+ * @returns {"available" | "ours" | "taken"}
+ */
+async function checkProjectAvailability(token, slug) {
+  try {
+    const { status, data } = await apiCall(token, "GET", `/v9/projects/${slug}`);
+    if (status === 200 && data && data.id) return "ours";
+  } catch (e) {
+    if (e.status === 404) return "available";
+    throw e;
+  }
+  return "available";
+}
+
 async function ensureProject(token, slug) {
   // Check if project exists
   try {
@@ -85,7 +89,7 @@ async function ensureProject(token, slug) {
     if (e.status && e.status !== 404) throw new Error("Vercel API error: " + (e.message || e.status));
   }
 
-  // Create project
+  // Create project — fail clearly on name collision instead of silent suffix
   try {
     await apiCall(token, "POST", "/v10/projects", {
       name: slug,
@@ -93,14 +97,8 @@ async function ensureProject(token, slug) {
     });
     return slug;
   } catch (e) {
-    // Name collision — append hash suffix
     if (e.status === 409 || (e.message && e.message.includes("already"))) {
-      const fallback = slug + "-" + sha1Hex(slug + Date.now());
-      await apiCall(token, "POST", "/v10/projects", {
-        name: fallback,
-        framework: null,
-      });
-      return fallback;
+      throw new Error("The project name \"" + slug + "\" is already taken on Vercel. Please choose a different name.");
     }
     throw new Error("Failed to create Vercel project: " + (e.message || e.status));
   }
@@ -135,49 +133,53 @@ async function setEnvVars(token, projectSlug, vars) {
   }
 }
 
-function generateAuthSecret() {
-  return require("crypto").randomBytes(32).toString("hex");
+async function waitForDeployment(token, deploymentId, onProgress, timeoutMs) {
+  if (!timeoutMs) timeoutMs = 60000;
+  const interval = 3000;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const { data } = await apiCall(token, "GET", `/v13/deployments/${deploymentId}`);
+    const state = data && data.readyState;
+
+    if (state === "READY") return { ready: true, url: data.url, state };
+    if (state === "ERROR" || state === "CANCELED") {
+      const detail = (data.errorMessage) || state;
+      return { ready: false, url: data.url, state, error: detail };
+    }
+
+    if (onProgress) {
+      const label = state === "BUILDING" ? "Building..." : "Deploying...";
+      onProgress(label);
+    }
+
+    await new Promise(r => setTimeout(r, interval));
+  }
+
+  return { ready: false, state: "TIMEOUT", error: "Deployment timed out after " + (timeoutMs / 1000) + "s" };
 }
 
-async function provisionUpstashRedis(upstashEmail, upstashApiKey) {
-  if (!upstashEmail) {
-    throw new Error("Upstash account email is required to provision Redis.");
-  }
-  const basicAuth = Buffer.from(upstashEmail + ":" + upstashApiKey).toString("base64");
-  let resp;
+async function healthCheck(url) {
+  // Wait briefly for edge propagation
+  await new Promise(r => setTimeout(r, 2000));
   try {
-    resp = await requestUrl({
-      url: "https://api.upstash.com/v2/redis/database",
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + basicAuth,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        database_name: "atpath-auth",
-        region: "global",
-        primary_region: "us-east-1",
-        tls: true,
-      }),
-    });
+    const resp = await requestUrl({ url, method: "GET" });
+    const text = typeof resp.text === "string" ? resp.text : "";
+    if (text.includes("NOT_FOUND") || text.includes("DEPLOYMENT_NOT_FOUND")) {
+      return { ok: false, status: resp.status, detail: "Vercel returned NOT_FOUND at deployed URL" };
+    }
+    if (resp.status >= 400) {
+      return { ok: false, status: resp.status, detail: "HTTP " + resp.status };
+    }
+    return { ok: true, status: resp.status };
   } catch (e) {
-    const status = typeof e.status === "number" ? e.status : null;
-    throw buildRequestError("Upstash API", "POST", "/v2/redis/database", status, e.message || "");
+    return { ok: false, status: null, detail: e.message || String(e) };
   }
-  if (resp.status >= 400) {
-    throw buildRequestError("Upstash API", "POST", "/v2/redis/database", resp.status, extractErrorDetail(resp.json, resp.text));
-  }
-  const data = resp.json;
-  return {
-    endpoint: data.endpoint,
-    password: data.password,
-    restUrl: data.rest_url || ("https://" + data.endpoint),
-    restToken: data.rest_token,
-  };
 }
 
 async function deployToVercel(token, noteTitle, files, opts) {
   const projectName = (opts && opts.projectName) || await ensureProject(token, slugify(noteTitle));
+  const onProgress = opts && opts.onProgress;
 
   // Set environment variables for private pages
   if (opts && opts.isPrivate && opts.envVars) {
@@ -188,7 +190,7 @@ async function deployToVercel(token, noteTitle, files, opts) {
   const fileEntries = files.map(f => ({
     file: f.path,
     data: f.content,
-    encoding: "utf-8",
+    encoding: f.encoding || "utf-8",
   }));
 
   const { data } = await apiCall(token, "POST", "/v13/deployments", {
@@ -198,7 +200,52 @@ async function deployToVercel(token, noteTitle, files, opts) {
     files: fileEntries,
   });
 
-  return { url: "https://" + projectName + ".vercel.app", projectName };
+  const deploymentId = data && data.id;
+  const fallbackUrl = "https://" + projectName + ".vercel.app";
+  const result = { url: fallbackUrl, projectName, deploymentState: "UNKNOWN" };
+
+  if (!deploymentId) return result;
+
+  const readyState = data.readyState;
+
+  if (readyState === "READY") {
+    result.deploymentState = "READY";
+  } else if (readyState === "ERROR" || readyState === "CANCELED") {
+    result.deploymentState = readyState;
+    result.deploymentError = data.errorMessage || readyState;
+  } else {
+    // Poll until ready
+    if (onProgress) onProgress("Building...");
+    const poll = await waitForDeployment(token, deploymentId, onProgress);
+    result.deploymentState = poll.state || "UNKNOWN";
+    if (poll.error) result.deploymentError = poll.error;
+  }
+
+  // Verify the production alias matches the project name exactly
+  if (result.deploymentState === "READY") {
+    try {
+      const { data: projData } = await apiCall(token, "GET", `/v9/projects/${projectName}`);
+      const aliases = projData && projData.targets && projData.targets.production && projData.targets.production.alias;
+      const expectedAlias = projectName + ".vercel.app";
+      const vercelAlias = aliases && aliases.find(a => a.endsWith(".vercel.app"));
+
+      if (vercelAlias && vercelAlias !== expectedAlias) {
+        // Vercel truncated the name — URL won't match title
+        result.deploymentState = "NAME_TRUNCATED";
+        result.deploymentError = "The project name \"" + projectName + "\" is too long for a .vercel.app URL. "
+          + "Vercel shortened it to \"" + vercelAlias.replace(".vercel.app", "") + "\". "
+          + "Please shorten the note title and try again.";
+        result.url = "https://" + vercelAlias;
+      } else {
+        result.url = vercelAlias ? "https://" + vercelAlias : result.url;
+        result.healthCheck = await healthCheck(result.url);
+      }
+    } catch (_) {
+      result.healthCheck = await healthCheck(result.url);
+    }
+  }
+
+  return result;
 }
 
-module.exports = { slugify, ensureProject, deployToVercel, setEnvVars, generateAuthSecret, provisionUpstashRedis };
+module.exports = { slugify, ensureProject, checkProjectAvailability, deployToVercel, setEnvVars };

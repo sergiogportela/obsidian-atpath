@@ -73,6 +73,26 @@ a.internal-link.atpath-link[data-tokens]::after {
   font-size: 0.85em;
 }
 
+/* Project name validation error */
+.atpath-input-error {
+  border-color: var(--text-error) !important;
+}
+
+/* Deployment warning block in publish result modal */
+.atpath-deploy-warning {
+  background: transparent;
+  border: 1px solid var(--text-error);
+  border-left: 3px solid var(--text-error);
+  padding: 0.5em 0.75em;
+  margin: 0.75em 0;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.atpath-deploy-warning p {
+  margin: 0;
+  color: var(--text-normal);
+}
+
 /* Fix existing PublishResultModal inline styles (compliance) */
 .atpath-error-pre {
   white-space: pre-wrap;

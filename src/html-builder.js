@@ -38,10 +38,31 @@ function renderMarkdown(md) {
 
 const HEADING_RE = /^<(h[1-4])>(.*?)<\/\1>$/i;
 
+function slugifyHeading(text) {
+  return text
+    .replace(/<[^>]+>/g, "")           // strip HTML tags
+    .normalize("NFD")                   // decompose accents
+    .replace(/[\u0300-\u036f]/g, "")    // strip combining marks
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")          // remove special chars
+    .replace(/[\s_]+/g, "-")           // spaces/underscores to hyphens
+    .replace(/-{2,}/g, "-")            // collapse hyphens
+    .replace(/^-|-$/g, "");            // trim leading/trailing hyphens
+}
+
 function wrapSections(html) {
   const lines = html.split("\n");
   const out = [];
   const stack = [];
+  const usedSlugs = new Set();
+
+  function uniqueSlug(base) {
+    let slug = base;
+    let n = 2;
+    while (usedSlugs.has(slug)) { slug = base + "-" + n++; }
+    usedSlugs.add(slug);
+    return slug;
+  }
 
   for (const line of lines) {
     const m = line.match(HEADING_RE);
@@ -50,8 +71,9 @@ function wrapSections(html) {
     const tag = m[1].toLowerCase();
     const level = parseInt(tag[1], 10);
     const content = m[2];
+    const slug = uniqueSlug(slugifyHeading(content));
 
-    if (level === 1) { out.push(line); continue; }
+    if (level === 1) { out.push(`<${tag} id="${slug}">${content}</${tag}>`); continue; }
 
     while (stack.length > 0 && stack[stack.length - 1] >= level) {
       stack.pop();
@@ -59,7 +81,7 @@ function wrapSections(html) {
     }
 
     stack.push(level);
-    out.push(`<details>`);
+    out.push(`<details id="${slug}">`);
     out.push(`<summary><${tag}>${content}</${tag}></summary>`);
   }
 
@@ -250,6 +272,31 @@ ${bodyContent}
     mermaid.initialize({ startOnLoad: false, theme: 'dark' });
     mermaid.run();
   } catch(e) {}
+  // Anchor navigation for collapsed <details> sections
+  (function() {
+    function openTarget(hash) {
+      if (!hash) return;
+      var el = document.getElementById(hash.replace(/^#/, ''));
+      if (!el) return;
+      var node = el;
+      while (node) {
+        if (node.tagName === 'DETAILS') node.open = true;
+        node = node.parentElement;
+      }
+      if (el.tagName === 'DETAILS') el.open = true;
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
+    if (location.hash) openTarget(location.hash);
+    document.addEventListener('click', function(e) {
+      var a = e.target.closest('a[href^="#"]');
+      if (!a) return;
+      e.preventDefault();
+      var href = a.getAttribute('href');
+      history.pushState(null, '', href);
+      openTarget(href);
+    });
+    window.addEventListener('hashchange', function() { openTarget(location.hash); });
+  })();
 })();
 <\/script>
 </body>
@@ -377,4 +424,4 @@ function buildUnpublishedPage(noteTitle) {
   return htmlPage(noteTitle, bodyContent);
 }
 
-module.exports = { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE, CSS_TEMPLATE };
+module.exports = { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, slugifyHeading, AT_PATH_RE, CSS_TEMPLATE };

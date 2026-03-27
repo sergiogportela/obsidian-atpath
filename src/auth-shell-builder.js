@@ -1,13 +1,7 @@
 // auth-shell-builder.js — Login shell HTML for authenticated published pages.
-// Returns a single HTML page that handles auth flow client-side, then fetches
-// and injects the real content from the /api/auth endpoint.
+// Uses Clerk JS SDK for authentication, then fetches content from /api/auth.
 
 const { CSS_TEMPLATE } = require("./html-builder");
-
-// ─── CDN URLs (must match html-builder.js) ──────────────────────────
-const HLJS_CSS   = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
-const HLJS_JS    = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js";
-const MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -19,61 +13,13 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-// ─── Auth-specific CSS ──────────────────────────────────────────────
-
-const AUTH_CSS = `
-#auth-ui {
-  max-width: 400px;
-  margin: 2em auto;
-  text-align: center;
-}
-#auth-ui .auth-input {
-  width: 100%;
-  padding: 0.6em 0.8em;
-  margin-bottom: 0.8em;
-  background: #2d2d2d;
-  color: #dcddde;
-  border: 1px solid #444;
-  border-radius: 6px;
-  font-size: 1em;
-  outline: none;
-}
-#auth-ui .auth-input:focus {
-  border-color: #a88bfa;
-}
-#auth-ui .auth-btn {
-  display: inline-block;
-  padding: 0.6em 1.4em;
-  background: #a88bfa;
-  color: #1e1e1e;
-  border: none;
-  border-radius: 6px;
-  font-size: 1em;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-#auth-ui .auth-btn:hover {
-  background: #9370f0;
-}
-#auth-ui .auth-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-#auth-ui .auth-msg {
-  color: #888;
-  font-size: 0.95em;
-  margin: 1em 0;
-}
-#auth-ui .auth-msg.error {
-  color: #e06c75;
-}
-`;
-
 // ─── Builder ────────────────────────────────────────────────────────
 
-function buildAuthShell(noteTitle) {
+function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp) {
   const title = escapeHtml(noteTitle);
+  const pubKeyJSON = JSON.stringify(clerkPublishableKey);
+  const publisherEmailJSON = JSON.stringify(publisherEmail || "");
+  const publisherWhatsappJSON = JSON.stringify(publisherWhatsapp || "");
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -82,182 +28,244 @@ function buildAuthShell(noteTitle) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>${CSS_TEMPLATE}</style>
-<style>${AUTH_CSS}</style>
-<link rel="stylesheet" href="${HLJS_CSS}">
 </head>
 <body>
 <div class="container">
   <h1>${title}</h1>
   <div id="auth-ui">
-    <p class="auth-msg">Checking session...</p>
+    <p id="auth-msg" style="text-align:center;color:#888">Carregando...</p>
   </div>
-  <div id="content" style="display:none"></div>
 </div>
 
-<script src="${HLJS_JS}"><\/script>
-<script src="${MERMAID_JS}"><\/script>
 <script>
-(function() {
+(async function() {
   var authUI  = document.getElementById('auth-ui');
-  var content = document.getElementById('content');
+  var authMsg = document.getElementById('auth-msg');
+  var publishableKey = ${pubKeyJSON};
+  var publisherEmail = ${publisherEmailJSON};
+  var publisherWhatsapp = ${publisherWhatsappJSON};
+  var pollTimer = null;
 
-  // ── Derive pageKey from URL ────────────────────────────────────
-  var path = window.location.pathname.replace(/^\\//, '').replace(/\\.html$/, '');
+  // Derive pageKey from URL
+  var path = window.location.pathname.replace(/^\\//, '').replace(/\\.html?$/, '');
   var pageKey = path || 'main';
   if (pageKey === 'index') pageKey = 'main';
 
-  // ── State: email the user typed (persisted across states) ──────
-  var currentEmail = '';
-
-  // ── Renderers for each auth state ──────────────────────────────
-
-  function showLoading() {
-    authUI.innerHTML = '<p class="auth-msg">Checking session...</p>';
-  }
-
-  function showLoginForm() {
-    authUI.innerHTML =
-      '<input id="email-input" class="auth-input" type="email" placeholder="Email address" value="' + escapeAttr(currentEmail) + '">' +
-      '<button id="send-link-btn" class="auth-btn">Send magic link</button>';
-
-    document.getElementById('send-link-btn').addEventListener('click', handleSendLink);
-    document.getElementById('email-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') handleSendLink();
+  // Load Clerk JS SDK — data-clerk-publishable-key triggers auto-init of window.Clerk
+  var script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js';
+  script.crossOrigin = 'anonymous';
+  script.setAttribute('data-clerk-publishable-key', publishableKey);
+  script.onload = function() {
+    initClerk().catch(function(e) {
+      authMsg.style.display = '';
+      authMsg.textContent = 'Erro de autentica\\u00e7\\u00e3o: ' + (e.message || e);
     });
+  };
+  script.onerror = function() { authMsg.textContent = 'Falha ao carregar autentica\\u00e7\\u00e3o.'; };
+  document.head.appendChild(script);
+
+  function fallbackCopy(text, btn) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); btn.textContent = 'Copiado!'; } catch(e) { btn.textContent = 'Falha ao copiar'; }
+    document.body.removeChild(ta);
   }
 
-  function showLinkSent() {
-    authUI.innerHTML = '<p class="auth-msg">Check your email for the login link.</p>';
+  function showContent(html) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    document.open();
+    document.write(html);
+    document.close();
   }
 
-  function showNotApproved() {
-    authUI.innerHTML =
-      '<p class="auth-msg">Your account has not been approved yet.</p>' +
-      '<button id="request-btn" class="auth-btn">Request access</button>';
-
-    document.getElementById('request-btn').addEventListener('click', handleRequestAccess);
-  }
-
-  function showAccessRequested() {
-    authUI.innerHTML = '<p class="auth-msg">Request sent, you\\u2019ll receive an email when approved.</p>';
-  }
-
-  function showError(msg) {
-    authUI.innerHTML = '<p class="auth-msg error">' + escapeText(msg) + '</p>';
-  }
-
-  function showAuthenticated(html) {
-    authUI.style.display = 'none';
-    content.innerHTML = html;
-    content.style.display = '';
-
-    // Syntax highlighting
-    try {
-      document.querySelectorAll('#content pre code').forEach(function(el) {
-        if (!el.classList.contains('language-mermaid')) hljs.highlightElement(el);
-      });
-    } catch(e) {}
-
-    // Mermaid diagrams
-    try {
-      document.querySelectorAll('#content pre code.language-mermaid').forEach(function(el) {
-        var div = document.createElement('div');
-        div.className = 'mermaid';
-        div.textContent = el.textContent;
-        el.closest('pre').replaceWith(div);
-      });
-      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
-      mermaid.run();
-    } catch(e) {}
-  }
-
-  // ── Escape helpers ─────────────────────────────────────────────
-
-  function escapeAttr(s) {
-    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function escapeText(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  // ── API helpers ────────────────────────────────────────────────
-
-  function apiGet(url) {
-    return fetch(url, { credentials: 'include' }).then(function(r) {
-      return r.text().then(function(body) {
-        return { status: r.status, body: body };
-      });
-    });
-  }
-
-  function apiPost(url, data) {
-    return fetch(url, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(function(r) { return r.json(); });
-  }
-
-  // ── Action handlers ────────────────────────────────────────────
-
-  function handleSendLink() {
-    var input = document.getElementById('email-input');
-    var email = (input && input.value || '').trim();
-    if (!email) return;
-    currentEmail = email;
-
-    var btn = document.getElementById('send-link-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
-
-    apiPost('/api/auth', { action: 'send-link', email: email })
-      .then(function(data) {
-        if (data.status === 'sent') {
-          showLinkSent();
-        } else if (data.status === 'not_approved') {
-          showNotApproved();
-        } else {
-          showError('Unexpected response. Please try again.');
+  function startApprovalPoll(clerk) {
+    if (pollTimer) return;
+    pollTimer = setInterval(async function() {
+      try {
+        var session = clerk.session;
+        if (!session) return;
+        var t = await session.getToken();
+        var r = await fetch('/api/auth?page=' + encodeURIComponent(pageKey), {
+          headers: { 'Authorization': 'Bearer ' + t }
+        });
+        if (r.status === 200) {
+          var html = await r.text();
+          showContent(html);
         }
-      })
-      .catch(function() {
-        showError('Network error. Please try again.');
-      });
+      } catch(e) {}
+    }, 15000);
   }
 
-  function handleRequestAccess() {
-    var btn = document.getElementById('request-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+  async function fetchContent(clerk) {
+    authMsg.textContent = 'Verificando acesso...';
+    authMsg.style.display = '';
 
-    apiPost('/api/auth', { action: 'request-access', email: currentEmail })
-      .then(function(data) {
-        if (data.status === 'requested') {
-          showAccessRequested();
-        } else {
-          showError('Unexpected response. Please try again.');
-        }
-      })
-      .catch(function() {
-        showError('Network error. Please try again.');
+    var session = clerk.session;
+    if (!session) {
+      authMsg.textContent = 'Sess\\u00e3o inativa. Atualize a p\\u00e1gina e entre novamente.';
+      return;
+    }
+
+    var token;
+    try {
+      token = await session.getToken();
+    } catch(e) {
+      authMsg.textContent = 'Falha ao obter token de sess\\u00e3o.';
+      return;
+    }
+
+    var resp;
+    try {
+      resp = await fetch('/api/auth?page=' + encodeURIComponent(pageKey), {
+        headers: { 'Authorization': 'Bearer ' + token }
       });
-  }
+    } catch(e) {
+      authMsg.textContent = 'Erro de rede. Tente novamente.';
+      return;
+    }
 
-  // ── Boot: check session then show correct state ────────────────
+    if (resp.status === 200) {
+      var html = await resp.text();
+      showContent(html);
+    } else if (resp.status === 403) {
+      var body;
+      try { body = await resp.json(); } catch(e) { body = {}; }
+      var approvalUrl = body.approvalUrl || '';
+      var email = (clerk.user.primaryEmailAddress && clerk.user.primaryEmailAddress.emailAddress) || '';
+      var subject = encodeURIComponent('Solicita\\u00e7\\u00e3o de acesso: ${title}');
+      var mailBody = encodeURIComponent('Ol\\u00e1, gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : ''));
+      authMsg.textContent = 'Voc\\u00ea n\\u00e3o tem acesso a esta p\\u00e1gina.';
 
-  showLoading();
+      var wrapper = document.createElement('div');
+      wrapper.style.cssText = 'text-align:center;margin-top:1em;';
 
-  apiGet('/api/auth?action=content&page=' + encodeURIComponent(pageKey))
-    .then(function(res) {
-      if (res.status === 200) {
-        showAuthenticated(res.body);
-      } else {
-        showLoginForm();
+      // Primary: WhatsApp button (when publisherWhatsapp + approvalUrl available)
+      if (publisherWhatsapp && approvalUrl) {
+        var waText = encodeURIComponent('Ol\\u00e1! Gostaria de ter acesso a ${title}.\\n\\nMeu email: ' + email + '\\n\\nLink para aprovar:\\n' + approvalUrl);
+        var waBtn = document.createElement('a');
+        waBtn.href = 'https://wa.me/' + publisherWhatsapp + '?text=' + waText;
+        waBtn.target = '_blank';
+        waBtn.rel = 'noopener';
+        waBtn.textContent = 'Solicitar acesso via WhatsApp';
+        waBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#25D366;color:#fff;border-radius:6px;font-weight:600;text-decoration:none;font-size:1em;';
+        wrapper.appendChild(waBtn);
       }
-    })
-    .catch(function() {
-      showLoginForm();
+
+      // Fallback: copy + mailto (when publisherEmail available)
+      if (publisherEmail) {
+        var emailLabel = document.createElement('p');
+        emailLabel.style.cssText = 'color:#888;font-size:0.9em;margin-top:1em;margin-bottom:0.5em;';
+        emailLabel.textContent = 'Entre em contato: ' + publisherEmail;
+        wrapper.appendChild(emailLabel);
+
+        var copyText = 'Solicita\\u00e7\\u00e3o de acesso: ${title}\\n\\nOl\\u00e1, gostaria de ter acesso a ${title}.\\nMeu email: ' + email + (approvalUrl ? '\\n\\nLink para aprovar: ' + approvalUrl : '');
+        var copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copiar solicita\\u00e7\\u00e3o';
+        copyBtn.style.cssText = 'display:inline-block;padding:0.6em 1.4em;background:#a88bfa;color:#1e1e1e;border-radius:6px;font-weight:600;border:none;cursor:pointer;font-size:1em;';
+        copyBtn.addEventListener('click', function() {
+          try {
+            navigator.clipboard.writeText(copyText).then(function() {
+              copyBtn.textContent = 'Copiado!';
+            }, function() {
+              fallbackCopy(copyText, copyBtn);
+            });
+          } catch(e) {
+            fallbackCopy(copyText, copyBtn);
+          }
+        });
+        wrapper.appendChild(copyBtn);
+
+        var mailLink = document.createElement('a');
+        mailLink.href = 'mailto:' + publisherEmail + '?subject=' + subject + '&body=' + mailBody;
+        mailLink.textContent = 'Abrir cliente de email';
+        mailLink.style.cssText = 'display:block;margin-top:0.75em;font-size:0.85em;color:#888;text-decoration:underline;';
+        wrapper.appendChild(mailLink);
+      }
+
+      if (wrapper.children.length > 0) {
+        authUI.appendChild(wrapper);
+      }
+
+      // Auto-poll: check every 15s if user has been approved
+      var pollStatus = document.createElement('p');
+      pollStatus.style.cssText = 'text-align:center;color:#888;font-size:0.8em;margin-top:1.2em;';
+      pollStatus.textContent = 'Aguardando aprova\\u00e7\\u00e3o...';
+      authUI.appendChild(pollStatus);
+      startApprovalPoll(clerk);
+    } else {
+      authMsg.textContent = 'Autentica\\u00e7\\u00e3o falhou. Atualize a p\\u00e1gina e tente novamente.';
+    }
+  }
+
+  async function initClerk() {
+    var clerk = window.Clerk;
+    if (!clerk) { authMsg.textContent = 'Falha ao inicializar autentica\\u00e7\\u00e3o.'; return; }
+    await clerk.load({
+      localization: {
+        socialButtonsBlockButton: 'Continuar com {{provider|titleize}}',
+        dividerText: 'ou',
+        formButtonPrimary: 'Continuar',
+        formFieldLabel__emailAddress: 'Endere\\u00e7o de e-mail',
+        formFieldLabel__firstName: 'Primeiro nome',
+        formFieldLabel__lastName: 'Sobrenome',
+        formFieldLabel__password: 'Senha',
+        formFieldInputPlaceholder__emailAddress: 'Digite seu e-mail',
+        formFieldInputPlaceholder__firstName: 'Primeiro nome',
+        formFieldInputPlaceholder__lastName: 'Sobrenome',
+        formFieldInputPlaceholder__password: 'Digite sua senha',
+        signUp: {
+          start: {
+            title: 'Criar sua conta',
+            subtitle: 'Bem-vindo! Preencha os dados para continuar.',
+            actionText: 'J\\u00e1 possui uma conta?',
+            actionLink: 'Entrar',
+          },
+          emailCode: {
+            title: 'Verifique seu e-mail',
+            subtitle: 'para continuar',
+            formTitle: 'C\\u00f3digo de verifica\\u00e7\\u00e3o',
+            formSubtitle: 'Insira o c\\u00f3digo enviado para seu e-mail',
+            resendButton: 'N\\u00e3o recebeu? Reenviar c\\u00f3digo',
+          },
+        },
+        signIn: {
+          start: {
+            title: 'Entrar',
+            subtitle: 'Bem-vindo de volta!',
+            actionText: 'N\\u00e3o possui uma conta?',
+            actionLink: 'Cadastrar-se',
+          },
+        },
+      }
     });
+
+    if (clerk.user) {
+      // Already signed in — fetch content directly
+      await fetchContent(clerk);
+    } else {
+      // Mount sign-in component inline (no redirect loop)
+      authMsg.style.display = 'none';
+      var signInDiv = document.createElement('div');
+      signInDiv.id = 'clerk-sign-in';
+      authUI.appendChild(signInDiv);
+      clerk.mountSignUp(signInDiv, { fallbackRedirectUrl: window.location.href });
+
+      // Wait for sign-in to complete via listener
+      await new Promise(function(resolve) {
+        clerk.addListener(function(res) {
+          if (res.user) resolve();
+        });
+      });
+
+      // Clean up sign-in UI and fetch content
+      signInDiv.remove();
+      await fetchContent(clerk);
+    }
+  }
 })();
 <\/script>
 </body>

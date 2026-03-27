@@ -93,9 +93,9 @@ function formatTokens(n) {
 }
 
 const { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
-const { deployToVercel, ensureProject, slugify, generateAuthSecret, provisionUpstashRedis } = require("./vercel-api");
+const { deployToVercel, ensureProject, checkProjectAvailability, slugify } = require("./vercel-api");
 const { buildAuthShell } = require("./auth-shell-builder");
-const { buildAuthFunction } = require("./auth-function-template");
+const { buildAuthFunction, buildApproveFunction } = require("./auth-function-template");
 
 const DEFAULT_SETTINGS = {
   linkFormat: "legacy",
@@ -104,11 +104,8 @@ const DEFAULT_SETTINGS = {
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
-  resendApiKey: "",
-  upstashApiKey: "",
-  upstashEmail: "",
-  upstashRestUrl: "",
-  upstashRestToken: "",
+  clerkPublishableKey: "",
+  clerkSecretKey: "",
   publisherEmail: "",
   publishedPages: {},
 };
@@ -808,49 +805,35 @@ class AtPathSettingTab extends PluginSettingTab {
     new Setting(containerEl).setHeading().setName("Private publishing");
 
     new Setting(containerEl)
-      .setName("Resend API key")
-      .setDesc("API key for email delivery. Get one free at resend.com/api-keys.")
+      .setName("Clerk publishable key")
+      .setDesc("From your Clerk dashboard (clerk.com). Free tier: 50k users/month.")
       .addText((text) =>
         text
-          .setPlaceholder("Enter key...")
-          .setValue(this.plugin.settings.resendApiKey)
-          .then((t) => { t.inputEl.type = "password"; })
+          .setPlaceholder("pk_live_...")
+          .setValue(this.plugin.settings.clerkPublishableKey)
           .onChange(async (value) => {
-            this.plugin.settings.resendApiKey = value.trim();
+            this.plugin.settings.clerkPublishableKey = value.trim();
             await this.plugin.saveSettings();
           })
       );
 
     new Setting(containerEl)
-      .setName("Upstash API key")
-      .setDesc("For session storage. Get a free key at console.upstash.com/account/api.")
+      .setName("Clerk secret key")
+      .setDesc("Keep this secret. Used server-side to verify session tokens.")
       .addText((text) =>
         text
-          .setPlaceholder("Enter key...")
-          .setValue(this.plugin.settings.upstashApiKey)
+          .setPlaceholder("sk_live_...")
+          .setValue(this.plugin.settings.clerkSecretKey)
           .then((t) => { t.inputEl.type = "password"; })
           .onChange(async (value) => {
-            this.plugin.settings.upstashApiKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Upstash account email")
-      .setDesc("Used with the Upstash API key when auto-provisioning Redis.")
-      .addText((text) =>
-        text
-          .setPlaceholder("you@example.com")
-          .setValue(this.plugin.settings.upstashEmail)
-          .onChange(async (value) => {
-            this.plugin.settings.upstashEmail = value.trim();
+            this.plugin.settings.clerkSecretKey = value.trim();
             await this.plugin.saveSettings();
           })
       );
 
     new Setting(containerEl)
       .setName("Publisher email")
-      .setDesc("Where access request notifications are sent.")
+      .setDesc("Viewers can request access via email to this address.")
       .addText((text) =>
         text
           .setPlaceholder("you@example.com")
@@ -860,6 +843,7 @@ class AtPathSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
   }
 }
 
@@ -925,6 +909,44 @@ class PublishConfirmModal extends Modal {
         );
     }
 
+    // ── Project name (editable for new, read-only for existing) ──
+    const isExistingProject = pageState && pageState.projectName;
+    let projectNameValue = isExistingProject ? pageState.projectName : slugify(this.publishData.noteTitle);
+    const projectNameSetting = new Setting(contentEl)
+      .setName("Project name")
+      .setDesc(isExistingProject ? projectNameValue + ".vercel.app" : "");
+    if (isExistingProject) {
+      projectNameSetting.setDesc(projectNameValue + ".vercel.app (already deployed)");
+    } else {
+      projectNameSetting.addText((text) => {
+        const validateProjectName = (val) => {
+          const invalid = val.length > 100 || /[^a-z0-9._-]/.test(val) || val.includes("---") || !val;
+          const tooLong = val.length > 40;
+          text.inputEl.toggleClass("atpath-input-error", invalid);
+          return { valid: !invalid, tooLong };
+        };
+        text
+          .setValue(projectNameValue)
+          .onChange((value) => {
+            projectNameValue = value.trim();
+            const result = validateProjectName(projectNameValue);
+            if (!result.valid) {
+              projectNameSetting.setDesc("Invalid: use a-z, 0-9, ., _, - (max 100 chars, no ---)");
+            } else if (result.tooLong) {
+              projectNameSetting.setDesc(projectNameValue + ".vercel.app — Warning: long names may be shortened by Vercel");
+            } else {
+              projectNameSetting.setDesc(projectNameValue + ".vercel.app");
+            }
+          });
+        const initResult = validateProjectName(projectNameValue);
+        projectNameSetting.setDesc(
+          initResult.tooLong
+            ? projectNameValue + ".vercel.app — Warning: long names may be shortened by Vercel"
+            : projectNameValue + ".vercel.app"
+        );
+      });
+    }
+
     // ── Compact toggle ──
     let compactLinks = true;
     new Setting(contentEl)
@@ -954,52 +976,26 @@ class PublishConfirmModal extends Modal {
     const authSectionEl = contentEl.createDiv({ cls: "atpath-auth-section" + (isPrivate ? "" : " atpath-hidden") });
 
     // ── Auth fields (inside authSectionEl) ──
-    let resendKey = plugin.settings.resendApiKey;
-    if (!resendKey) {
+    let clerkPubKey = plugin.settings.clerkPublishableKey;
+    if (!clerkPubKey) {
       new Setting(authSectionEl)
-        .setName("Resend API key")
+        .setName("Clerk publishable key")
         .addText((text) =>
           text
-            .setPlaceholder("Enter key...")
+            .setPlaceholder("pk_live_...")
+            .onChange((value) => { clerkPubKey = value.trim(); })
+        );
+    }
+
+    let clerkSecKey = plugin.settings.clerkSecretKey;
+    if (!clerkSecKey) {
+      new Setting(authSectionEl)
+        .setName("Clerk secret key")
+        .addText((text) =>
+          text
+            .setPlaceholder("sk_live_...")
             .then((t) => { t.inputEl.type = "password"; })
-            .onChange((value) => { resendKey = value.trim(); })
-        );
-    }
-
-    let upstashKey = plugin.settings.upstashApiKey;
-    if (!upstashKey) {
-      new Setting(authSectionEl)
-        .setName("Upstash API key")
-        .setDesc("Get a free key at console.upstash.com/account/api")
-        .addText((text) =>
-          text
-            .setPlaceholder("Enter key...")
-            .then((t) => { t.inputEl.type = "password"; })
-            .onChange((value) => { upstashKey = value.trim(); })
-        );
-    }
-
-    let upstashEmail = plugin.settings.upstashEmail || plugin.settings.publisherEmail;
-    if (!plugin.settings.upstashEmail) {
-      new Setting(authSectionEl)
-        .setName("Upstash account email")
-        .setDesc("Used only to auto-provision Redis via the Upstash Developer API")
-        .addText((text) =>
-          text
-            .setPlaceholder("you@example.com")
-            .setValue(upstashEmail)
-            .onChange((value) => { upstashEmail = value.trim(); })
-        );
-    }
-
-    let publisherEmail = plugin.settings.publisherEmail;
-    if (!publisherEmail) {
-      new Setting(authSectionEl)
-        .setName("Publisher email")
-        .addText((text) =>
-          text
-            .setPlaceholder("you@example.com")
-            .onChange((value) => { publisherEmail = value.trim(); })
+            .onChange((value) => { clerkSecKey = value.trim(); })
         );
     }
 
@@ -1039,37 +1035,36 @@ class PublishConfirmModal extends Modal {
           new Notice("Please enter a Vercel API token.");
           return;
         }
+        if (!projectNameValue || projectNameValue.length > 100 || /[^a-z0-9._-]/.test(projectNameValue) || projectNameValue.includes("---")) {
+          new Notice("Invalid project name. Use a-z, 0-9, ., _, - (max 100 chars, no ---).");
+          return;
+        }
         if (isPrivate) {
           const emails = approvedEmailsText.split("\n").map(e => e.trim().toLowerCase()).filter(Boolean);
           if (emails.length === 0) {
             new Notice("Add at least one approved email.");
             return;
           }
-          if (!resendKey) {
-            new Notice("Please enter a Resend API key.");
+          if (!clerkPubKey) {
+            new Notice("Please enter a Clerk publishable key.");
             return;
           }
-          if (!upstashKey && !plugin.settings.upstashRestUrl) {
-            new Notice("Please enter an Upstash API key.");
+          if (!clerkSecKey) {
+            new Notice("Please enter a Clerk secret key.");
             return;
           }
-          if (!plugin.settings.upstashRestUrl && !(upstashEmail || publisherEmail)) {
-            new Notice("Please enter your Upstash account email.");
-            return;
-          }
-          if (!publisherEmail) {
-            new Notice("Please enter a publisher email.");
-            return;
+
+          if (clerkPubKey.startsWith("pk_test_") || clerkSecKey.startsWith("sk_test_")) {
+            new Notice("Warning: test keys may not work on production. Consider live keys.", 8000);
           }
 
           this.close();
           this.onConfirm(tokenValue, compactLinks, {
             isPrivate: true,
             approvedEmails: emails,
-            resendApiKey: resendKey,
-            upstashApiKey: upstashKey,
-            upstashEmail: upstashEmail || publisherEmail,
-            publisherEmail,
+            clerkPublishableKey: clerkPubKey,
+            clerkSecretKey: clerkSecKey,
+            projectName: projectNameValue,
           });
         } else {
           // Warn if switching from private to public
@@ -1078,7 +1073,7 @@ class PublishConfirmModal extends Modal {
             if (!confirmed) return;
           }
           this.close();
-          this.onConfirm(tokenValue, compactLinks, { isPrivate: false });
+          this.onConfirm(tokenValue, compactLinks, { isPrivate: false, projectName: projectNameValue });
         }
       })
     );
@@ -1141,11 +1136,17 @@ class PublishResultModal extends Modal {
 
   onOpen() {
     const { contentEl } = this;
-    const { success, url, summary, error } = this.result;
+    const { success, url, summary, error, warning } = this.result;
 
     if (success) {
-      contentEl.createEl("h2", { text: "Published successfully" });
+      contentEl.createEl("h2", { text: warning ? "Published with warnings" : "Published successfully" });
       contentEl.createEl("p", { text: summary });
+
+      if (warning) {
+        const warnDiv = contentEl.createDiv({ cls: "atpath-deploy-warning" });
+        warnDiv.createEl("p", { text: warning });
+      }
+
       contentEl.createEl("p", { text: url, cls: "atpath-publish-url" });
 
       new Setting(contentEl)
@@ -1361,8 +1362,6 @@ class AtPathPlugin extends Plugin {
 
     this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
 
-    // Upstash keep-alive ping on load
-    void this.pingUpstash();
   }
 
   showTrayMenu(event) {
@@ -1378,6 +1377,13 @@ class AtPathPlugin extends Plugin {
     menu.addItem((item) =>
       item.setTitle("Copy with @path contents").setIcon("clipboard-copy")
         .onClick(() => this.copyNoteWithAtPaths())
+    );
+    menu.addItem((item) =>
+      item.setTitle("Settings").setIcon("settings")
+        .onClick(() => {
+          this.app.setting.open();
+          this.app.setting.openTabById(this.manifest.id);
+        })
     );
     menu.showAtMouseEvent(event);
   }
@@ -1633,6 +1639,75 @@ class AtPathPlugin extends Plugin {
     return atPathFiles;
   }
 
+  async collectFileProtocolHtmlFiles(content) {
+    const FILE_PROTO_RE = /\[([^\]]*)\]\((file:\/\/\/[^)]+\.html?)\)/gi;
+    const bundles = [];
+    const seen = new Set();
+    let m;
+
+    let fs, pathMod, fileURLToPath;
+    try {
+      fs = require("fs").promises;
+      pathMod = require("path");
+      fileURLToPath = require("url").fileURLToPath;
+    } catch (_) {
+      // Not available on mobile — skip
+      return bundles;
+    }
+
+    const MAX_FILES = 500;
+    const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50 MB
+
+    while ((m = FILE_PROTO_RE.exec(content)) !== null) {
+      const url = m[2];
+      if (seen.has(url)) continue;
+      seen.add(url);
+
+      try {
+        const absPath = fileURLToPath(url);
+        const dirPath = pathMod.dirname(absPath);
+        const entryFilename = pathMod.basename(absPath);
+        const dirName = pathMod.basename(dirPath);
+
+        // Walk directory recursively
+        const files = [];
+        let totalBytes = 0;
+
+        async function walk(dir, prefix) {
+          const entries = await fs.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.name.startsWith(".")) continue; // skip hidden
+            const fullPath = pathMod.join(dir, entry.name);
+            const relPath = prefix ? prefix + "/" + entry.name : entry.name;
+
+            if (entry.isDirectory()) {
+              await walk(fullPath, relPath);
+            } else if (entry.isFile()) {
+              if (files.length >= MAX_FILES) continue;
+              const stat = await fs.stat(fullPath);
+              if (totalBytes + stat.size > MAX_TOTAL_BYTES) continue;
+              totalBytes += stat.size;
+
+              const ext = (entry.name.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+              if (BINARY_EXTENSIONS.has(ext)) {
+                const buf = await fs.readFile(fullPath);
+                files.push({ relPath, content: buf.toString("base64"), encoding: "base64" });
+              } else {
+                const text = await fs.readFile(fullPath, "utf-8");
+                files.push({ relPath, content: text, encoding: "utf-8" });
+              }
+            }
+          }
+        }
+
+        await walk(dirPath, "");
+        bundles.push({ url, entryFilename, dirName, files });
+      } catch (_) { /* skip unreadable directories */ }
+    }
+
+    return bundles;
+  }
+
   async publishToVercel() {
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) { new Notice("No active note to publish."); return; }
@@ -1644,10 +1719,11 @@ class AtPathPlugin extends Plugin {
     const notePath = activeFile.path;
     const content = mdView.editor.getValue();
     const atPathFiles = await this.collectAtPathFiles(content, activeFile);
+    const fileProtoFiles = await this.collectFileProtocolHtmlFiles(content);
     const existingPageState = this.settings.publishedPages[notePath];
     const domain = ((existingPageState && existingPageState.projectName) || slugify(noteTitle)) + ".vercel.app";
 
-    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, domain, plugin: this };
+    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles, domain, plugin: this };
 
     const onConfirm = (token, compactLinks, privateOpts) => {
       this._executePublish(publishData, { token, compactLinks, ...privateOpts });
@@ -1663,8 +1739,8 @@ class AtPathPlugin extends Plugin {
   }
 
   async _executePublish(publishData, opts) {
-    const { noteTitle, notePath, content, activeFile, atPathFiles } = publishData;
-    const { token, compactLinks, isPrivate, approvedEmails, resendApiKey, upstashApiKey, upstashEmail, publisherEmail } = opts;
+    const { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles } = publishData;
+    const { token, compactLinks, isPrivate, approvedEmails, clerkPublishableKey, clerkSecretKey, projectName: chosenProjectName } = opts;
     const { contactUrl, contactLabel } = this.settings;
 
     if (token !== this.settings.vercelToken) {
@@ -1681,6 +1757,24 @@ class AtPathPlugin extends Plugin {
       }
 
       let resolvedContent = await this.resolveLocalImages(content, activeFile);
+
+      // Build slug map for file:/// HTML bundles and rewrite links
+      const fileProtoSlugs = new Map();
+      const usedSlugs = new Set(atPathSlugs.values());
+      for (const bundle of fileProtoFiles) {
+        let slug = slugifyPath(bundle.dirName);
+        if (usedSlugs.has(slug)) slug += "-project";
+        usedSlugs.add(slug);
+        fileProtoSlugs.set(bundle.url, { slug, entryFilename: bundle.entryFilename });
+      }
+      resolvedContent = resolvedContent.replace(
+        /\[([^\]]*)\]\((file:\/\/\/[^)]+\.html?)\)/gi,
+        (match, text, url) => {
+          const info = fileProtoSlugs.get(url);
+          return info ? `[${text}](atpath/${info.slug}/${info.entryFilename})` : match;
+        }
+      );
+
       const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks);
 
       const subPages = {};
@@ -1688,64 +1782,90 @@ class AtPathPlugin extends Plugin {
 
       for (const f of atPathFiles) {
         const slug = atPathSlugs.get(f.relPath);
-        const atContent = await this.resolveLocalImages(f.content, activeFile);
-        const pageTitle = f.relPath.split("/").pop();
-        const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
-        if (isPrivate) {
-          subPages["atpath/" + slug] = pageHtml;
+        const ext = f.relPath.split(".").pop().toLowerCase();
+        const isHtmlFile = ext === "html" || ext === "htm";
+
+        if (isHtmlFile) {
+          // Serve raw HTML files as rendered pages instead of wrapping in code block
+          if (isPrivate) {
+            subPages["atpath/" + slug] = f.content;
+          } else {
+            deployFiles.push({ path: "atpath/" + slug + ".html", content: f.content });
+          }
         } else {
-          deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+          const atContent = await this.resolveLocalImages(f.content, activeFile);
+          const pageTitle = f.relPath.split("/").pop();
+          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
+          if (isPrivate) {
+            subPages["atpath/" + slug] = pageHtml;
+          } else {
+            deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
+          }
+        }
+      }
+
+      // Deploy file:/// HTML bundles (all files in directory)
+      const bundleStaticFiles = [];
+      for (const bundle of fileProtoFiles) {
+        const info = fileProtoSlugs.get(bundle.url);
+        for (const f of bundle.files) {
+          const deployPath = "atpath/" + info.slug + "/" + f.relPath;
+          const ext = (f.relPath.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+          const isHtmlFile = ext === "html" || ext === "htm";
+
+          if (isPrivate && isHtmlFile) {
+            // HTML files served through auth
+            subPages[deployPath.replace(/\.html?$/, "")] = f.content;
+          } else if (isPrivate) {
+            // Non-HTML assets bypass auth (publicly accessible)
+            bundleStaticFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
+          } else {
+            deployFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
+          }
         }
       }
 
       let result;
       const pageState = this.settings.publishedPages[notePath] || {};
-      const projectName = pageState.projectName || await ensureProject(token, slugify(noteTitle));
+      const projectSlug = pageState.projectName || chosenProjectName || slugify(noteTitle);
+      const projectName = await ensureProject(token, projectSlug);
 
       if (isPrivate) {
-        // Save auth-related settings
-        if (resendApiKey) {
-          this.settings.resendApiKey = resendApiKey;
+        // Save Clerk settings
+        if (clerkPublishableKey) {
+          this.settings.clerkPublishableKey = clerkPublishableKey;
         }
-        if (publisherEmail) {
-          this.settings.publisherEmail = publisherEmail;
+        if (clerkSecretKey) {
+          this.settings.clerkSecretKey = clerkSecretKey;
         }
-        if (upstashEmail) {
-          this.settings.upstashEmail = upstashEmail;
-        }
-
-        // Auto-generate auth secret per-note if not already set
-        if (!pageState.authSecret) {
-          pageState.authSecret = generateAuthSecret();
-        }
-
-        // Auto-provision Upstash Redis if needed
-        if (!this.settings.upstashRestUrl && (upstashApiKey || this.settings.upstashApiKey)) {
-          const key = upstashApiKey || this.settings.upstashApiKey;
-          const email = upstashEmail || this.settings.upstashEmail || this.settings.publisherEmail;
-          this.settings.upstashApiKey = key;
-          new Notice("Provisioning Upstash Redis database...");
-          const redis = await provisionUpstashRedis(email, key);
-          this.settings.upstashRestUrl = redis.restUrl;
-          this.settings.upstashRestToken = redis.restToken;
-        }
-
         await this.saveSettings();
 
-        const siteUrl = "https://" + projectName + ".vercel.app";
         const pages = { main: mainHtml, ...subPages };
 
-        const authShellHtml = buildAuthShell(noteTitle);
+        // Publisher email is always approved
+        const allApproved = [...approvedEmails];
+        const pubEmail = (this.settings.publisherEmail || "").toLowerCase().trim();
+        if (pubEmail && !allApproved.includes(pubEmail)) {
+          allApproved.push(pubEmail);
+        }
+
+        const waMatch = contactUrl.match(/wa\.me\/(\d+)/);
+        const publisherWhatsapp = waMatch ? waMatch[1] : "";
+        const authShellHtml = buildAuthShell(noteTitle, this.settings.clerkPublishableKey, this.settings.publisherEmail, publisherWhatsapp);
         const authFunctionSrc = buildAuthFunction({
-          approvedEmails,
+          approvedEmails: allApproved,
           pages,
-          noteTitle,
-          siteUrl,
+          projectName,
+        });
+        const approveFunctionSrc = buildApproveFunction({ projectName });
+
+        const packageJson = JSON.stringify({
+          type: "module",
+          dependencies: { "@clerk/backend": "^2" },
         });
 
         const vercelJson = JSON.stringify({
           rewrites: [
-            { source: "/api/auth", destination: "/api/auth" },
             { source: "/((?!api/).*)", destination: "/index.html" },
           ],
         });
@@ -1753,21 +1873,21 @@ class AtPathPlugin extends Plugin {
         const privateFiles = [
           { path: "index.html", content: authShellHtml },
           { path: "api/auth.js", content: authFunctionSrc },
+          { path: "api/approve.js", content: approveFunctionSrc },
+          { path: "package.json", content: packageJson },
           { path: "vercel.json", content: vercelJson },
+          ...bundleStaticFiles,
         ];
 
         const envVars = {
-          RESEND_API_KEY: this.settings.resendApiKey,
-          AUTH_SECRET: pageState.authSecret,
-          PUBLISHER_EMAIL: this.settings.publisherEmail,
-          UPSTASH_REDIS_REST_URL: this.settings.upstashRestUrl,
-          UPSTASH_REDIS_REST_TOKEN: this.settings.upstashRestToken,
+          CLERK_SECRET_KEY: this.settings.clerkSecretKey,
         };
 
         result = await deployToVercel(token, noteTitle, privateFiles, {
           isPrivate: true,
           envVars,
           projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg),
         });
 
         // Save page state
@@ -1782,9 +1902,12 @@ class AtPathPlugin extends Plugin {
         };
         await this.saveSettings();
       } else {
-        // Public publish (existing path)
+        // Public publish
         deployFiles.unshift({ path: "index.html", content: mainHtml });
-        result = await deployToVercel(token, noteTitle, deployFiles, { projectName });
+        result = await deployToVercel(token, noteTitle, deployFiles, {
+          projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg),
+        });
 
         this.settings.publishedPages[notePath] = {
           ...pageState,
@@ -1800,11 +1923,20 @@ class AtPathPlugin extends Plugin {
 
       this.trayBarEl.setText("@Path");
 
-      const linkedCount = atPathFiles.length;
+      const linkedCount = atPathFiles.length + fileProtoFiles.length;
       const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "")
         + (isPrivate ? " (private)" : "");
 
-      new PublishResultModal(this.app, { success: true, url: result.url, summary }).open();
+      let warning = "";
+      if (result.deploymentState && result.deploymentState !== "READY") {
+        warning += "Deployment did not succeed (state: " + result.deploymentState + ").";
+        if (result.deploymentError) warning += " " + result.deploymentError;
+      } else if (result.healthCheck && !result.healthCheck.ok) {
+        warning += "Deployment is live but the health check failed.";
+        if (result.healthCheck.detail) warning += " " + result.healthCheck.detail;
+      }
+
+      new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
       this.trayBarEl.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
@@ -1842,25 +1974,6 @@ class AtPathPlugin extends Plugin {
     } catch (e) {
       plugin.trayBarEl.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
-    }
-  }
-
-  async pingUpstash() {
-    const { upstashRestUrl, upstashRestToken } = this.settings;
-    if (!upstashRestUrl || !upstashRestToken) return;
-    try {
-      const resp = await requestUrl({
-        url: upstashRestUrl + "/PING",
-        method: "GET",
-        headers: { Authorization: "Bearer " + upstashRestToken },
-      });
-      if (resp.status >= 400) throw new Error("status " + resp.status);
-      console.debug("AtPath: Upstash keep-alive OK");
-    } catch (e) {
-      console.warn("AtPath: Upstash keep-alive failed, clearing credentials:", e.message || e);
-      this.settings.upstashRestUrl = "";
-      this.settings.upstashRestToken = "";
-      await this.saveSettings();
     }
   }
 
