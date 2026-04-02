@@ -49,7 +49,11 @@ One command (or click the status bar) to copy the current note with all referenc
 
 ### Publish to Vercel
 
-Deploy any note as a styled dark-themed web page with one click. Before publishing, a confirmation modal shows the target domain, all linked `@path` notes, and a toggle to compact file paths to just filenames.
+Deploy notes and standalone HTML apps to Vercel with one click. Notes can publish linked `@path` content, while `.html` files in the File Explorer can publish either as a single-file app or as a whole folder-based static site.
+
+Private publishing is supported through Clerk, and the publish flow also stores a reusable site icon so your deployed pages can show a favicon in browser tabs without asking every time.
+
+Before publishing, the confirmation modal shows the target domain, current publish state, linked `@path` notes when relevant, and the main publish options for that content type.
 
 <p align="center">
   <img src="screenshots/publish-confirm.png" width="500" alt="Publish confirmation modal showing domain, linked notes, and compact toggle" />
@@ -81,11 +85,15 @@ Rename or move a file and all `@path` references across the vault update automat
 | Contact URL | — | Button link on published pages |
 | Preferred insert format | Legacy @path | Wikilink (`[[path\|@display]]`) or legacy `@path` |
 | Contact button label | Entre em contato | Button text |
+| Clerk publishable key | — | Required for private publishing |
+| Clerk secret key | — | Required for private publishing |
+| Publisher email | — | Used in private access requests |
+| Site icon | — | Reusable favicon for published notes and HTML apps |
 
 ## Install
 
-- **Community Plugins** — search "AtPath" in Obsidian settings
-- **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable
+- **Community Plugins** — not listed in the official Obsidian Community Plugins catalog as of April 2, 2026
+- **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable or reload the plugin
 
 ## Contributing
 
