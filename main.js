@@ -7833,6 +7833,17 @@ var require_vercel_api = __commonJS({
         return { ok: false, status: null, detail: e.message || String(e) };
       }
     }
+    async function resolveReachableUrl(preferredUrl, fallbackUrl) {
+      const preferredHealth = await healthCheck(preferredUrl);
+      if (preferredHealth.ok || !fallbackUrl || fallbackUrl === preferredUrl) {
+        return { url: preferredUrl, healthCheck: preferredHealth };
+      }
+      const fallbackHealth = await healthCheck(fallbackUrl);
+      if (fallbackHealth.ok) {
+        return { url: fallbackUrl, healthCheck: fallbackHealth };
+      }
+      return { url: preferredUrl, healthCheck: preferredHealth };
+    }
     async function deployToVercel2(token, noteTitle, files, opts) {
       const projectName = opts && opts.projectName || await ensureProject2(token, slugify2(noteTitle));
       const onProgress = opts && opts.onProgress;
@@ -7851,8 +7862,9 @@ var require_vercel_api = __commonJS({
         files: fileEntries
       });
       const deploymentId = data && data.id;
-      const fallbackUrl = "https://" + projectName + ".vercel.app";
-      const result = { url: fallbackUrl, projectName, deploymentState: "UNKNOWN" };
+      const projectUrl = "https://" + projectName + ".vercel.app";
+      let deploymentUrl = data && data.url ? "https://" + data.url : "";
+      const result = { url: deploymentUrl || projectUrl, projectName, deploymentState: "UNKNOWN" };
       if (!deploymentId) return result;
       const readyState = data.readyState;
       if (readyState === "READY") {
@@ -7865,6 +7877,10 @@ var require_vercel_api = __commonJS({
         const poll = await waitForDeployment(token, deploymentId, onProgress);
         result.deploymentState = poll.state || "UNKNOWN";
         if (poll.error) result.deploymentError = poll.error;
+        if (!deploymentUrl && poll.url) {
+          deploymentUrl = "https://" + poll.url;
+          result.url = deploymentUrl;
+        }
       }
       if (result.deploymentState === "READY") {
         try {
@@ -7875,13 +7891,19 @@ var require_vercel_api = __commonJS({
           if (vercelAlias && vercelAlias !== expectedAlias) {
             result.deploymentState = "NAME_TRUNCATED";
             result.deploymentError = 'The project name "' + projectName + '" is too long for a .vercel.app URL. Vercel shortened it to "' + vercelAlias.replace(".vercel.app", "") + '". Please shorten the note title and try again.';
-            result.url = "https://" + vercelAlias;
+            const resolved = await resolveReachableUrl("https://" + vercelAlias, deploymentUrl);
+            result.url = resolved.url;
+            result.healthCheck = resolved.healthCheck;
           } else {
-            result.url = vercelAlias ? "https://" + vercelAlias : result.url;
-            result.healthCheck = await healthCheck(result.url);
+            const preferredUrl = vercelAlias ? "https://" + vercelAlias : deploymentUrl || projectUrl;
+            const resolved = await resolveReachableUrl(preferredUrl, deploymentUrl);
+            result.url = resolved.url;
+            result.healthCheck = resolved.healthCheck;
           }
         } catch (_) {
-          result.healthCheck = await healthCheck(result.url);
+          const resolved = await resolveReachableUrl(result.url, deploymentUrl);
+          result.url = resolved.url;
+          result.healthCheck = resolved.healthCheck;
         }
       }
       return result;
@@ -8180,6 +8202,13 @@ function signToken(payload) {
   return Buffer.from(data).toString("base64url") + "." + sig;
 }
 
+function getRequestOrigin(req) {
+  var proto = ((req.headers["x-forwarded-proto"] || "").split(",")[0] || "").trim();
+  var host = ((req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0] || "").trim();
+  if (!host) return "https://" + PROJECT_NAME + ".vercel.app";
+  return (proto || "https") + "://" + host;
+}
+
 export default async function handler(req, res) {
   const auth = (req.headers.authorization || "").replace(/^Bearer\\s+/, "");
   if (!auth) return res.status(401).json({ error: "Not authenticated" });
@@ -8214,7 +8243,7 @@ export default async function handler(req, res) {
 
   if (!isApproved) {
     var token = signToken({ email: email, site: PROJECT_NAME, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 });
-    var approvalUrl = "https://" + PROJECT_NAME + ".vercel.app/api/approve?token=" + encodeURIComponent(token);
+    var approvalUrl = getRequestOrigin(req) + "/api/approve?token=" + encodeURIComponent(token);
     return res.status(403).json({ error: "Access denied", approvalUrl: approvalUrl });
   }
 

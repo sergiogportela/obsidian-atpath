@@ -177,6 +177,20 @@ async function healthCheck(url) {
   }
 }
 
+async function resolveReachableUrl(preferredUrl, fallbackUrl) {
+  const preferredHealth = await healthCheck(preferredUrl);
+  if (preferredHealth.ok || !fallbackUrl || fallbackUrl === preferredUrl) {
+    return { url: preferredUrl, healthCheck: preferredHealth };
+  }
+
+  const fallbackHealth = await healthCheck(fallbackUrl);
+  if (fallbackHealth.ok) {
+    return { url: fallbackUrl, healthCheck: fallbackHealth };
+  }
+
+  return { url: preferredUrl, healthCheck: preferredHealth };
+}
+
 async function deployToVercel(token, noteTitle, files, opts) {
   const projectName = (opts && opts.projectName) || await ensureProject(token, slugify(noteTitle));
   const onProgress = opts && opts.onProgress;
@@ -201,8 +215,9 @@ async function deployToVercel(token, noteTitle, files, opts) {
   });
 
   const deploymentId = data && data.id;
-  const fallbackUrl = "https://" + projectName + ".vercel.app";
-  const result = { url: fallbackUrl, projectName, deploymentState: "UNKNOWN" };
+  const projectUrl = "https://" + projectName + ".vercel.app";
+  let deploymentUrl = data && data.url ? "https://" + data.url : "";
+  const result = { url: deploymentUrl || projectUrl, projectName, deploymentState: "UNKNOWN" };
 
   if (!deploymentId) return result;
 
@@ -219,6 +234,10 @@ async function deployToVercel(token, noteTitle, files, opts) {
     const poll = await waitForDeployment(token, deploymentId, onProgress);
     result.deploymentState = poll.state || "UNKNOWN";
     if (poll.error) result.deploymentError = poll.error;
+    if (!deploymentUrl && poll.url) {
+      deploymentUrl = "https://" + poll.url;
+      result.url = deploymentUrl;
+    }
   }
 
   // Verify the production alias matches the project name exactly
@@ -235,13 +254,19 @@ async function deployToVercel(token, noteTitle, files, opts) {
         result.deploymentError = "The project name \"" + projectName + "\" is too long for a .vercel.app URL. "
           + "Vercel shortened it to \"" + vercelAlias.replace(".vercel.app", "") + "\". "
           + "Please shorten the note title and try again.";
-        result.url = "https://" + vercelAlias;
+        const resolved = await resolveReachableUrl("https://" + vercelAlias, deploymentUrl);
+        result.url = resolved.url;
+        result.healthCheck = resolved.healthCheck;
       } else {
-        result.url = vercelAlias ? "https://" + vercelAlias : result.url;
-        result.healthCheck = await healthCheck(result.url);
+        const preferredUrl = vercelAlias ? "https://" + vercelAlias : (deploymentUrl || projectUrl);
+        const resolved = await resolveReachableUrl(preferredUrl, deploymentUrl);
+        result.url = resolved.url;
+        result.healthCheck = resolved.healthCheck;
       }
     } catch (_) {
-      result.healthCheck = await healthCheck(result.url);
+      const resolved = await resolveReachableUrl(result.url, deploymentUrl);
+      result.url = resolved.url;
+      result.healthCheck = resolved.healthCheck;
     }
   }
 

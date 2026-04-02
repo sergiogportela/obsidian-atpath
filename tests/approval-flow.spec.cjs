@@ -63,7 +63,10 @@ function testAuthFunctionSource() {
   try {
     assert.ok(src.includes("approvalUrl"), "returns approvalUrl on 403");
     assert.ok(src.includes("signToken"), "uses signToken helper");
+    assert.ok(src.includes("getRequestOrigin"), "approval URL uses request origin helper");
+    assert.ok(src.includes('req.headers["x-forwarded-host"]'), "uses forwarded host when present");
     assert.ok(src.includes("/api/approve?token="), "approval URL points to /api/approve");
+    assert.ok(!src.includes('"https://" + PROJECT_NAME + ".vercel.app/api/approve?token="'), "does not hardcode project hostname");
     log("PASS", "Auth function returns approvalUrl in 403 response");
   } catch (e) {
     log("FAIL", "Auth function returns approvalUrl in 403 response", e.message);

@@ -5,7 +5,7 @@
  * @param {Object} config
  * @param {string[]} config.approvedEmails - Lowercase email addresses allowed access
  * @param {Object<string, string>} config.pages - Map of page keys to HTML content strings
- * @param {string} config.projectName - Vercel project name (used for privateMetadata key + approval URL)
+ * @param {string} config.projectName - Vercel project name (used for privateMetadata key + token site binding)
  * @returns {string} Complete Node.js module source for api/auth.js
  */
 function buildAuthFunction(config) {
@@ -27,6 +27,13 @@ function signToken(payload) {
   var data = JSON.stringify(payload);
   var sig = createHmac("sha256", process.env.CLERK_SECRET_KEY).update(data).digest("hex");
   return Buffer.from(data).toString("base64url") + "." + sig;
+}
+
+function getRequestOrigin(req) {
+  var proto = ((req.headers["x-forwarded-proto"] || "").split(",")[0] || "").trim();
+  var host = ((req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0] || "").trim();
+  if (!host) return "https://" + PROJECT_NAME + ".vercel.app";
+  return (proto || "https") + "://" + host;
 }
 
 export default async function handler(req, res) {
@@ -63,7 +70,7 @@ export default async function handler(req, res) {
 
   if (!isApproved) {
     var token = signToken({ email: email, site: PROJECT_NAME, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 });
-    var approvalUrl = "https://" + PROJECT_NAME + ".vercel.app/api/approve?token=" + encodeURIComponent(token);
+    var approvalUrl = getRequestOrigin(req) + "/api/approve?token=" + encodeURIComponent(token);
     return res.status(403).json({ error: "Access denied", approvalUrl: approvalUrl });
   }
 
