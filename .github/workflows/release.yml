@@ -21,6 +21,14 @@ jobs:
       - name: Install and build
         run: npm ci && npm run build
 
+      - name: Package plugin zip
+        run: |
+          rm -rf release-package "atpath-${GITHUB_REF_NAME}.zip"
+          mkdir -p release-package/atpath
+          cp main.js manifest.json styles.css release-package/atpath/
+          cd release-package
+          zip -r "../atpath-${GITHUB_REF_NAME}.zip" atpath
+
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -28,4 +36,4 @@ jobs:
           gh release delete "$GITHUB_REF_NAME" --yes --cleanup-tag=false 2>/dev/null || true
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            main.js manifest.json styles.css
+            main.js manifest.json styles.css "atpath-${GITHUB_REF_NAME}.zip"

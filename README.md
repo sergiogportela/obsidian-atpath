@@ -93,6 +93,8 @@ Rename or move a file and all `@path` references across the vault update automat
 ## Install
 
 - **Community Plugins** — not listed in the official Obsidian Community Plugins catalog as of April 2, 2026
+- **BRAT** — install `BRAT` from Obsidian Community Plugins, open `Settings` -> `BRAT`, choose `Add beta plugin`, enter `https://github.com/sergiogportela/obsidian-atpath`, then enable `AtPath`
+- **Release zip** — download `atpath-x.y.z.zip` from the latest release, extract it into `.obsidian/plugins/` so it creates `.obsidian/plugins/atpath/`, then enable or reload the plugin
 - **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable or reload the plugin
 
 ## Contributing

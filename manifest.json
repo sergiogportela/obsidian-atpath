@@ -1,7 +1,7 @@
 {
   "id": "atpath",
   "name": "AtPath",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "minAppVersion": "0.15.0",
   "description": "Autocomplete and navigate @path/to/file references.",
   "author": "sergio",
