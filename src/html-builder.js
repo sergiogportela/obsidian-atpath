@@ -2,6 +2,7 @@
 // Ported from build.mjs with multi-page @path support.
 
 const markdownit = require("markdown-it");
+const { buildSiteIconHeadHtml } = require("./site-icon");
 
 // ─── CDN URLs (syntax highlighting & diagrams) ─────────────────────
 const HLJS_CSS  = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
@@ -240,7 +241,12 @@ function topButtons(downloadBase64, downloadFilename, contactUrl, contactLabel) 
   return `<div class="top-btns">\n${btns}</div>`;
 }
 
-function htmlPage(title, bodyContent, extraHead) {
+function htmlPage(title, bodyContent, extraHead, siteIconDataUrl) {
+  const siteIconHead = buildSiteIconHeadHtml(siteIconDataUrl);
+  const headParts = [];
+  if (siteIconHead) headParts.push(siteIconHead);
+  if (extraHead) headParts.push(extraHead);
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -249,7 +255,7 @@ function htmlPage(title, bodyContent, extraHead) {
 <title>${escapeHtml(title)}</title>
 <style>${CSS_TEMPLATE}</style>
 <link rel="stylesheet" href="${HLJS_CSS}">
-${extraHead || ""}
+${headParts.length > 0 ? headParts.join("\n") : ""}
 </head>
 <body>
 ${bodyContent}
@@ -378,7 +384,7 @@ function toBase64(str) {
 
 // ─── Exported builders ──────────────────────────────────────────────
 
-function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks) {
+function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl) {
   const mdBase64 = toBase64(markdown);
   const downloadFilename = title + ".md";
 
@@ -388,10 +394,10 @@ function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, c
   const bodyHtml = processMarkdown(md);
   const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
 
-  return htmlPage(title, `${buttons}\n<div class="container">\n${bodyHtml}\n</div>`);
+  return htmlPage(title, `${buttons}\n<div class="container">\n${bodyHtml}\n</div>`, "", siteIconDataUrl);
 }
 
-function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabel) {
+function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabel, siteIconDataUrl) {
   const mdBase64 = toBase64(markdown);
   const downloadFilename = title.replace(/\//g, "-");
 
@@ -411,17 +417,17 @@ function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabe
 
   const backNav = `<div class="back-nav"><a href="../index.html">&larr; Back to ${escapeHtml(mainPageTitle)}</a></div>`;
 
-  return htmlPage(title, `${buttons}\n<div class="container">\n${backNav}\n${bodyHtml}\n</div>`);
+  return htmlPage(title, `${buttons}\n<div class="container">\n${backNav}\n${bodyHtml}\n</div>`, "", siteIconDataUrl);
 }
 
-function buildUnpublishedPage(noteTitle) {
+function buildUnpublishedPage(noteTitle, siteIconDataUrl) {
   const bodyContent = `<div class="container" style="display:flex;justify-content:center;align-items:center;min-height:80vh">
 <div style="text-align:center">
 <h1>${escapeHtml(noteTitle)}</h1>
 <p style="color:#888;font-size:1.1em">Content unpublished by owner.</p>
 </div>
 </div>`;
-  return htmlPage(noteTitle, bodyContent);
+  return htmlPage(noteTitle, bodyContent, "", siteIconDataUrl);
 }
 
 module.exports = { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, slugifyHeading, AT_PATH_RE, CSS_TEMPLATE };

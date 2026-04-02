@@ -7332,10 +7332,68 @@ var require_index_cjs4 = __commonJS({
   }
 });
 
+// src/site-icon.js
+var require_site_icon = __commonJS({
+  "src/site-icon.js"(exports2, module2) {
+    function escapeHtmlAttr(value) {
+      return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function isImageDataUrl(value) {
+      return typeof value === "string" && /^data:image\//i.test(value.trim());
+    }
+    function getImageMimeType(siteIconDataUrl) {
+      const match = String(siteIconDataUrl || "").match(/^data:([^;,]+)/i);
+      return match ? match[1] : "image/png";
+    }
+    function buildSiteIconHeadHtml(siteIconDataUrl) {
+      if (!isImageDataUrl(siteIconDataUrl)) return "";
+      const href = escapeHtmlAttr(siteIconDataUrl.trim());
+      const mimeType = escapeHtmlAttr(getImageMimeType(siteIconDataUrl));
+      return `<link rel="icon" type="${mimeType}" href="${href}">
+<link rel="shortcut icon" type="${mimeType}" href="${href}">`;
+    }
+    function hasIconLink(html) {
+      return /<link\b[^>]*\brel\s*=\s*["'][^"']*\bicon\b[^"']*["'][^>]*>/i.test(String(html || ""));
+    }
+    function injectSiteIconIntoHtml2(html, siteIconDataUrl) {
+      if (typeof html !== "string" || !html) return html;
+      const iconHeadHtml = buildSiteIconHeadHtml(siteIconDataUrl);
+      if (!iconHeadHtml || hasIconLink(html)) return html;
+      if (/<\/head>/i.test(html)) {
+        return html.replace(/<\/head>/i, iconHeadHtml + "\n</head>");
+      }
+      if (/<head\b[^>]*>/i.test(html)) {
+        return html.replace(/<head\b[^>]*>/i, (match) => match + "\n" + iconHeadHtml);
+      }
+      if (/<html\b[^>]*>/i.test(html)) {
+        return html.replace(/<html\b[^>]*>/i, (match) => match + "\n<head>\n" + iconHeadHtml + "\n</head>");
+      }
+      return "<head>\n" + iconHeadHtml + "\n</head>\n" + html;
+    }
+    function applySiteIconToDeployFiles2(deployFiles, siteIconDataUrl) {
+      if (!Array.isArray(deployFiles) || !siteIconDataUrl) return deployFiles;
+      return deployFiles.map((file) => {
+        const filePath = String(file && (file.path || file.relPath) || "");
+        const isHtmlFile = /\.html?$/i.test(filePath);
+        if (!isHtmlFile || typeof file.content !== "string") return file;
+        const nextContent = injectSiteIconIntoHtml2(file.content, siteIconDataUrl);
+        if (nextContent === file.content) return file;
+        return { ...file, content: nextContent };
+      });
+    }
+    module2.exports = {
+      buildSiteIconHeadHtml,
+      injectSiteIconIntoHtml: injectSiteIconIntoHtml2,
+      applySiteIconToDeployFiles: applySiteIconToDeployFiles2
+    };
+  }
+});
+
 // src/html-builder.js
 var require_html_builder = __commonJS({
   "src/html-builder.js"(exports2, module2) {
     var markdownit = require_index_cjs4();
+    var { buildSiteIconHeadHtml } = require_site_icon();
     var HLJS_CSS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/atom-one-dark.min.css";
     var HLJS_JS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js";
     var MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
@@ -7539,7 +7597,11 @@ pre code.hljs { background: transparent; padding: 0; }
       return `<div class="top-btns">
 ${btns}</div>`;
     }
-    function htmlPage(title, bodyContent, extraHead) {
+    function htmlPage(title, bodyContent, extraHead, siteIconDataUrl) {
+      const siteIconHead = buildSiteIconHeadHtml(siteIconDataUrl);
+      const headParts = [];
+      if (siteIconHead) headParts.push(siteIconHead);
+      if (extraHead) headParts.push(extraHead);
       return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -7548,7 +7610,7 @@ ${btns}</div>`;
 <title>${escapeHtml(title)}</title>
 <style>${CSS_TEMPLATE}</style>
 <link rel="stylesheet" href="${HLJS_CSS}">
-${extraHead || ""}
+${headParts.length > 0 ? headParts.join("\n") : ""}
 </head>
 <body>
 ${bodyContent}
@@ -7646,7 +7708,7 @@ ${bodyContent}
       if (typeof Buffer !== "undefined") return Buffer.from(str).toString("base64");
       return btoa(unescape(encodeURIComponent(str)));
     }
-    function buildMainPage2(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks) {
+    function buildMainPage2(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl) {
       const mdBase64 = toBase64(markdown);
       const downloadFilename = title + ".md";
       let md = replaceAtPathsWithLinks(markdown, atPathSlugs, compactLinks);
@@ -7655,9 +7717,9 @@ ${bodyContent}
       return htmlPage(title, `${buttons}
 <div class="container">
 ${bodyHtml}
-</div>`);
+</div>`, "", siteIconDataUrl);
     }
-    function buildAtPathPage2(title, markdown, mainPageTitle, contactUrl, contactLabel) {
+    function buildAtPathPage2(title, markdown, mainPageTitle, contactUrl, contactLabel, siteIconDataUrl) {
       const mdBase64 = toBase64(markdown);
       const downloadFilename = title.replace(/\//g, "-");
       const ext = (title.match(/\.(\w+)$/) || [])[1]?.toLowerCase();
@@ -7674,16 +7736,16 @@ ${bodyHtml}
 <div class="container">
 ${backNav}
 ${bodyHtml}
-</div>`);
+</div>`, "", siteIconDataUrl);
     }
-    function buildUnpublishedPage2(noteTitle) {
+    function buildUnpublishedPage2(noteTitle, siteIconDataUrl) {
       const bodyContent = `<div class="container" style="display:flex;justify-content:center;align-items:center;min-height:80vh">
 <div style="text-align:center">
 <h1>${escapeHtml(noteTitle)}</h1>
 <p style="color:#888;font-size:1.1em">Content unpublished by owner.</p>
 </div>
 </div>`;
-      return htmlPage(noteTitle, bodyContent);
+      return htmlPage(noteTitle, bodyContent, "", siteIconDataUrl);
     }
     module2.exports = { buildMainPage: buildMainPage2, buildAtPathPage: buildAtPathPage2, buildUnpublishedPage: buildUnpublishedPage2, slugifyPath: slugifyPath2, slugifyHeading, AT_PATH_RE: AT_PATH_RE2, CSS_TEMPLATE };
   }
@@ -7916,14 +7978,16 @@ var require_vercel_api = __commonJS({
 var require_auth_shell_builder = __commonJS({
   "src/auth-shell-builder.js"(exports2, module2) {
     var { CSS_TEMPLATE } = require_html_builder();
+    var { buildSiteIconHeadHtml } = require_site_icon();
     function escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
-    function buildAuthShell2(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp) {
+    function buildAuthShell2(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp, siteIconDataUrl) {
       const title = escapeHtml(noteTitle);
       const pubKeyJSON = JSON.stringify(clerkPublishableKey);
       const publisherEmailJSON = JSON.stringify(publisherEmail || "");
       const publisherWhatsappJSON = JSON.stringify(publisherWhatsapp || "");
+      const siteIconHead = buildSiteIconHeadHtml(siteIconDataUrl);
       return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -7931,6 +7995,7 @@ var require_auth_shell_builder = __commonJS({
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>${CSS_TEMPLATE}</style>
+${siteIconHead}
 </head>
 <body>
 <div class="container">
@@ -8443,6 +8508,246 @@ export default async function handler(req, res) {
   }
 });
 
+// src/html-app-publish.js
+var require_html_app_publish = __commonJS({
+  "src/html-app-publish.js"(exports2, module2) {
+    var HTML_APP_SCOPE_SINGLE_FILE2 = "single-file";
+    var HTML_APP_SCOPE_FOLDER2 = "folder";
+    var DIRECTORY_BINARY_EXTENSIONS = /* @__PURE__ */ new Set([
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "bmp",
+      "svg",
+      "ico",
+      "webp",
+      "avif",
+      "pdf",
+      "doc",
+      "docx",
+      "xls",
+      "xlsx",
+      "ppt",
+      "pptx",
+      "zip",
+      "gz",
+      "tar",
+      "rar",
+      "7z",
+      "bz2",
+      "mp3",
+      "wav",
+      "ogg",
+      "flac",
+      "aac",
+      "m4a",
+      "mp4",
+      "avi",
+      "mkv",
+      "mov",
+      "webm",
+      "wmv",
+      "woff",
+      "woff2",
+      "ttf",
+      "otf",
+      "eot",
+      "exe",
+      "dll",
+      "so",
+      "dylib",
+      "bin",
+      "sqlite",
+      "db"
+    ]);
+    function isHtmlExtension2(ext) {
+      const normalized = String(ext || "").toLowerCase();
+      return normalized === "html" || normalized === "htm";
+    }
+    function stripHtmlExtension(fileName) {
+      return String(fileName || "").replace(/\.html?$/i, "");
+    }
+    function splitPath(filePath) {
+      return String(filePath || "").split("/").filter(Boolean);
+    }
+    function getFileName(filePath) {
+      const parts = splitPath(filePath);
+      return parts.length > 0 ? parts[parts.length - 1] : "";
+    }
+    function getParentFolderName(filePath) {
+      const parts = splitPath(filePath);
+      return parts.length > 1 ? parts[parts.length - 2] : "";
+    }
+    function slugifyProjectName(title) {
+      return String(title || "").toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-{2,}/g, "-").replace(/^-|-$/g, "");
+    }
+    function humanizeName(value) {
+      return String(value || "").replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    }
+    function decodeBasicEntities(value) {
+      return value.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+    }
+    function extractHtmlTitle(html) {
+      if (typeof html !== "string" || !html) return "";
+      const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (!match) return "";
+      return decodeBasicEntities(match[1]).replace(/\s+/g, " ").trim();
+    }
+    function getDefaultHtmlAppProjectName(filePath, scope) {
+      const fileName = getFileName(filePath);
+      const fallback = scope === HTML_APP_SCOPE_FOLDER2 ? getParentFolderName(filePath) || stripHtmlExtension(fileName) : stripHtmlExtension(fileName);
+      return slugifyProjectName(fallback);
+    }
+    function getDefaultHtmlAppTitle(filePath, scope, entryHtml) {
+      const extractedTitle = extractHtmlTitle(entryHtml);
+      if (extractedTitle) return extractedTitle;
+      const fileName = getFileName(filePath);
+      const fallback = scope === HTML_APP_SCOPE_FOLDER2 ? getParentFolderName(filePath) || stripHtmlExtension(fileName) : stripHtmlExtension(fileName);
+      return humanizeName(fallback) || "HTML app";
+    }
+    function buildHtmlAppDefaults2({ filePath, scope, entryHtml, existingState }) {
+      const defaultProjectName = getDefaultHtmlAppProjectName(filePath, scope);
+      const projectName = existingState && existingState.projectName ? existingState.projectName : defaultProjectName;
+      const siteTitle = existingState && existingState.siteTitle ? existingState.siteTitle : getDefaultHtmlAppTitle(filePath, scope, entryHtml);
+      return {
+        defaultProjectName,
+        projectName,
+        siteTitle,
+        domain: projectName + ".vercel.app"
+      };
+    }
+    function normalizeDeployPath(relPath) {
+      return String(relPath || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+    }
+    function getHtmlAppPageKey(deployPath) {
+      const normalized = normalizeDeployPath(deployPath).replace(/\.html?$/i, "");
+      if (!normalized || normalized === "index") return "main";
+      return normalized;
+    }
+    function buildHtmlAppDeployFiles2({ scope, entryFilePath, entryHtml, folderFiles }) {
+      if (scope === HTML_APP_SCOPE_SINGLE_FILE2) {
+        return [{ path: "index.html", content: entryHtml, encoding: "utf-8" }];
+      }
+      const entryRelPath = normalizeDeployPath(getFileName(entryFilePath) || entryFilePath);
+      const deployFiles = [];
+      const seenPaths = /* @__PURE__ */ new Set();
+      for (const file of folderFiles || []) {
+        const deployPath = normalizeDeployPath(file.relPath);
+        if (!deployPath) continue;
+        if (deployPath === "index.html" && entryRelPath !== "index.html") continue;
+        if (seenPaths.has(deployPath)) continue;
+        seenPaths.add(deployPath);
+        deployFiles.push({
+          path: deployPath,
+          content: file.content,
+          encoding: file.encoding || "utf-8"
+        });
+      }
+      if (entryRelPath !== "index.html") {
+        deployFiles.unshift({ path: "index.html", content: entryHtml, encoding: "utf-8" });
+        if (!seenPaths.has(entryRelPath)) {
+          deployFiles.push({ path: entryRelPath, content: entryHtml, encoding: "utf-8" });
+        }
+      } else if (!seenPaths.has("index.html")) {
+        deployFiles.unshift({ path: "index.html", content: entryHtml, encoding: "utf-8" });
+      }
+      return deployFiles;
+    }
+    function partitionHtmlAppDeployFiles2(deployFiles) {
+      const htmlPages = {};
+      const staticFiles = [];
+      for (const file of deployFiles || []) {
+        const deployPath = normalizeDeployPath(file.path || file.relPath);
+        if (!deployPath) continue;
+        const ext = (deployPath.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+        if (isHtmlExtension2(ext)) {
+          htmlPages[getHtmlAppPageKey(deployPath)] = file.content;
+          continue;
+        }
+        staticFiles.push({
+          path: deployPath,
+          content: file.content,
+          encoding: file.encoding || "utf-8"
+        });
+      }
+      return { htmlPages, staticFiles };
+    }
+    function getPublishedHtmlAppState2(settings, filePath) {
+      return settings && settings.publishedHtmlApps ? settings.publishedHtmlApps[filePath] : void 0;
+    }
+    function setPublishedHtmlAppState2(settings, filePath, state) {
+      if (!settings.publishedHtmlApps || typeof settings.publishedHtmlApps !== "object") {
+        settings.publishedHtmlApps = {};
+      }
+      settings.publishedHtmlApps[filePath] = state;
+      return state;
+    }
+    function renamePublishedHtmlAppState2(settings, oldPath, newPath) {
+      if (!settings || !settings.publishedHtmlApps || !settings.publishedHtmlApps[oldPath]) {
+        return false;
+      }
+      settings.publishedHtmlApps[newPath] = settings.publishedHtmlApps[oldPath];
+      delete settings.publishedHtmlApps[oldPath];
+      return true;
+    }
+    async function collectDirectoryFiles2(dirPath, opts) {
+      let fs;
+      let pathMod;
+      try {
+        fs = require("fs").promises;
+        pathMod = require("path");
+      } catch (_) {
+        return [];
+      }
+      const files = [];
+      const maxFiles = opts && opts.maxFiles || 500;
+      const maxTotalBytes = opts && opts.maxTotalBytes || 50 * 1024 * 1024;
+      let totalBytes = 0;
+      async function walk(dir, prefix) {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name.startsWith(".")) continue;
+          const fullPath = pathMod.join(dir, entry.name);
+          const relPath = prefix ? prefix + "/" + entry.name : entry.name;
+          if (entry.isDirectory()) {
+            await walk(fullPath, relPath);
+            continue;
+          }
+          if (!entry.isFile() || files.length >= maxFiles) continue;
+          const stat = await fs.stat(fullPath);
+          if (totalBytes + stat.size > maxTotalBytes) continue;
+          totalBytes += stat.size;
+          const ext = (entry.name.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
+          if (DIRECTORY_BINARY_EXTENSIONS.has(ext)) {
+            const buf = await fs.readFile(fullPath);
+            files.push({ relPath, content: buf.toString("base64"), encoding: "base64" });
+          } else {
+            const text = await fs.readFile(fullPath, "utf-8");
+            files.push({ relPath, content: text, encoding: "utf-8" });
+          }
+        }
+      }
+      await walk(dirPath, "");
+      return files;
+    }
+    module2.exports = {
+      HTML_APP_SCOPE_SINGLE_FILE: HTML_APP_SCOPE_SINGLE_FILE2,
+      HTML_APP_SCOPE_FOLDER: HTML_APP_SCOPE_FOLDER2,
+      isHtmlExtension: isHtmlExtension2,
+      extractHtmlTitle,
+      getDefaultHtmlAppProjectName,
+      buildHtmlAppDefaults: buildHtmlAppDefaults2,
+      buildHtmlAppDeployFiles: buildHtmlAppDeployFiles2,
+      partitionHtmlAppDeployFiles: partitionHtmlAppDeployFiles2,
+      getPublishedHtmlAppState: getPublishedHtmlAppState2,
+      setPublishedHtmlAppState: setPublishedHtmlAppState2,
+      renamePublishedHtmlAppState: renamePublishedHtmlAppState2,
+      collectDirectoryFiles: collectDirectoryFiles2
+    };
+  }
+});
+
 // src/main.js
 var { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
@@ -8571,6 +8876,19 @@ var { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH
 var { deployToVercel, ensureProject, checkProjectAvailability, slugify } = require_vercel_api();
 var { buildAuthShell } = require_auth_shell_builder();
 var { buildAuthFunction, buildApproveFunction } = require_auth_function_template();
+var { applySiteIconToDeployFiles, injectSiteIconIntoHtml } = require_site_icon();
+var {
+  HTML_APP_SCOPE_SINGLE_FILE,
+  HTML_APP_SCOPE_FOLDER,
+  isHtmlExtension,
+  buildHtmlAppDefaults,
+  buildHtmlAppDeployFiles,
+  partitionHtmlAppDeployFiles,
+  getPublishedHtmlAppState,
+  setPublishedHtmlAppState,
+  renamePublishedHtmlAppState,
+  collectDirectoryFiles
+} = require_html_app_publish();
 var DEFAULT_SETTINGS = {
   linkFormat: "legacy",
   showTokenCounts: true,
@@ -8581,8 +8899,134 @@ var DEFAULT_SETTINGS = {
   clerkPublishableKey: "",
   clerkSecretKey: "",
   publisherEmail: "",
-  publishedPages: {}
+  siteIconDataUrl: "",
+  siteIconFileName: "",
+  publishedPages: {},
+  publishedHtmlApps: {}
 };
+function getPublishState(plugin, publishData) {
+  if (publishData.publishKind === "html-app") {
+    return getPublishedHtmlAppState(plugin.settings, publishData.sourcePath);
+  }
+  return plugin.settings.publishedPages[publishData.notePath];
+}
+function setPublishState(plugin, publishData, nextState) {
+  if (publishData.publishKind === "html-app") {
+    return setPublishedHtmlAppState(plugin.settings, publishData.sourcePath, nextState);
+  }
+  plugin.settings.publishedPages[publishData.notePath] = nextState;
+  return nextState;
+}
+var SITE_ICON_MAX_BYTES = 1024 * 1024;
+var SITE_ICON_ACCEPT = ".png,.jpg,.jpeg,.svg,.ico,.webp,.gif,image/*";
+function describeSiteIcon(settings) {
+  if (settings.siteIconFileName) {
+    return "Saved globally as " + settings.siteIconFileName + ".";
+  }
+  if (settings.siteIconDataUrl) {
+    return "Saved globally for future publishes.";
+  }
+  return "No image saved yet.";
+}
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not read the selected image."));
+    reader.readAsDataURL(file);
+  });
+}
+async function saveSiteIconFile(plugin, file) {
+  if (!file) throw new Error("Choose an image file first.");
+  if (file.size > SITE_ICON_MAX_BYTES) {
+    throw new Error("Site icon must be 1 MB or smaller.");
+  }
+  const type = String(file.type || "");
+  const fileName = String(file.name || "").toLowerCase();
+  const looksLikeImage = type.startsWith("image/") || /\.(png|jpe?g|svg|ico|webp|gif)$/i.test(fileName);
+  if (!looksLikeImage) {
+    throw new Error("Choose a PNG, JPG, SVG, ICO, WebP, or GIF image.");
+  }
+  const dataUrl = await readFileAsDataUrl(file);
+  if (!/^data:image\//i.test(dataUrl)) {
+    throw new Error("The selected file could not be stored as an image.");
+  }
+  plugin.settings.siteIconDataUrl = dataUrl;
+  plugin.settings.siteIconFileName = file.name || "";
+  await plugin.saveSettings();
+}
+function clearSiteIcon(plugin) {
+  plugin.settings.siteIconDataUrl = "";
+  plugin.settings.siteIconFileName = "";
+  return plugin.saveSettings();
+}
+function addSiteIconPicker(setting, plugin, baseDescription, opts = {}) {
+  const allowClear = opts.allowClear !== false;
+  const chooseSavedLabel = opts.chooseSavedLabel || "Replace image";
+  const chooseEmptyLabel = opts.chooseEmptyLabel || "Choose image";
+  const notices = opts.notices !== false;
+  let pending = Promise.resolve();
+  let chooseBtn = null;
+  let clearBtn = null;
+  const inputEl = setting.controlEl.createEl("input", {
+    attr: {
+      type: "file",
+      accept: SITE_ICON_ACCEPT
+    }
+  });
+  inputEl.addClass("atpath-hidden");
+  const refresh = () => {
+    setting.setDesc(baseDescription + " " + describeSiteIcon(plugin.settings));
+    if (chooseBtn) {
+      chooseBtn.setButtonText(plugin.settings.siteIconDataUrl ? chooseSavedLabel : chooseEmptyLabel);
+    }
+    if (clearBtn) {
+      clearBtn.setDisabled(!plugin.settings.siteIconDataUrl);
+    }
+  };
+  inputEl.addEventListener("change", () => {
+    const file = inputEl.files && inputEl.files[0];
+    if (!file) return;
+    pending = (async () => {
+      try {
+        await saveSiteIconFile(plugin, file);
+        refresh();
+        if (notices) new Notice("Site icon saved for future publishes.");
+      } catch (error) {
+        new Notice(error.message || String(error));
+      } finally {
+        inputEl.value = "";
+      }
+    })();
+    void pending;
+  });
+  setting.addButton((btn) => {
+    chooseBtn = btn;
+    btn.onClick(() => inputEl.click());
+  });
+  if (allowClear) {
+    setting.addButton((btn) => {
+      clearBtn = btn;
+      btn.setButtonText("Clear").onClick(() => {
+        void (async () => {
+          try {
+            await clearSiteIcon(plugin);
+            refresh();
+            if (notices) new Notice("Site icon cleared.");
+          } catch (error) {
+            new Notice(error.message || String(error));
+          }
+        })();
+      });
+    });
+  }
+  refresh();
+  return {
+    waitForPending: async () => {
+      await pending;
+    }
+  };
+}
 function openInDefaultApp(plugin, vaultPath) {
   const basePath = plugin.app.vault.adapter.getBasePath();
   const absolutePath = require("path").join(basePath, vaultPath);
@@ -9133,6 +9577,12 @@ var AtPathSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    const siteIconSetting = new Setting(containerEl).setName("Site icon");
+    addSiteIconPicker(
+      siteIconSetting,
+      this.plugin,
+      "Shown in browser tabs for published sites. Choose it once and reuse it everywhere."
+    );
     new Setting(containerEl).setHeading().setName("Private publishing");
     new Setting(containerEl).setName("Clerk publishable key").setDesc("From your Clerk dashboard (clerk.com). Free tier: 50k users/month.").addText(
       (text) => text.setPlaceholder("pk_live_...").setValue(this.plugin.settings.clerkPublishableKey).onChange(async (value) => {
@@ -9165,8 +9615,10 @@ var PublishConfirmModal = class extends Modal {
   }
   onOpen() {
     const { contentEl } = this;
-    const { domain, atPathFiles, plugin, notePath } = this.publishData;
-    const pageState = plugin.settings.publishedPages[notePath];
+    const { domain, plugin } = this.publishData;
+    const atPathFiles = this.publishData.atPathFiles || [];
+    const pageState = getPublishState(plugin, this.publishData);
+    const isHtmlAppPublish = this.publishData.publishKind === "html-app";
     contentEl.createEl("h2", { text: "Publish to Vercel" });
     const statusEl = contentEl.createDiv({ cls: "atpath-publish-status" });
     if (pageState && pageState.url && !pageState.isUnpublished) {
@@ -9183,7 +9635,16 @@ var PublishConfirmModal = class extends Modal {
       statusEl.createEl("br");
       statusEl.createEl("small", { text: "Will publish to " + domain });
     }
-    if (atPathFiles.length > 0) {
+    if (isHtmlAppPublish) {
+      const modeLabel = this.publishData.publishScope === HTML_APP_SCOPE_FOLDER ? "Folder mode" : "Single-file mode";
+      contentEl.createEl("p", { text: modeLabel + " \u2014 " + this.publishData.sourcePath });
+      if (this.publishData.publishScope === HTML_APP_SCOPE_FOLDER) {
+        const sourceFolder = this.publishData.sourcePath.split("/").slice(0, -1).join("/") || "/";
+        contentEl.createEl("small", { text: "Will deploy the parent folder recursively from " + sourceFolder });
+      } else {
+        contentEl.createEl("small", { text: "Will deploy only this HTML file as /index.html" });
+      }
+    } else if (atPathFiles.length > 0) {
       const heading = "Linked @path notes (" + atPathFiles.length + ")";
       if (atPathFiles.length > 5) {
         const details = contentEl.createEl("details");
@@ -9206,8 +9667,26 @@ var PublishConfirmModal = class extends Modal {
         })
       );
     }
+    let siteTitleValue = pageState && pageState.siteTitle ? pageState.siteTitle : this.publishData.noteTitle;
+    if (isHtmlAppPublish) {
+      new Setting(contentEl).setName("Website title").setDesc("Used as the publish label and unpublished placeholder title.").addText(
+        (text) => text.setValue(siteTitleValue).onChange((value) => {
+          siteTitleValue = value.trim();
+        })
+      );
+    }
+    let siteIconPicker = null;
+    if (!plugin.settings.siteIconDataUrl) {
+      const siteIconSetting = new Setting(contentEl).setName("Site icon");
+      siteIconPicker = addSiteIconPicker(
+        siteIconSetting,
+        plugin,
+        "Optional. Shown in browser tabs and saved globally for future publishes.",
+        { notices: false }
+      );
+    }
     const isExistingProject = pageState && pageState.projectName;
-    let projectNameValue = isExistingProject ? pageState.projectName : slugify(this.publishData.noteTitle);
+    let projectNameValue = isExistingProject ? pageState.projectName : this.publishData.defaultProjectName || slugify(this.publishData.noteTitle);
     const projectNameSetting = new Setting(contentEl).setName("Project name").setDesc(isExistingProject ? projectNameValue + ".vercel.app" : "");
     if (isExistingProject) {
       projectNameSetting.setDesc(projectNameValue + ".vercel.app (already deployed)");
@@ -9237,13 +9716,19 @@ var PublishConfirmModal = class extends Modal {
       });
     }
     let compactLinks = true;
-    new Setting(contentEl).setName("Compact @path to file title?").setDesc("Show just the filename (e.g. helpers.py) instead of the full path").addToggle(
-      (toggle) => toggle.setValue(true).onChange((value) => {
-        compactLinks = value;
-      })
-    );
+    if (!isHtmlAppPublish) {
+      new Setting(contentEl).setName("Compact @path to file title?").setDesc("Show just the filename (e.g. helpers.py) instead of the full path").addToggle(
+        (toggle) => toggle.setValue(true).onChange((value) => {
+          compactLinks = value;
+        })
+      );
+    }
     let isPrivate = pageState && pageState.isPrivate || false;
+    let clerkPubKey = plugin.settings.clerkPublishableKey;
+    let clerkSecKey = plugin.settings.clerkSecretKey;
+    let approvedEmailsText = (pageState && pageState.approvedEmails || []).join("\n");
     const privateToggleContainer = contentEl.createDiv();
+    const authSectionEl = contentEl.createDiv({ cls: "atpath-auth-section" + (isPrivate ? "" : " atpath-hidden") });
     new Setting(privateToggleContainer).setName("Require login to view").addToggle(
       (toggle) => toggle.setValue(isPrivate).onChange((value) => {
         isPrivate = value;
@@ -9254,8 +9739,6 @@ var PublishConfirmModal = class extends Modal {
         }
       })
     );
-    const authSectionEl = contentEl.createDiv({ cls: "atpath-auth-section" + (isPrivate ? "" : " atpath-hidden") });
-    let clerkPubKey = plugin.settings.clerkPublishableKey;
     if (!clerkPubKey) {
       new Setting(authSectionEl).setName("Clerk publishable key").addText(
         (text) => text.setPlaceholder("pk_live_...").onChange((value) => {
@@ -9263,7 +9746,6 @@ var PublishConfirmModal = class extends Modal {
         })
       );
     }
-    let clerkSecKey = plugin.settings.clerkSecretKey;
     if (!clerkSecKey) {
       new Setting(authSectionEl).setName("Clerk secret key").addText(
         (text) => text.setPlaceholder("sk_live_...").then((t) => {
@@ -9273,8 +9755,6 @@ var PublishConfirmModal = class extends Modal {
         })
       );
     }
-    const existingEmails = pageState && pageState.approvedEmails || [];
-    let approvedEmailsText = existingEmails.join("\n");
     const emailsSetting = new Setting(authSectionEl).setName("Approved emails").setDesc("One email per line");
     emailsSetting.controlEl.addClass("atpath-approved-emails");
     const textarea = emailsSetting.controlEl.createEl("textarea", {
@@ -9299,47 +9779,69 @@ var PublishConfirmModal = class extends Modal {
     const publishLabel = pageState && pageState.url ? "Republish" : "Publish";
     buttonSetting.addButton(
       (btn) => btn.setButtonText(publishLabel).setCta().onClick(() => {
-        if (!tokenValue) {
-          new Notice("Please enter a Vercel API token.");
-          return;
-        }
-        if (!projectNameValue || projectNameValue.length > 100 || /[^a-z0-9._-]/.test(projectNameValue) || projectNameValue.includes("---")) {
-          new Notice("Invalid project name. Use a-z, 0-9, ., _, - (max 100 chars, no ---).");
-          return;
-        }
-        if (isPrivate) {
-          const emails = approvedEmailsText.split("\n").map((e) => e.trim().toLowerCase()).filter(Boolean);
-          if (emails.length === 0) {
-            new Notice("Add at least one approved email.");
-            return;
+        void (async () => {
+          try {
+            if (siteIconPicker) {
+              await siteIconPicker.waitForPending();
+            }
+            if (!tokenValue) {
+              new Notice("Please enter a Vercel API token.");
+              return;
+            }
+            if (isHtmlAppPublish && !siteTitleValue) {
+              new Notice("Please enter a website title.");
+              return;
+            }
+            if (!projectNameValue || projectNameValue.length > 100 || /[^a-z0-9._-]/.test(projectNameValue) || projectNameValue.includes("---")) {
+              new Notice("Invalid project name. Use a-z, 0-9, ., _, - (max 100 chars, no ---).");
+              return;
+            }
+            if (isPrivate) {
+              const emails = approvedEmailsText.split("\n").map((e) => e.trim().toLowerCase()).filter(Boolean);
+              if (emails.length === 0) {
+                new Notice("Add at least one approved email.");
+                return;
+              }
+              if (!clerkPubKey) {
+                new Notice("Please enter a Clerk publishable key.");
+                return;
+              }
+              if (!clerkSecKey) {
+                new Notice("Please enter a Clerk secret key.");
+                return;
+              }
+              if (clerkPubKey.startsWith("pk_test_") || clerkSecKey.startsWith("sk_test_")) {
+                new Notice("Warning: test keys may not work on production. Consider live keys.", 8e3);
+              }
+              this.close();
+              this.onConfirm({
+                token: tokenValue,
+                compactLinks,
+                siteTitle: siteTitleValue || this.publishData.noteTitle,
+                isPrivate: true,
+                approvedEmails: emails,
+                clerkPublishableKey: clerkPubKey,
+                clerkSecretKey: clerkSecKey,
+                projectName: projectNameValue
+              });
+            } else {
+              if (pageState && pageState.isPrivate) {
+                const confirmed = confirm("This will make the page publicly accessible. Continue?");
+                if (!confirmed) return;
+              }
+              this.close();
+              this.onConfirm({
+                token: tokenValue,
+                compactLinks,
+                siteTitle: siteTitleValue || this.publishData.noteTitle,
+                isPrivate: false,
+                projectName: projectNameValue
+              });
+            }
+          } catch (error) {
+            new Notice(error.message || String(error));
           }
-          if (!clerkPubKey) {
-            new Notice("Please enter a Clerk publishable key.");
-            return;
-          }
-          if (!clerkSecKey) {
-            new Notice("Please enter a Clerk secret key.");
-            return;
-          }
-          if (clerkPubKey.startsWith("pk_test_") || clerkSecKey.startsWith("sk_test_")) {
-            new Notice("Warning: test keys may not work on production. Consider live keys.", 8e3);
-          }
-          this.close();
-          this.onConfirm(tokenValue, compactLinks, {
-            isPrivate: true,
-            approvedEmails: emails,
-            clerkPublishableKey: clerkPubKey,
-            clerkSecretKey: clerkSecKey,
-            projectName: projectNameValue
-          });
-        } else {
-          if (pageState && pageState.isPrivate) {
-            const confirmed = confirm("This will make the page publicly accessible. Continue?");
-            if (!confirmed) return;
-          }
-          this.close();
-          this.onConfirm(tokenValue, compactLinks, { isPrivate: false, projectName: projectNameValue });
-        }
+        })();
       })
     );
   }
@@ -9355,8 +9857,8 @@ var UnpublishConfirmModal = class extends Modal {
   }
   onOpen() {
     const { contentEl } = this;
-    const { plugin, notePath } = this.publishData;
-    const pageState = plugin.settings.publishedPages[notePath];
+    const { plugin } = this.publishData;
+    const pageState = getPublishState(plugin, this.publishData);
     const url = pageState ? pageState.url : "";
     contentEl.createEl("h2", { text: "Unpublish" });
     contentEl.createEl("p", { text: url });
@@ -9499,6 +10001,47 @@ var MigrationPreviewModal = class extends Modal {
     this.contentEl.empty();
   }
 };
+var HtmlAppScopeModal = class extends Modal {
+  constructor(app, plugin, htmlFile) {
+    super(app);
+    this.plugin = plugin;
+    this.htmlFile = htmlFile;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const pageState = getPublishedHtmlAppState(this.plugin.settings, this.htmlFile.path);
+    const previousScope = pageState && pageState.scope;
+    contentEl.createEl("h2", { text: "@Path: publish HTML app" });
+    contentEl.createEl("p", { text: this.htmlFile.path });
+    if (pageState && pageState.url && !pageState.isUnpublished) {
+      contentEl.createEl("p", { text: "Current publish: " + pageState.url });
+    } else if (pageState && pageState.isUnpublished) {
+      contentEl.createEl("p", { text: "Current publish: unpublished at " + pageState.url });
+    }
+    contentEl.createEl("p", {
+      text: "Choose whether to deploy just this HTML file or its whole folder."
+    });
+    contentEl.createEl("small", {
+      text: "Single file deploys only this file as /index.html. Folder deploys the parent folder recursively and uses this file as the site entry point."
+    });
+    new Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("Publish single file").setCta(previousScope !== HTML_APP_SCOPE_FOLDER).onClick(async () => {
+        this.close();
+        await this.plugin.publishHtmlApp(this.htmlFile, HTML_APP_SCOPE_SINGLE_FILE);
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Publish folder").setCta(previousScope === HTML_APP_SCOPE_FOLDER).onClick(async () => {
+        this.close();
+        await this.plugin.publishHtmlApp(this.htmlFile, HTML_APP_SCOPE_FOLDER);
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var AtPathPlugin = class extends Plugin {
   async onload() {
     await this.loadSettings();
@@ -9531,11 +10074,26 @@ var AtPathPlugin = class extends Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         this.tokenCache.delete(oldPath);
         this.updateAtPathReferences(file, oldPath);
+        let movedPublishedState = false;
         if (this.settings.publishedPages[oldPath]) {
           this.settings.publishedPages[file.path] = this.settings.publishedPages[oldPath];
           delete this.settings.publishedPages[oldPath];
+          movedPublishedState = true;
+        }
+        if (renamePublishedHtmlAppState(this.settings, oldPath, file.path)) {
+          movedPublishedState = true;
+        }
+        if (movedPublishedState) {
           this.saveSettings();
         }
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || !isHtmlExtension(file.extension)) return;
+        menu.addItem(
+          (item) => item.setTitle("@Path: publish this HTML app...").setIcon("upload").onClick(() => new HtmlAppScopeModal(this.app, this, file).open())
+        );
       })
     );
     this.registerEvent(
@@ -9817,16 +10375,14 @@ var AtPathPlugin = class extends Plugin {
     const bundles = [];
     const seen = /* @__PURE__ */ new Set();
     let m;
-    let fs, pathMod, fileURLToPath;
+    let pathMod;
+    let fileURLToPath;
     try {
-      fs = require("fs").promises;
       pathMod = require("path");
       fileURLToPath = require("url").fileURLToPath;
     } catch (_) {
       return bundles;
     }
-    const MAX_FILES = 500;
-    const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
     while ((m = FILE_PROTO_RE.exec(content)) !== null) {
       const url = m[2];
       if (seen.has(url)) continue;
@@ -9836,38 +10392,29 @@ var AtPathPlugin = class extends Plugin {
         const dirPath = pathMod.dirname(absPath);
         const entryFilename = pathMod.basename(absPath);
         const dirName = pathMod.basename(dirPath);
-        const files = [];
-        let totalBytes = 0;
-        async function walk(dir, prefix) {
-          const entries = await fs.readdir(dir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.name.startsWith(".")) continue;
-            const fullPath = pathMod.join(dir, entry.name);
-            const relPath = prefix ? prefix + "/" + entry.name : entry.name;
-            if (entry.isDirectory()) {
-              await walk(fullPath, relPath);
-            } else if (entry.isFile()) {
-              if (files.length >= MAX_FILES) continue;
-              const stat = await fs.stat(fullPath);
-              if (totalBytes + stat.size > MAX_TOTAL_BYTES) continue;
-              totalBytes += stat.size;
-              const ext = (entry.name.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
-              if (BINARY_EXTENSIONS.has(ext)) {
-                const buf = await fs.readFile(fullPath);
-                files.push({ relPath, content: buf.toString("base64"), encoding: "base64" });
-              } else {
-                const text = await fs.readFile(fullPath, "utf-8");
-                files.push({ relPath, content: text, encoding: "utf-8" });
-              }
-            }
-          }
-        }
-        await walk(dirPath, "");
+        const files = await collectDirectoryFiles(dirPath);
         bundles.push({ url, entryFilename, dirName, files });
       } catch (_) {
       }
     }
     return bundles;
+  }
+  async collectHtmlAppFolderFiles(htmlFile) {
+    let pathMod;
+    try {
+      require("fs");
+      pathMod = require("path");
+    } catch (_) {
+      throw new Error("Folder publishing is not available in this environment.");
+    }
+    const adapter = this.app.vault.adapter;
+    if (!adapter || typeof adapter.getBasePath !== "function") {
+      throw new Error("Folder publishing is only available on desktop.");
+    }
+    const basePath = adapter.getBasePath();
+    const absoluteFilePath = pathMod.join(basePath, htmlFile.path);
+    const absoluteFolderPath = pathMod.dirname(absoluteFilePath);
+    return collectDirectoryFiles(absoluteFolderPath);
   }
   async publishToVercel() {
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -9887,9 +10434,59 @@ var AtPathPlugin = class extends Plugin {
     const fileProtoFiles = await this.collectFileProtocolHtmlFiles(content);
     const existingPageState = this.settings.publishedPages[notePath];
     const domain = (existingPageState && existingPageState.projectName || slugify(noteTitle)) + ".vercel.app";
-    const publishData = { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles, domain, plugin: this };
-    const onConfirm = (token, compactLinks, privateOpts) => {
-      this._executePublish(publishData, { token, compactLinks, ...privateOpts });
+    const publishData = {
+      publishKind: "note",
+      noteTitle,
+      notePath,
+      content,
+      activeFile,
+      atPathFiles,
+      fileProtoFiles,
+      domain,
+      defaultProjectName: slugify(noteTitle),
+      plugin: this
+    };
+    const onConfirm = (modalOpts) => {
+      this._executePublish(publishData, modalOpts);
+    };
+    const onUnpublish = () => {
+      this._executeUnpublish(publishData);
+    };
+    publishData._onConfirm = onConfirm;
+    publishData._onUnpublish = onUnpublish;
+    new PublishConfirmModal(this.app, publishData, onConfirm, onUnpublish).open();
+  }
+  async publishHtmlApp(htmlFile, scope) {
+    if (!(htmlFile instanceof TFile) || !isHtmlExtension(htmlFile.extension)) {
+      new Notice("Choose an HTML file to publish.");
+      return;
+    }
+    let entryHtml;
+    try {
+      entryHtml = await this.app.vault.cachedRead(htmlFile);
+    } catch (_) {
+      new Notice("Could not read the selected HTML file.");
+      return;
+    }
+    const existingAppState = getPublishedHtmlAppState(this.settings, htmlFile.path);
+    const defaults = buildHtmlAppDefaults({
+      filePath: htmlFile.path,
+      scope,
+      entryHtml,
+      existingState: existingAppState
+    });
+    const publishData = {
+      publishKind: "html-app",
+      noteTitle: defaults.siteTitle,
+      sourcePath: htmlFile.path,
+      htmlFile,
+      publishScope: scope,
+      domain: defaults.domain,
+      defaultProjectName: defaults.defaultProjectName,
+      plugin: this
+    };
+    const onConfirm = (modalOpts) => {
+      this._executeHtmlAppPublish(publishData, modalOpts);
     };
     const onUnpublish = () => {
       this._executeUnpublish(publishData);
@@ -9901,7 +10498,7 @@ var AtPathPlugin = class extends Plugin {
   async _executePublish(publishData, opts) {
     const { noteTitle, notePath, content, activeFile, atPathFiles, fileProtoFiles } = publishData;
     const { token, compactLinks, isPrivate, approvedEmails, clerkPublishableKey, clerkSecretKey, projectName: chosenProjectName } = opts;
-    const { contactUrl, contactLabel } = this.settings;
+    const { contactUrl, contactLabel, siteIconDataUrl } = this.settings;
     if (token !== this.settings.vercelToken) {
       this.settings.vercelToken = token;
       await this.saveSettings();
@@ -9928,7 +10525,7 @@ var AtPathPlugin = class extends Plugin {
           return info ? `[${text}](atpath/${info.slug}/${info.entryFilename})` : match;
         }
       );
-      const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks);
+      const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl);
       const subPages = {};
       const deployFiles = [];
       for (const f of atPathFiles) {
@@ -9936,15 +10533,16 @@ var AtPathPlugin = class extends Plugin {
         const ext = f.relPath.split(".").pop().toLowerCase();
         const isHtmlFile = ext === "html" || ext === "htm";
         if (isHtmlFile) {
+          const pageHtml = injectSiteIconIntoHtml(f.content, siteIconDataUrl);
           if (isPrivate) {
-            subPages["atpath/" + slug] = f.content;
+            subPages["atpath/" + slug] = pageHtml;
           } else {
-            deployFiles.push({ path: "atpath/" + slug + ".html", content: f.content });
+            deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
           }
         } else {
           const atContent = await this.resolveLocalImages(f.content, activeFile);
           const pageTitle = f.relPath.split("/").pop();
-          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel);
+          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel, siteIconDataUrl);
           if (isPrivate) {
             subPages["atpath/" + slug] = pageHtml;
           } else {
@@ -9960,11 +10558,15 @@ var AtPathPlugin = class extends Plugin {
           const ext = (f.relPath.match(/\.(\w+)$/) || [])[1]?.toLowerCase() || "";
           const isHtmlFile = ext === "html" || ext === "htm";
           if (isPrivate && isHtmlFile) {
-            subPages[deployPath.replace(/\.html?$/, "")] = f.content;
+            subPages[deployPath.replace(/\.html?$/, "")] = injectSiteIconIntoHtml(f.content, siteIconDataUrl);
           } else if (isPrivate) {
             bundleStaticFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
           } else {
-            deployFiles.push({ path: deployPath, content: f.content, encoding: f.encoding });
+            deployFiles.push({
+              path: deployPath,
+              content: isHtmlFile ? injectSiteIconIntoHtml(f.content, siteIconDataUrl) : f.content,
+              encoding: f.encoding
+            });
           }
         }
       }
@@ -9988,7 +10590,7 @@ var AtPathPlugin = class extends Plugin {
         }
         const waMatch = contactUrl.match(/wa\.me\/(\d+)/);
         const publisherWhatsapp = waMatch ? waMatch[1] : "";
-        const authShellHtml = buildAuthShell(noteTitle, this.settings.clerkPublishableKey, this.settings.publisherEmail, publisherWhatsapp);
+        const authShellHtml = buildAuthShell(noteTitle, this.settings.clerkPublishableKey, this.settings.publisherEmail, publisherWhatsapp, siteIconDataUrl);
         const authFunctionSrc = buildAuthFunction({
           approvedEmails: allApproved,
           pages,
@@ -10069,28 +10671,143 @@ var AtPathPlugin = class extends Plugin {
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
+  async _executeHtmlAppPublish(publishData, opts) {
+    const { htmlFile, sourcePath, publishScope } = publishData;
+    const {
+      token,
+      projectName: chosenProjectName,
+      siteTitle,
+      isPrivate,
+      approvedEmails = [],
+      clerkPublishableKey,
+      clerkSecretKey
+    } = opts;
+    if (token !== this.settings.vercelToken) {
+      this.settings.vercelToken = token;
+      await this.saveSettings();
+    }
+    this.trayBarEl.setText("...");
+    try {
+      const entryHtml = await this.app.vault.cachedRead(htmlFile);
+      const folderFiles = publishScope === HTML_APP_SCOPE_FOLDER ? await this.collectHtmlAppFolderFiles(htmlFile) : [];
+      let deployFiles = buildHtmlAppDeployFiles({
+        scope: publishScope,
+        entryFilePath: htmlFile.path,
+        entryHtml,
+        folderFiles
+      });
+      deployFiles = applySiteIconToDeployFiles(deployFiles, this.settings.siteIconDataUrl);
+      const pageState = getPublishedHtmlAppState(this.settings, sourcePath) || {};
+      const projectSlug = pageState.projectName || chosenProjectName || publishData.defaultProjectName;
+      const projectName = await ensureProject(token, projectSlug);
+      let result;
+      if (isPrivate) {
+        if (clerkPublishableKey) {
+          this.settings.clerkPublishableKey = clerkPublishableKey;
+        }
+        if (clerkSecretKey) {
+          this.settings.clerkSecretKey = clerkSecretKey;
+        }
+        await this.saveSettings();
+        const { htmlPages, staticFiles } = partitionHtmlAppDeployFiles(deployFiles);
+        const allApproved = [...approvedEmails];
+        const pubEmail = (this.settings.publisherEmail || "").toLowerCase().trim();
+        if (pubEmail && !allApproved.includes(pubEmail)) {
+          allApproved.push(pubEmail);
+        }
+        const waMatch = this.settings.contactUrl.match(/wa\.me\/(\d+)/);
+        const publisherWhatsapp = waMatch ? waMatch[1] : "";
+        const authShellHtml = buildAuthShell(siteTitle, this.settings.clerkPublishableKey, this.settings.publisherEmail, publisherWhatsapp, this.settings.siteIconDataUrl);
+        const authFunctionSrc = buildAuthFunction({
+          approvedEmails: allApproved,
+          pages: htmlPages,
+          projectName
+        });
+        const approveFunctionSrc = buildApproveFunction({
+          projectName,
+          clerkPublishableKey: this.settings.clerkPublishableKey,
+          publisherEmail: pubEmail
+        });
+        const packageJson = JSON.stringify({
+          type: "module",
+          dependencies: { "@clerk/backend": "^2" }
+        });
+        const vercelJson = JSON.stringify({
+          rewrites: [
+            { source: "/((?!api/).*)", destination: "/index.html" }
+          ]
+        });
+        const privateFiles = [
+          { path: "index.html", content: authShellHtml },
+          { path: "api/auth.js", content: authFunctionSrc },
+          { path: "api/approve.js", content: approveFunctionSrc },
+          { path: "package.json", content: packageJson },
+          { path: "vercel.json", content: vercelJson },
+          ...staticFiles
+        ];
+        result = await deployToVercel(token, siteTitle, privateFiles, {
+          isPrivate: true,
+          envVars: { CLERK_SECRET_KEY: this.settings.clerkSecretKey },
+          projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg)
+        });
+      } else {
+        result = await deployToVercel(token, siteTitle, deployFiles, {
+          projectName,
+          onProgress: (msg) => this.trayBarEl.setText(msg)
+        });
+      }
+      setPublishedHtmlAppState(this.settings, sourcePath, {
+        ...pageState,
+        url: result.url,
+        projectName: result.projectName,
+        publishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        isPrivate: !!isPrivate,
+        isUnpublished: false,
+        approvedEmails: isPrivate ? approvedEmails : [],
+        scope: publishScope,
+        siteTitle
+      });
+      await this.saveSettings();
+      this.trayBarEl.setText("@Path");
+      const modeLabel = publishScope === HTML_APP_SCOPE_FOLDER ? "folder app" : "single HTML file";
+      const summary = 'Deployed "' + siteTitle + '" as a ' + modeLabel + " (" + deployFiles.length + " file" + (deployFiles.length === 1 ? "" : "s") + ")" + (isPrivate ? " (private)." : ".");
+      let warning = "";
+      if (result.deploymentState && result.deploymentState !== "READY") {
+        warning += "Deployment did not succeed (state: " + result.deploymentState + ").";
+        if (result.deploymentError) warning += " " + result.deploymentError;
+      } else if (result.healthCheck && !result.healthCheck.ok) {
+        warning += "Deployment is live but the health check failed.";
+        if (result.healthCheck.detail) warning += " " + result.healthCheck.detail;
+      }
+      new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
+    } catch (e) {
+      this.trayBarEl.setText("@Path");
+      new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
+    }
+  }
   async _executeUnpublish(publishData) {
-    const { noteTitle, notePath } = publishData;
     const plugin = this;
     const token = plugin.settings.vercelToken;
+    const pageState = getPublishState(plugin, publishData) || {};
+    const title = pageState.siteTitle || publishData.noteTitle;
     if (!token) {
       new Notice("No Vercel token configured.");
       return;
     }
     plugin.trayBarEl.setText("...");
     try {
-      const placeholderHtml = buildUnpublishedPage(noteTitle);
+      const placeholderHtml = buildUnpublishedPage(title, plugin.settings.siteIconDataUrl);
       const files = [{ path: "index.html", content: placeholderHtml }];
-      const pageState = plugin.settings.publishedPages[notePath] || {};
-      const deployName = pageState.projectName || noteTitle;
-      await deployToVercel(token, noteTitle, files, { projectName: deployName });
-      plugin.settings.publishedPages[notePath] = {
+      const deployName = pageState.projectName || title;
+      await deployToVercel(token, title, files, { projectName: deployName });
+      setPublishState(plugin, publishData, {
         ...pageState,
         isUnpublished: true
-      };
+      });
       await plugin.saveSettings();
       plugin.trayBarEl.setText("@Path");
-      new Notice('Unpublished "' + noteTitle + '". You can republish at any time.');
+      new Notice('Unpublished "' + title + '". You can republish at any time.');
     } catch (e) {
       plugin.trayBarEl.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();

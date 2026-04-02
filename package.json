@@ -1,6 +1,6 @@
 {
   "name": "obsidian-atpath",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Autocomplete and navigate @path/to/file references in Obsidian",
   "author": "sergio",
   "license": "MIT",

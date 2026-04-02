@@ -2,6 +2,7 @@
 // Uses Clerk JS SDK for authentication, then fetches content from /api/auth.
 
 const { CSS_TEMPLATE } = require("./html-builder");
+const { buildSiteIconHeadHtml } = require("./site-icon");
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -15,11 +16,12 @@ function escapeHtml(str) {
 
 // ─── Builder ────────────────────────────────────────────────────────
 
-function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp) {
+function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publisherWhatsapp, siteIconDataUrl) {
   const title = escapeHtml(noteTitle);
   const pubKeyJSON = JSON.stringify(clerkPublishableKey);
   const publisherEmailJSON = JSON.stringify(publisherEmail || "");
   const publisherWhatsappJSON = JSON.stringify(publisherWhatsapp || "");
+  const siteIconHead = buildSiteIconHeadHtml(siteIconDataUrl);
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -28,6 +30,7 @@ function buildAuthShell(noteTitle, clerkPublishableKey, publisherEmail, publishe
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>${CSS_TEMPLATE}</style>
+${siteIconHead}
 </head>
 <body>
 <div class="container">
