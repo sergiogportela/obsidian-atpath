@@ -8860,8 +8860,7 @@ async function copyToClipboard(text) {
   }
   const ta = document.createElement("textarea");
   ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
+  ta.className = "atpath-clipboard-fallback";
   document.body.appendChild(ta);
   ta.select();
   document.execCommand("copy");
@@ -9462,11 +9461,14 @@ function registerPostProcessor(plugin) {
         if (cached) {
           tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
         } else {
-          plugin.getTokenCount(vaultPath).then((tokens) => {
-            if (tokens != null) {
-              tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
-            }
-          });
+          plugin.getTokenCount(vaultPath).then(
+            (tokens) => {
+              if (tokens != null) {
+                tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
+              }
+            },
+            (err) => console.warn("[atpath] token count failed", err)
+          );
         }
         link.after(tokenSpan);
       }
@@ -9513,11 +9515,14 @@ function registerPostProcessor(plugin) {
         if (cached) {
           tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
         } else {
-          plugin.getTokenCount(vaultPath).then((tokens) => {
-            if (tokens != null) {
-              tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
-            }
-          });
+          plugin.getTokenCount(vaultPath).then(
+            (tokens) => {
+              if (tokens != null) {
+                tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
+              }
+            },
+            (err) => console.warn("[atpath] token count failed", err)
+          );
         }
         parent.insertBefore(tokenSpan, node2.nextSibling);
       }
@@ -10073,7 +10078,7 @@ var AtPathPlugin = class extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.tokenCache.delete(oldPath);
-        this.updateAtPathReferences(file, oldPath);
+        void this.updateAtPathReferences(file, oldPath);
         let movedPublishedState = false;
         if (this.settings.publishedPages[oldPath]) {
           this.settings.publishedPages[file.path] = this.settings.publishedPages[oldPath];
@@ -10084,7 +10089,7 @@ var AtPathPlugin = class extends Plugin {
           movedPublishedState = true;
         }
         if (movedPublishedState) {
-          this.saveSettings();
+          void this.saveSettings();
         }
       })
     );
@@ -10176,13 +10181,19 @@ var AtPathPlugin = class extends Plugin {
     if (this._inFlightTokenFetches.has(vaultPath)) return;
     this._inFlightTokenFetches.add(vaultPath);
     this._lastEditorView = view;
-    this.getTokenCount(vaultPath).then((tokens) => {
-      this._inFlightTokenFetches.delete(vaultPath);
-      if (tokens != null) {
-        this.tokenCacheDirty = true;
-        this._scheduleRefresh();
+    this.getTokenCount(vaultPath).then(
+      (tokens) => {
+        this._inFlightTokenFetches.delete(vaultPath);
+        if (tokens != null) {
+          this.tokenCacheDirty = true;
+          this._scheduleRefresh();
+        }
+      },
+      (err) => {
+        this._inFlightTokenFetches.delete(vaultPath);
+        console.warn("[atpath] token count failed", err);
       }
-    });
+    );
   }
   _scheduleRefresh() {
     if (this._rafScheduled) return;

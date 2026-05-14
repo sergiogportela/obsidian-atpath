@@ -98,3 +98,9 @@ a.internal-link.atpath-link[data-tokens]::after {
   white-space: pre-wrap;
   color: var(--text-error);
 }
+
+/* Off-screen textarea used by the execCommand("copy") clipboard fallback */
+.atpath-clipboard-fallback {
+  position: fixed;
+  opacity: 0;
+}
