@@ -51,6 +51,28 @@ class WikilinkAtPathWidget extends WidgetType {
   ignoreEvent(event) { return event.type !== "mousedown"; }
 }
 
+class AtFolderWidget extends WidgetType {
+  constructor(fullMatch, relPath, tokenCount) {
+    super();
+    this.fullMatch = fullMatch;
+    this.relPath = relPath;
+    this.tokenCount = tokenCount;
+  }
+  eq(other) {
+    return this.fullMatch === other.fullMatch && this.tokenCount === other.tokenCount;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "atpath-link atpath-folder-link";
+    span.textContent = this.fullMatch;
+    span.dataset.atpath = this.relPath;
+    span.dataset.atpathKind = "folder";
+    if (this.tokenCount) span.dataset.tokens = this.tokenCount;
+    return span;
+  }
+  ignoreEvent(event) { return event.type !== "mousedown"; }
+}
+
 // ─── Token counting helpers ──────────────────────────────────────────
 
 const BINARY_EXTENSIONS = new Set([
@@ -297,6 +319,45 @@ function showAtPathMenu(plugin, event, vaultPath) {
   menu.showAtMouseEvent(event);
 }
 
+function revealFolderInExplorer(app, folder) {
+  const leaves = app.workspace.getLeavesOfType("file-explorer");
+  let revealed = false;
+  for (const leaf of leaves) {
+    const view = leaf.view;
+    try {
+      if (typeof view?.revealInFolder === "function") {
+        view.revealInFolder(folder);
+        revealed = true;
+      }
+    } catch (err) {
+      console.warn("[atpath] revealInFolder failed", err);
+    }
+  }
+  if (!revealed) {
+    const fallback = app.workspace.openLinkText(folder.path, "", false);
+    if (fallback && typeof fallback.catch === "function") {
+      fallback.catch(() => {});
+    }
+  }
+}
+
+function showAtPathFolderMenu(plugin, event, folder) {
+  const menu = new Menu();
+  menu.addItem((item) =>
+    item
+      .setTitle("Reveal in file explorer")
+      .setIcon("folder")
+      .onClick(() => revealFolderInExplorer(plugin.app, folder))
+  );
+  menu.addItem((item) =>
+    item
+      .setTitle("Open folder in default app")
+      .setIcon("arrow-up-right")
+      .onClick(() => openInDefaultApp(plugin, folder.path))
+  );
+  menu.showAtMouseEvent(event);
+}
+
 async function openFileByViewState(plugin, resolved) {
   const ext = resolved.extension;
   const viewType = typeof plugin.app.viewRegistry.getTypeByExtension === 'function'
@@ -469,6 +530,12 @@ class AtPathSuggest extends EditorSuggest {
 
 const AT_PATH_RE = /(?<=^|[\s(])@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
 
+// Folder ref regex — uses a capture-group boundary instead of a second
+// lookbehind to keep iOS Safari happy. Group 1 = leading boundary char,
+// group 2 = folder path (no trailing slash). The trailing slash is
+// matched literally and bounded by a positive lookahead.
+const AT_PATH_FOLDER_RE = /(^|[\s(])@([\w\p{L}\p{M}._-][\w\p{L}\p{M}./ _()&-]*?)\/(?=$|[\s)>,;:!?])/gu;
+
 // ─── Wikilink @path regex ─────────────────────────────────────────────
 const WIKILINK_ATPATH_RE = /\[\[([^\]|]+)\|@([^\]]+)\]\]/g;
 
@@ -559,44 +626,120 @@ function scanAtPathRefs(content, app, sourcePath) {
 }
 
 function buildAtPathViewPlugin(plugin) {
-  const decorator = new MatchDecorator({
-    regexp: AT_PATH_RE,
-    decoration: (match, view, pos) => {
-      const end = pos + match[0].length;
-      const cursorInside = view.state.selection.ranges.some(
-        r => r.from >= pos && r.to <= end
-      );
+  function buildDecorations(view) {
+    const builder = [];
+    const selRanges = view.state.selection.ranges;
+    const selectionOverlaps = (from, to) =>
+      selRanges.some((r) => r.from >= from && r.to <= to);
 
-      const attrs = { "data-atpath": match[1] };
-      let tokenStr = null;
-      if (plugin.settings.showTokenCounts) {
-        const vaultPath = resolveAtPath(match[1], plugin);
-        const cached = plugin.tokenCache.get(vaultPath);
-        if (cached) tokenStr = formatTokens(cached.tokens);
-        else plugin.scheduleTokenFetch(vaultPath, view);
+    for (const { from, to } of view.visibleRanges) {
+      const text = view.state.sliceDoc(from, to);
+      const folderRanges = []; // [absoluteStart, absoluteEnd] pairs in this slice
+
+      // Pass 1: folder refs
+      const fre = new RegExp(AT_PATH_FOLDER_RE.source, AT_PATH_FOLDER_RE.flags);
+      let m;
+      while ((m = fre.exec(text)) !== null) {
+        const lead = m[1] || "";
+        const relPath = m[2];
+        const absStart = from + m.index + lead.length;
+        const absEnd = from + m.index + m[0].length;
+        folderRanges.push([absStart, absEnd]);
+        const fullMatch = "@" + relPath + "/";
+
+        let tokenStr = null;
+        if (plugin.settings.showTokenCounts) {
+          const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+          const resolved = plugin.core.resolveAtPathTarget(
+            { kind: "folder", vaultPath: relPath },
+            sourcePath
+          );
+          if (resolved.kind === "folder") {
+            const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
+            if (cached != null) tokenStr = formatTokens(cached);
+            else plugin.scheduleFolderTokenFetch(resolved.normalizedPath, view);
+          }
+        }
+
+        if (selectionOverlaps(absStart, absEnd)) {
+          const attrs = { "data-atpath": relPath, "data-atpath-kind": "folder" };
+          if (tokenStr) attrs["data-tokens"] = tokenStr;
+          builder.push({
+            from: absStart,
+            to: absEnd,
+            deco: Decoration.mark({ class: "atpath-link atpath-folder-link", attributes: attrs }),
+          });
+        } else {
+          builder.push({
+            from: absStart,
+            to: absEnd,
+            deco: Decoration.replace({
+              widget: new AtFolderWidget(fullMatch, relPath, tokenStr),
+            }),
+          });
+        }
       }
 
-      if (!cursorInside) {
-        return Decoration.replace({
-          widget: new AtPathWidget(match[0], match[1], tokenStr),
-        });
+      function overlapsFolder(absStart, absEnd) {
+        for (const [fs, fe] of folderRanges) {
+          if (absStart < fe && absEnd > fs) return true;
+        }
+        return false;
       }
 
-      // Cursor inside — use mark so user can edit the text
-      if (tokenStr) attrs["data-tokens"] = tokenStr;
-      return Decoration.mark({ class: "atpath-link", attributes: attrs });
-    },
-  });
+      // Pass 2: file refs (skip overlaps + matches immediately followed by "/")
+      const fileRe = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
+      while ((m = fileRe.exec(text)) !== null) {
+        const absStart = from + m.index;
+        const absEnd = from + m.index + m[0].length;
+        if (overlapsFolder(absStart, absEnd)) continue;
+        if (absEnd < to && text[m.index + m[0].length] === "/") continue;
+        const relPath = m[1];
+
+        const attrs = { "data-atpath": relPath };
+        let tokenStr = null;
+        if (plugin.settings.showTokenCounts) {
+          const vaultPath = resolveAtPath(relPath, plugin);
+          const cached = plugin.tokenCache.get(vaultPath);
+          if (cached) tokenStr = formatTokens(cached.tokens);
+          else plugin.scheduleTokenFetch(vaultPath, view);
+        }
+
+        if (selectionOverlaps(absStart, absEnd)) {
+          if (tokenStr) attrs["data-tokens"] = tokenStr;
+          builder.push({
+            from: absStart,
+            to: absEnd,
+            deco: Decoration.mark({ class: "atpath-link", attributes: attrs }),
+          });
+        } else {
+          builder.push({
+            from: absStart,
+            to: absEnd,
+            deco: Decoration.replace({
+              widget: new AtPathWidget(m[0], relPath, tokenStr),
+            }),
+          });
+        }
+      }
+    }
+
+    builder.sort((a, b) => a.from - b.from || a.to - b.to);
+    return Decoration.set(builder.map((b) => b.deco.range(b.from, b.to)));
+  }
 
   return ViewPlugin.define(
     (view) => ({
-      decorations: decorator.createDeco(view),
+      decorations: buildDecorations(view),
       update(update) {
-        if (plugin.tokenCacheDirty || update.selectionSet) {
-          this.decorations = decorator.createDeco(update.view);
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.selectionSet ||
+          plugin.tokenCacheDirty
+        ) {
+          this.decorations = buildDecorations(update.view);
           plugin.tokenCacheDirty = false;
-        } else {
-          this.decorations = decorator.updateDeco(update, this.decorations);
         }
       },
     }),
@@ -612,8 +755,20 @@ function buildAtPathViewPlugin(plugin) {
           event.preventDefault();
           const activeFile = plugin.app.workspace.getActiveFile();
           if (!activeFile) return false;
+          const sourcePath = activeFile.path;
 
-          const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, plugin);
+          if (target.dataset.atpathKind === "folder") {
+            const resolved = plugin.core.resolveAtPathTarget(
+              { kind: "folder", vaultPath: relPath },
+              sourcePath
+            );
+            if (resolved.kind === "folder") {
+              revealFolderInExplorer(plugin.app, resolved.target);
+            }
+            return true;
+          }
+
+          const vaultPath = resolveAtPathFromSource(relPath, sourcePath, plugin);
           const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
           if (resolved instanceof TFile) {
             openFileByViewState(plugin, resolved);
@@ -629,6 +784,17 @@ function buildAtPathViewPlugin(plugin) {
           event.preventDefault();
           const activeFile = plugin.app.workspace.getActiveFile();
           if (!activeFile) return false;
+
+          if (target.dataset.atpathKind === "folder") {
+            const resolved = plugin.core.resolveAtPathTarget(
+              { kind: "folder", vaultPath: relPath },
+              activeFile.path
+            );
+            if (resolved.kind === "folder") {
+              showAtPathFolderMenu(plugin, event, resolved.target);
+            }
+            return true;
+          }
 
           const vaultPath = resolveAtPathFromSource(relPath, activeFile.path, plugin);
           showAtPathMenu(plugin, event, vaultPath);
@@ -761,68 +927,159 @@ function registerPostProcessor(plugin) {
 
     // ── Legacy @path references (plain text matched by regex) ──
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    const regex = /(?:^|(?<=[\s(]))@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
+    const fileRe = /(?:^|(?<=[\s(]))@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
     const replacements = [];
 
     let node;
     while ((node = walker.nextNode())) {
       const text = node.textContent;
+      // Folder pass first (so overlapping file matches can be excluded).
+      const folderRanges = [];
+      const folderRe = new RegExp(AT_PATH_FOLDER_RE.source, AT_PATH_FOLDER_RE.flags);
+      let fMatch;
+      while ((fMatch = folderRe.exec(text)) !== null) {
+        const lead = fMatch[1] || "";
+        const capture = fMatch[2];
+        const startIdx = fMatch.index + lead.length;
+        const endIdx = fMatch.index + fMatch[0].length;
+        folderRanges.push([startIdx, endIdx]);
+        replacements.push({
+          node,
+          kind: "folder",
+          match: "@" + capture + "/",
+          capture,
+          index: startIdx,
+          length: endIdx - startIdx,
+        });
+      }
+
+      // File pass — skip matches that overlap a folder range or are followed by "/".
+      fileRe.lastIndex = 0;
       let match;
-      regex.lastIndex = 0;
-      while ((match = regex.exec(text)) !== null) {
-        replacements.push({ node, match: match[0], capture: match[1], index: match.index });
+      while ((match = fileRe.exec(text)) !== null) {
+        const startIdx = match.index;
+        const endIdx = match.index + match[0].length;
+        let overlaps = false;
+        for (const [fs, fe] of folderRanges) {
+          if (startIdx < fe && endIdx > fs) { overlaps = true; break; }
+        }
+        if (overlaps) continue;
+        if (text[endIdx] === "/") continue;
+        replacements.push({
+          node,
+          kind: "file",
+          match: match[0],
+          capture: match[1],
+          index: startIdx,
+          length: match[0].length,
+        });
       }
     }
 
-    // Process in reverse so indices stay valid
-    for (let i = replacements.length - 1; i >= 0; i--) {
-      const { node, match, capture, index } = replacements[i];
-      const before = node.textContent.substring(0, index);
-      const after = node.textContent.substring(index + match.length);
+    // Group by node, then process each node in reverse-index order so indices stay valid.
+    const byNode = new Map();
+    for (const r of replacements) {
+      if (!byNode.has(r.node)) byNode.set(r.node, []);
+      byNode.get(r.node).push(r);
+    }
 
-      const link = document.createElement("a");
-      link.className = "atpath-link";
-      link.textContent = match;
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
-        const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
-        if (resolved instanceof TFile) {
-          openFileByViewState(plugin, resolved);
-        }
-      });
-      link.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
-        showAtPathMenu(plugin, e, vaultPath);
-      });
+    for (const [textNode, items] of byNode) {
+      items.sort((a, b) => b.index - a.index);
+      for (const item of items) {
+        const { kind, match, capture, index, length } = item;
+        const before = textNode.textContent.substring(0, index);
+        const after = textNode.textContent.substring(index + length);
+        const parent = textNode.parentNode;
+        if (!parent) continue;
 
-      const parent = node.parentNode;
-      if (after) parent.insertBefore(document.createTextNode(after), node.nextSibling);
+        const link = document.createElement("a");
+        link.className = kind === "folder"
+          ? "atpath-link atpath-folder-link"
+          : "atpath-link";
+        link.textContent = match;
 
-      // Token count span (Reading mode)
-      if (plugin.settings.showTokenCounts) {
-        const tokenSpan = document.createElement("span");
-        tokenSpan.className = "atpath-token-count";
-        const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
-        const cached = plugin.tokenCache.get(vaultPath);
-        if (cached) {
-          tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
+        if (kind === "folder") {
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            const resolved = plugin.core.resolveAtPathTarget(
+              { kind: "folder", vaultPath: capture },
+              ctx.sourcePath
+            );
+            if (resolved.kind === "folder") {
+              revealFolderInExplorer(plugin.app, resolved.target);
+            }
+          });
+          link.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            const resolved = plugin.core.resolveAtPathTarget(
+              { kind: "folder", vaultPath: capture },
+              ctx.sourcePath
+            );
+            if (resolved.kind === "folder") {
+              showAtPathFolderMenu(plugin, e, resolved.target);
+            }
+          });
         } else {
-          plugin.getTokenCount(vaultPath).then(
-            (tokens) => {
-              if (tokens != null) {
-                tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
-              }
-            },
-            (err) => console.warn("[atpath] token count failed", err)
-          );
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
+            const resolved = plugin.app.vault.getAbstractFileByPath(vaultPath);
+            if (resolved instanceof TFile) {
+              openFileByViewState(plugin, resolved);
+            }
+          });
+          link.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
+            showAtPathMenu(plugin, e, vaultPath);
+          });
         }
-        parent.insertBefore(tokenSpan, node.nextSibling);
-      }
 
-      parent.insertBefore(link, node.nextSibling);
-      node.textContent = before;
+        if (after) parent.insertBefore(document.createTextNode(after), textNode.nextSibling);
+
+        if (plugin.settings.showTokenCounts) {
+          const tokenSpan = document.createElement("span");
+          tokenSpan.className = "atpath-token-count";
+          if (kind === "folder") {
+            const resolved = plugin.core.resolveAtPathTarget(
+              { kind: "folder", vaultPath: capture },
+              ctx.sourcePath
+            );
+            if (resolved.kind === "folder") {
+              const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
+              if (cached != null) {
+                tokenSpan.textContent = " (" + formatTokens(cached) + ")";
+              } else {
+                plugin.core.getFolderTokens(resolved.normalizedPath).then(
+                  (tokens) => {
+                    tokenSpan.textContent = " (" + formatTokens(tokens || 0) + ")";
+                  },
+                  (err) => console.warn("[atpath] folder token count failed", err)
+                );
+              }
+            }
+          } else {
+            const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
+            const cached = plugin.tokenCache.get(vaultPath);
+            if (cached) {
+              tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
+            } else {
+              plugin.getTokenCount(vaultPath).then(
+                (tokens) => {
+                  if (tokens != null) {
+                    tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
+                  }
+                },
+                (err) => console.warn("[atpath] token count failed", err)
+              );
+            }
+          }
+          parent.insertBefore(tokenSpan, textNode.nextSibling);
+        }
+
+        parent.insertBefore(link, textNode.nextSibling);
+        textNode.textContent = before;
+      }
     }
   });
 }
@@ -1519,6 +1776,7 @@ class AtPathPlugin extends Plugin {
     this.tokenCache = new Map();
     this.tokenCacheDirty = false;
     this._inFlightTokenFetches = new Set();
+    this._inFlightFolderTokenFetches = new Set();
     this._rafScheduled = false;
     this._lastEditorView = null;
     this._statusBarGen = 0;
@@ -1709,6 +1967,24 @@ class AtPathPlugin extends Plugin {
       (err) => {
         this._inFlightTokenFetches.delete(vaultPath);
         console.warn("[atpath] token count failed", err);
+      }
+    );
+  }
+
+  scheduleFolderTokenFetch(folderPath, view) {
+    if (!this.settings.showTokenCounts) return;
+    if (this._inFlightFolderTokenFetches.has(folderPath)) return;
+    this._inFlightFolderTokenFetches.add(folderPath);
+    this._lastEditorView = view;
+    this.core.getFolderTokens(folderPath).then(
+      () => {
+        this._inFlightFolderTokenFetches.delete(folderPath);
+        this.tokenCacheDirty = true;
+        this._scheduleRefresh();
+      },
+      (err) => {
+        this._inFlightFolderTokenFetches.delete(folderPath);
+        console.warn("[atpath] folder token count failed", err);
       }
     );
   }

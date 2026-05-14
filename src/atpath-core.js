@@ -167,6 +167,10 @@ function createAtPathCore(plugin) {
     return total;
   }
 
+  function getCachedFolderTokens(folderPath) {
+    return folderTokenMemo.has(folderPath) ? folderTokenMemo.get(folderPath) : null;
+  }
+
   function clearFolderTokenMemo(folderPath) {
     if (folderPath) folderTokenMemo.delete(folderPath);
     else folderTokenMemo.clear();
@@ -328,6 +332,7 @@ function createAtPathCore(plugin) {
     isIgnored,
     enumerateFolderCandidates,
     formatAtPathInsertion,
+    getCachedFolderTokens,
     clearFolderTokenMemo,
     clearFoldersCache,
     listAllFolders,
