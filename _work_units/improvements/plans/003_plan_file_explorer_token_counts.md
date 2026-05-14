@@ -1,128 +1,241 @@
 # Plan B — File explorer token counts (per-file + per-folder)
 
 Source prompt: `../prompts/001_improvements.md`
+Codex review of prior revision folded in.
 
-This feature is tracked separately from Plan A because it requires patching into Obsidian's internal file-explorer view (no public decorator API exists), introduces new infrastructure (ignore patterns, folder aggregation), and carries a different Community Plugin review risk profile.
+This plan owns the **ignore-pattern infrastructure** and the **event-driven folder token cache** that Plan A stubs out. It also patches Obsidian's internal file-explorer view to decorate every file/folder row with a token-count badge.
 
 ---
 
 ## 1. Goal
 
-Show a **per-file token count** next to every file in Obsidian's File Explorer sidebar, plus a **recursively-aggregated total** next to every folder. Counts respect user-configured **ignore patterns** (default: `90_archive/`) and the existing `Skip files above N MB` setting. If the internal-API approach is unacceptable to plugin review, fall back to a dedicated **"Folder stats"** right-sidebar view.
+Show a **per-file token count** next to every file in Obsidian's file explorer sidebar, plus a **recursively-aggregated total** next to every folder. Counts respect user-configured **ignore patterns** (default: `90_archive/`) and the existing `Skip files above N MB` setting. If the internal-API approach is rejected by the Community Plugin reviewer, fall back to a dedicated **"Folder stats"** right-sidebar view.
 
 ---
 
 ## 2. Current state (verified against `src/main.js`)
 
-- **Zero** file-explorer integration today (no `getLeavesOfType("file-explorer")`, no nav-file DOM mutation).
-- Per-file token count exists via `getTokenCount(vaultPath)` (L1705) with mtime-keyed cache `tokenCache` (L1562). Cache is invalidated on `create|delete|rename|modify` events (L1581–1595). This is reusable as-is.
-- No folder traversal anywhere. `app.vault.getFiles()` is called for unrelated reasons (HTML scope, wikilink repair) but never recursively aggregated.
-- No ignore-pattern infrastructure today; only content-based exclusions (YAML frontmatter, fenced code) inside `getTokenCount`.
+- **Zero** file-explorer integration today (no `getLeavesOfType("file-explorer")`, no DOM mutation).
+- Per-file `getTokenCount(vaultPath)` (L1705) with mtime-keyed cache `tokenCache` (L1562).
+- **Cache event subscriptions (L1581–1605): `modify`, `delete`, `rename` only — `create` is NOT subscribed.** Newly created files are tokenized lazily on first read. Plan B adds explicit `create` handling (§3.2.4).
+- No folder traversal, no ignore-pattern infra, no `picomatch` (or any glob lib) currently in dependencies.
+- `app.vault.configDir` is the supported way to refer to the `.obsidian` folder (CLAUDE.md compliance rule).
 
 ---
 
 ## 3. Approach
 
-### 3.1 Primary: file-explorer decoration via internal `fileItems`
+### 3.1 Decorator surface — multi-leaf, pop-out window, mobile aware
 
-Use the standard pattern observed in Novel Word Count, File Explorer Note Count, and Obsidian File Color:
+Use the per-instance `fileItems` pattern (Novel Word Count / File Color / File Explorer Note Count). **No `FileExplorerView.prototype` patching.**
 
 ```js
 const leaves = this.app.workspace.getLeavesOfType("file-explorer");
 for (const leaf of leaves) {
   const view = leaf.view;
-  const items = view.fileItems; // internal: Record<vaultPath, FileItem>
+  const items = view?.fileItems;
+  if (!items) continue;
   for (const [path, item] of Object.entries(items)) {
-    const el = item.selfEl; // .nav-file-title | .nav-folder-title
-    decorate(el, path);
+    decorate(item.selfEl, path);
   }
 }
 ```
 
-The `selfEl` for each `fileItem` is the row's title element. We append a single `<span class="atpath-token-badge">` and update its text on every refresh. **All mutation is per-instance** — no `FileExplorerView.prototype` patching (which Community Plugin reviewers increasingly push back on).
+#### 3.1.1 Multi-leaf
 
-**Startup race:** the file-explorer leaf may be deferred on app launch. Use `app.workspace.onLayoutReady(...)` first; if `fileItems` is still empty, attach a one-shot `MutationObserver` to the workspace root watching for `[data-type="file-explorer"] .nav-files-container`, then disconnect.
+Multiple file-explorer leaves can exist simultaneously (split panes). Iterate **all** matching leaves, not just `[0]`. Maintain `decoratedLeafIds: Set<string>` to track which leaves have been instrumented this run; `layout-change` handler diffs added/removed leaves.
 
-**Subscriptions** (all via `registerEvent`, so they auto-clean on unload):
-- `workspace.on('layout-change')` — handles folder expand/collapse re-rendering new `fileItems`.
-- `vault.on('create' | 'delete' | 'rename' | 'modify')` — invalidates affected entries and recomputes their parents incrementally.
-- `vault.on('rename')` — also re-decorates moved item's new selfEl.
+#### 3.1.2 Pop-out windows
 
-**Cleanup (`onunload`):** strip every appended `<span class="atpath-token-badge">` we added; disconnect any MutationObserver.
+When the user pops a leaf out into a separate Electron window (`workspace.openPopoutLeaf` or drag-out), the file explorer can move. Subscribe to `workspace.on('window-open')` and `workspace.on('window-close')`; re-scan leaves on both. Each pop-out window has its own DOM root — the decorator iterates `leaf.view.containerEl`, which already resolves to the correct window's `.nav-files-container`. No JS positioning needed; CSS handles all visuals.
 
-### 3.2 Folder aggregation
+#### 3.1.3 Mobile
 
-Maintain a parallel **folder token map**:
+File-explorer rendering differs on mobile (different leaf type and tree DOM). **Plan B is desktop-only at v1**: early-return when `Platform.isMobile`. Stub setting `showFolderTokenBadges` is hidden in the settings UI on mobile. Mobile support is a future enhancement.
+
+#### 3.1.4 Deferred file-explorer leaf
+
+On launch the file-explorer leaf may be deferred. Sequence:
+1. `app.workspace.onLayoutReady(...)` first.
+2. If `getLeavesOfType("file-explorer")` is empty OR every leaf's `fileItems` is empty, attach a `MutationObserver` to `workspace.containerEl` watching for `[data-type="file-explorer"] .nav-files-container`. On first hit, re-run the decorator and disconnect the observer.
+3. If still empty after 5 s, log once via `console.warn` and stop trying.
+
+#### 3.1.5 Subscriptions (all via `registerEvent`, auto-cleaned on unload)
+
+- `workspace.on('layout-change')` — folder expand/collapse renders new `fileItems`; pop-out moves; new splits.
+- `workspace.on('window-open')` / `workspace.on('window-close')` — pop-out window plumbing.
+- `vault.on('create' | 'modify' | 'delete' | 'rename')` — see §3.2 for cache semantics.
+- `metadataCache.on('changed')` — not subscribed; per-file token count is content-based and `modify` already fires on save.
+
+#### 3.1.6 Cleanup (`onunload`)
+
+Strip every appended `.atpath-token-badge` we own; disconnect MutationObserver; clear caches. Use `WeakSet<HTMLElement>` to remember which `selfEl`s we badged so the cleanup is deterministic.
+
+### 3.2 Folder aggregation — explicit contribution map
+
+The prior plan said "adjust each ancestor by `(newTokens - oldTokens)`" but `tokenCache` only stores the *new* number after `getTokenCount` runs — the *old* contribution is lost the moment cache is invalidated. Fix: introduce a **separate contribution map**.
+
+#### 3.2.1 Data structures
 
 ```js
-folderTokenCache: Map<folderPath, { tokens, fileCount, includedCount }>
+// Per-file contribution snapshot used for delta math. Distinct from tokenCache.
+contributionMap: Map<vaultPath, {
+  tokens: number,        // last known token count for this file
+  parents: string[],     // all ancestor folder paths (root → leaf), excluding ""
+  ignored: boolean,      // was this file matched by ignore patterns at snapshot time
+  skipped: boolean,      // was this file skipped due to size or non-markdown extension
+}>
+
+// Aggregated per-folder.
+folderTokenCache: Map<folderPath, {
+  tokens: number,        // sum of non-ignored, non-skipped descendants
+  fileCount: number,     // total descendant files (incl. ignored/skipped)
+  includedCount: number, // descendants actually counted toward tokens
+  generation: number,    // bumped on every full rebuild; used to cancel stale walks
+}>
 ```
 
-- **Lazy build**: on first sight of a folder's `selfEl`, compute by walking its `TFolder.children` recursively, skipping ignored paths and oversized files. Cache result.
-- **Delta updates** on vault events: when a file changes, walk *upward* through its parent chain, adjusting each ancestor's running total by `(newTokens - oldTokens)`. This avoids re-summing whole subtrees on each save.
-- **Debounce DOM updates** at 750 ms after a burst of vault events (matches Novel Word Count's pattern).
+#### 3.2.2 Operations
 
-### 3.3 Ignore patterns
+**Add or update a file** (`create`, `modify`, or first sight during initial walk):
+1. Compute new `{tokens, ignored, skipped}` for `path`.
+2. If `path` already in `contributionMap`, compute deltas: `Δtokens = new.tokens - old.tokens` (or `-old.tokens` if newly ignored/skipped; or `+new.tokens` if previously ignored/skipped and now included).
+3. Walk `parents`. For each ancestor folder: adjust `tokens`, `includedCount`, `fileCount`.
+4. Overwrite `contributionMap[path]` with the new snapshot.
 
-New setting: `tokenCountIgnorePatterns` (multiline string textarea, gitignore-style).
+**Delete a file**:
+1. Read `contributionMap[path]` for last-known `{tokens, parents, ignored, skipped}`.
+2. Walk those parents; subtract `tokens` (if it was contributing), decrement `fileCount` and `includedCount` as appropriate.
+3. Remove `contributionMap[path]`.
 
-- Default value: `90_archive/\n.obsidian/\n.trash/`
-- Parse with **`picomatch`** (already used by Omnisearch and File Ignore; small footprint; supports `!negation`, `**`, glob extensions).
-- Match against vault-relative paths; folders match both `foo/` and `foo`.
-- Ignored files: badge is **not rendered** (cleaner than rendering `0`).
-- Ignored folders: badge says e.g. `— archived` (or simply hidden, with a hover title explaining); their token contribution is excluded from ancestor totals.
+**Rename a file** (TFile only):
+1. Run the delete sequence on `oldPath`.
+2. Run the add/update sequence on `newPath`.
 
-### 3.4 Badge rendering
+**Rename a folder with descendants** (the hard one):
+1. `vault.on('rename')` fires once for the folder itself; **descendants are NOT re-emitted** by Obsidian.
+2. Detect folder rename via `file instanceof TFolder`.
+3. For every entry in `contributionMap` whose `parents` includes `oldPath`, rewrite the key (path prefix swap) and rebuild `parents`. No tokenization needed (content unchanged).
+4. For every entry in `folderTokenCache` under `oldPath`, rewrite the key. The aggregated totals don't change values — only paths.
+5. Bump `generation` so any in-flight walks abort.
+
+**Ignore-pattern change** (settings save):
+1. Bump `generation`.
+2. For each `contributionMap[path]`: re-evaluate `ignored`; if it flipped, push deltas through `parents`.
+3. Schedule a debounced badge refresh.
+
+#### 3.2.3 Bounded background queue
+
+Walking 10 k files synchronously will lock the UI. Use a bounded async queue:
+
+```js
+class TokenizeQueue {
+  constructor(concurrency = 2) { ... }
+  enqueue(path) { ... }   // dedupes if already pending
+  cancel(generation) { ... }
+}
+```
+
+- Concurrency 2 on desktop (gpt-tokenizer is sync-CPU work; 2 parallel via `await new Promise(r => setTimeout(r))` yields the event loop between files).
+- Dedupes in-flight tokenization of the same `path`.
+- Each task tagged with the queue's `generation` at enqueue time; if `generation` changed (settings save, folder rename) the task short-circuits before running.
+- Visible rows render a **placeholder badge** (`…`) immediately; real number swaps in when the queue produces it. Placeholder reserved via a fixed `min-width` so layout doesn't shift.
+
+#### 3.2.4 `create` event handling and vault-load flood
+
+Plugin currently doesn't subscribe to `create`. Plan B adds the subscription but **must not** flood the queue on vault load (Obsidian fires `create` for every file during initial index).
+
+Mitigation: gate `create`-driven enqueues behind `app.workspace.onLayoutReady` AND a 1-second post-ready settle window. During the settle window, batch new paths; one full sweep runs after the window closes. Subsequent `create` events (real new files) enqueue individually.
+
+#### 3.2.5 DOM debounce
+
+Decorator's `paintBadges()` runs no more than once every **750 ms** (rAF-throttled coalescing). Tokenization completion events flag affected rows; the next paint cycle updates them all in one pass.
+
+### 3.3 Ignore patterns — **hand-rolled matcher, no new deps**
+
+(User chose hand-rolled over `picomatch` per global "ask first" rule.)
+
+New setting `tokenCountIgnorePatterns` (multiline string, gitignore-ish). Default:
+
+```
+90_archive/
+```
+
+Note: **do not** ship literal `.obsidian/` or `.trash/` in the default — `app.vault.configDir` is the supported abstraction. Both are always-excluded by the matcher regardless of patterns (see below).
+
+#### 3.3.1 Matcher rules (minimal subset of gitignore)
+
+| Pattern | Meaning |
+|---|---|
+| `foo/` | Any path whose first segment is `foo` (folder match) |
+| `foo/bar/` | Any path starting with `foo/bar/` |
+| `*.md` | Any file with `.md` extension (path leaf only) |
+| `**/draft-*` | Any path whose any segment starts with `draft-` |
+| `!foo/bar.md` | Negation — re-include after a broader exclude |
+| `# comment` | Comment line, ignored |
+| (blank line) | Ignored |
+
+Implementation: compile each non-comment line to a simple regex (~50 LOC). Negation lines run a second pass to un-set matches.
+
+#### 3.3.2 Always-excluded paths (not user-configurable)
+
+- `app.vault.configDir` and everything beneath it
+- The vault's trash (`.trash` is the default but `vault.getConfig?.("trashOption")` may shift it; use the API where available, fall back to literal `".trash"` as last resort)
+
+These are excluded from decoration entirely (no badge rendered, no contribution map entry).
+
+#### 3.3.3 Live validation
+
+The settings textarea live-validates each line; an invalid line shows a `Notice` and is skipped. Saving triggers the §3.2.2 "Ignore-pattern change" flow.
+
+### 3.4 Badge rendering — **single, unambiguous UX**
+
+Resolve prior plan's self-contradiction: ignored files get **no badge**. Period.
 
 ```html
 <span class="atpath-token-badge" aria-label="1,240 tokens">1.2k</span>
 ```
 
-- Short-form numbers (`1.2k`, `8.6k`, `124k`) to avoid stretching the tree.
-- Hover tooltip shows full count and (for folders) file count: `1,240 tokens · 12 files`.
-- Color via CSS var that reacts to total magnitude (subtle: `--text-muted` for small, `--text-normal` for large) — purely a visual nudge.
-- Spinner / dimmed state while a folder is being computed for the first time.
-
-Token unit shown is GPT-4o (matches existing inline badges and status bar).
+- Short-form numbers (`1.2k`, `8.6k`, `124k`).
+- Fixed `min-width: 3em` to prevent column-width jitter on number changes.
+- `pointer-events: none` so the badge never steals clicks from the row title.
+- `aria-label` carries the full number for screen readers; CSS hover via the row tooltip surfaces full count + file count for folders.
+- **Ignored files**: no `<span>` appended; cleanup ensures no stale badge if a path becomes ignored later.
+- **Ignored folders**: no badge on the folder row either; descendants of an ignored folder are also unbadged.
+- **In-flight (queue still computing)**: placeholder content `…`; placeholder also has the fixed `min-width` so swap-in is layout-neutral.
+- **Duplicate-prevention**: before appending, check `selfEl.querySelector(".atpath-token-badge")`; if found, update its text instead of appending a second.
 
 ### 3.5 Fallback view (always shipped)
 
-Even if the primary decoration works, ship a `registerView("atpath-folder-stats")` right-sidebar pane:
+`registerView("atpath-folder-stats")` right-sidebar pane, plus command "Open folder stats":
 
 ```
 Folder stats
 ─────────────────
-[ Refresh ]   [ ☐ Include archive ]
+[ Refresh ]   [ ☐ Include ignored ]
 
 ▾ /
   ▾ notes/                 24,310
     api.md                  1,210
     spec.md                 3,300
   ▾ src/                   18,440
-    main.py                 2,440
-    ...
-  /90_archive/             — ignored
+  /90_archive/             —
 ```
 
-This pane is the **authoritative** UI:
-- Survives any future Obsidian update that breaks the internal `fileItems` patch.
-- Strengthens the Community Plugin submission by giving the feature a non-internal-API home.
-- Provides a one-shot "Refresh all" affordance for users who don't want live updates.
+Authoritative UI that survives an Obsidian internal-API change. Strengthens Community Plugin submission by demonstrating the feature has a public-API home.
 
 ---
 
 ## 4. Settings additions
 
-Append to `DEFAULT_SETTINGS` (L113–127) and `SettingTab` (L875–1017):
-
 | Setting | Default | Notes |
 |---|---|---|
-| `showFolderTokenBadges` | `true` | Master toggle for file-explorer decoration |
-| `tokenCountIgnorePatterns` | `90_archive/\n.obsidian/\n.trash/` | Multiline textarea, gitignore-style |
+| `showFolderTokenBadges` | `true` | Master toggle for file-explorer decoration (hidden on mobile) |
+| `tokenCountIgnorePatterns` | `90_archive/` | Multiline textarea, hand-rolled matcher syntax |
 | `folderBadgeFormat` | `"short"` | `"short"` (`1.2k`) or `"full"` (`1,240`) |
-| `enableFolderStatsView` | `true` | Toggle the right-sidebar fallback view |
+| `enableFolderStatsView` | `true` | Toggle the fallback sidebar view |
 
-Settings labels sentence-case (Community Plugin rules).
+All labels sentence-case. `configDir` and trash auto-excluded — not exposed as a setting.
 
 ---
 
@@ -130,54 +243,79 @@ Settings labels sentence-case (Community Plugin rules).
 
 | Risk | Mitigation |
 |---|---|
-| **Internal API breakage on Obsidian update.** `fileItems` and `selfEl` are undocumented. | (a) Defensive type checks before mutation. (b) The fallback right-sidebar view stays useful even if decoration fails. (c) Wrap the patch in `try/catch` and `console.warn` on failure (no `console.log` per rules). |
-| **Community Plugin reviewer flags internal access.** | Justify in submission notes: per-instance `fileItems` iteration is the accepted ecosystem pattern (Novel Word Count, File Color); no prototype patching; full cleanup on unload. Fallback view shows feature does not depend solely on internal patching. |
-| **Large vault performance** (10k+ files). | (a) Lazy decoration — only currently-rendered `fileItems` are touched. (b) Delta updates instead of full subtree re-sum. (c) Debounce 750 ms. (d) Honor existing `maxFileSizeMB` setting to skip giant files in counts. |
-| **Ignore-pattern dependency bloat.** `picomatch` is ~12 kB minified. | Acceptable — already used by widely-adopted plugins. Alternative: hand-roll a small glob matcher if review pushes back on the dep. |
-| **First-paint flicker** when folder counts are still being computed. | Render placeholder `…` immediately, swap to real number when ready; no layout shift since badge has a `min-width`. |
-| **mtime-based cache misses on Obsidian's atomic-rename writes.** | Already mitigated by current `modify` event handling; verify edge cases for cloud-sync flows. |
+| Internal `fileItems`/`selfEl` breaks on Obsidian update | (a) Defensive type checks; (b) wrap each per-leaf scan in `try/catch` + `console.warn`; (c) fallback view remains useful even if decoration fails entirely. |
+| Community Plugin reviewer flags internal access | Justify in submission notes: per-instance iteration is the accepted ecosystem pattern; no prototype patching; full cleanup; public-API fallback view shipped. |
+| 10 k+ file vaults lock UI | Bounded queue concurrency 2; placeholder badges; lazy-decorate currently-rendered rows only; settle-window on initial vault load. |
+| First-paint flicker | Placeholder `…` with fixed `min-width`; 750 ms paint debounce. |
+| Pop-out window decoration missed | `window-open` / `window-close` subscriptions; decorator iterates `leaf.view.containerEl` so the right window is touched. |
+| mtime cache misses on cloud-sync atomic-rename writes | Existing `modify` handler already invalidates; verify with a Sync/iCloud scenario in smoke test. |
+| Folder rename with deep descendants | Path-prefix rewrite in both `contributionMap` and `folderTokenCache`; no re-tokenization needed since content didn't change. |
+| `create`-flood on vault load | Settle window after `onLayoutReady`; single batched sweep instead of N enqueues. |
 
 ---
 
 ## 6. Implementation steps (in order)
 
-1. **Add ignore-pattern infrastructure.** Pull in `picomatch`, build `isIgnored(path)` helper, wire to `DEFAULT_SETTINGS`. Test with default `90_archive/` against a real vault.
-2. **Extract a `getFolderTokenCount(folderPath)`** function. Recursive walk of `TFolder.children`, honors ignore + max-size, populates `folderTokenCache`.
-3. **Build the decorator**:
-   - `decorateFileExplorer()` method on the plugin
-   - `setBadge(selfEl, tokens, kind)` low-level DOM helper
-   - Hook to `workspace.onLayoutReady` + MutationObserver fallback
-   - `layout-change` + vault-event subscriptions
-4. **Delta-update logic.** When `getTokenCount` cache changes for a file, propagate delta up the parent chain into `folderTokenCache`, then refresh affected `fileItems[*].selfEl` badges.
-5. **Badge styling** in `styles.css`. Short-form formatter helper. Hover tooltip with full breakdown.
-6. **Fallback view.** New `FolderStatsView extends ItemView`, registered with `registerView`. Manual refresh button + checkbox to include ignored. Command palette command "Open folder stats".
-7. **Settings panel.** Four new fields, with help text. Live-validate the ignore-pattern textarea (show a `Notice` if a line fails to parse).
-8. **Manual smoke test.**
-   - Real vault with 1k+ files; verify decoration appears within ~500 ms of load.
-   - Add/rename/delete files; verify badges update.
-   - Toggle ignore for `90_archive/`; verify ancestor totals shrink.
-   - Test on narrow window, light + dark theme, with file-explorer panel collapsed and re-opened.
-   - Run with the master toggle off — confirm no DOM mutations remain.
+1. **Replace Plan A stubs** in `src/atpath-core.js`: real `isIgnored` (§3.3 matcher) and real `getFolderTokens` (reads `folderTokenCache`).
+2. **Contribution map + folder cache infrastructure** (§3.2.1).
+3. **Token queue** with concurrency / dedupe / generation cancellation (§3.2.3).
+4. **Vault event handlers** — `create` (with settle-window), `modify`, `delete`, `rename` (file vs. folder branches).
+5. **Decorator core** — per-leaf scan, MutationObserver fallback, multi-leaf + pop-out support.
+6. **Badge DOM** + cleanup `WeakSet`; styles in `styles.css`.
+7. **Settings panel** — four fields, live-validation of ignore patterns.
+8. **Fallback `FolderStatsView`** — `ItemView` subclass; refresh button; include-ignored toggle.
+9. **Automated tests** (see §10).
+10. **Manual smoke test** — large vault (1 k+ files), folder rename with 100+ descendants, ignore pattern toggle, pop-out leaf, deferred file-explorer, dark/light theme, plugin disable → DOM clean.
 
 ---
 
 ## 7. Out of scope
 
-- Custom badge positioning per row (icons vs. trailing).
-- Streaming counts for very large files (we honor `maxFileSizeMB` instead).
-- A standalone vault-wide stats panel — the right-sidebar view covers this.
-- Integration with `.gitignore` files in the vault (could be a future enhancement; for now we use plugin-local ignore patterns).
-- Mobile support (file explorer rendering differs significantly on mobile; revisit later).
+- Mobile support (deferred; file-explorer DOM differs significantly).
+- `.gitignore` file integration (future enhancement).
+- Streaming counts for huge files (we honor `maxFileSizeMB`).
+- Per-row badge positioning customization.
+- Per-folder ignore-pattern overrides.
 
 ---
 
 ## 8. Acceptance criteria
 
-- Every file row in the file-explorer shows a token badge (or no badge if ignored / too large).
-- Every folder row shows an aggregated badge; collapsing/expanding a folder does not duplicate or strip badges.
-- Default ignore (`90_archive/`) excludes archived files from folder totals out of the box.
-- Edits to the ignore-patterns textarea take effect within ~1 s.
-- Disabling `showFolderTokenBadges` removes all badges immediately; re-enabling restores them.
-- Right-sidebar "Folder stats" view works independently and shows the same numbers.
-- Plugin unload leaves the file-explorer DOM exactly as it was found.
-- No `console.log`, no `innerHTML`, no inline styles (Community Plugin rules).
+- Every visible file row shows a token badge OR no badge if ignored/oversized/in-configDir/in-trash.
+- Every visible folder row shows an aggregated badge with the sum of non-ignored, non-oversized descendants.
+- **Folder rename** with descendants: badges remain correct without re-tokenizing any file.
+- **File create / modify / delete**: badges and ancestor totals update within ~1 s.
+- Edits to ignore patterns take effect within ~1 s; previously-ignored folders re-decorate, newly-ignored folders shed their badges.
+- Disabling `showFolderTokenBadges` removes all badges within one paint cycle; re-enabling restores them.
+- Right-sidebar "Folder stats" view shows the same numbers as the inline badges; "Include ignored" reveals the hidden ones.
+- Plugin unload leaves the file-explorer DOM identical to pre-load state.
+- Pop-out window with a file-explorer leaf is decorated correctly.
+- No `console.log`, `innerHTML`, hardcoded `.obsidian`, inline styles, `fetch`, or unawaited promises.
+
+---
+
+## 9. Migration / interaction with Plan A
+
+- Plan A ships with stub `isIgnored -> false` and a session-scoped synchronous `getFolderTokens`. **Plan B's first step replaces both stubs in `src/atpath-core.js`.** No Plan A call sites change.
+- Status bar's "linked tokens" total automatically benefits from the real `getFolderTokens` once Plan B lands.
+- Copy-with-folder honors the same `isIgnored` once Plan B lands.
+
+---
+
+## 10. Automated test plan
+
+| Target | Test cases |
+|---|---|
+| Ignore matcher | `foo/`, `foo/bar/`, `*.md`, `**/draft-*`, `!foo/bar.md` negation, comments, blank lines. Verify `configDir` and trash always excluded regardless of patterns. |
+| `contributionMap` add/update | New file → parents updated. Modify changes token count → ancestor deltas correct. Modify flips ignored → ancestors lose contribution. |
+| `contributionMap` delete | Parents' totals shrink; entry removed. |
+| `contributionMap` file rename | Old key removed; new key with correct parents; deltas net to zero in shared ancestors. |
+| `contributionMap` folder rename | All affected keys path-prefix-swapped; no re-tokenization; `generation` bumped. |
+| `folderTokenCache` generation cancellation | In-flight walk with old generation aborts before committing results. |
+| Queue dedupe | Enqueueing the same path twice yields one tokenization. |
+| Queue concurrency | At most N tasks running concurrently. |
+| `create` settle window | N synthetic `create` events within 1 s of `onLayoutReady` produce one batched sweep, not N enqueues. |
+| Badge DOM | Duplicate-prevention: re-decorating the same `selfEl` updates the existing badge, doesn't append a second. Cleanup removes every badge we appended (`WeakSet` audit). |
+| Ignored UX | Ignored file → no badge appended; ignored folder → no badge appended; descendants unbadged; "Include ignored" in fallback view shows them. |
+
+Manual smoke test in §6 step 10 still runs in addition.
