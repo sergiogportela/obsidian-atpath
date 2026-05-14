@@ -202,10 +202,21 @@ a.internal-link.atpath-link[data-tokens]::after {
 }
 .atpath-linked-popover-path {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-monospace);
+  /* Container is RTL so text-overflow:ellipsis lands at the LEFT (head
+     truncation), keeping the filename visible at the right. The inner
+     <bdi> below carries direction:ltr so the path itself still reads
+     left-to-right. */
+  direction: rtl;
+  text-align: left;
+}
+.atpath-linked-popover-path > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .atpath-linked-popover-row--folder .atpath-linked-popover-path {
   font-style: italic;

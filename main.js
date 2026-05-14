@@ -11625,11 +11625,11 @@ var AtPathPlugin = class extends Plugin {
       });
       const iconEl = row.createSpan({ cls: "atpath-linked-popover-icon" });
       setIcon(iconEl, t.kind === "folder" ? "folder" : "file-text");
-      const pathSpan = row.createSpan({
-        cls: "atpath-linked-popover-path",
-        text: t.kind === "folder" ? t.path + "/" : t.path
-      });
-      const rowTitle = t.pending ? "Still counting\u2026" : t.overCap ? "Skipped: over the configured max-files limit" : t.kind === "folder" ? t.path + "/" : t.path;
+      const displayLabel = this.core.computeDisplayPath(t.path, sourcePath) + (t.kind === "folder" ? "/" : "");
+      const pathSpan = row.createSpan({ cls: "atpath-linked-popover-path" });
+      pathSpan.createEl("bdi", { text: displayLabel });
+      const fullPath = t.kind === "folder" ? t.path + "/" : t.path;
+      const rowTitle = t.pending ? "Still counting\u2026" : t.overCap ? "Skipped: over the configured max-files limit" : fullPath;
       pathSpan.setAttribute("title", rowTitle);
       row.setAttribute("title", rowTitle);
       const countEl = row.createSpan({
