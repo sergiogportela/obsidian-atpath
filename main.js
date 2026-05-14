@@ -8508,6 +8508,329 @@ export default async function handler(req, res) {
   }
 });
 
+// src/atpath-core.js
+var require_atpath_core = __commonJS({
+  "src/atpath-core.js"(exports2, module2) {
+    "use strict";
+    var { TFile: TFile2, TFolder: TFolder2 } = require("obsidian");
+    var REPOS_SEGMENT = "_repos/";
+    function getRepoRoot2(filePath) {
+      if (!filePath) return "";
+      const idx = filePath.indexOf(REPOS_SEGMENT);
+      if (idx === -1) return "";
+      const afterRepos = filePath.substring(idx + REPOS_SEGMENT.length);
+      const slash = afterRepos.indexOf("/");
+      if (slash === -1) return "";
+      return filePath.substring(0, idx + REPOS_SEGMENT.length + slash);
+    }
+    function toRepoRelative2(filePath, repoRoot) {
+      if (!repoRoot) return filePath;
+      return filePath.substring(repoRoot.length + 1);
+    }
+    function discoverRepoRoots2(plugin) {
+      const now = Date.now();
+      if (plugin._repoRootsCache && now - plugin._repoRootsCacheTime < 5e3) {
+        return plugin._repoRootsCache;
+      }
+      const roots = /* @__PURE__ */ new Map();
+      for (const file of plugin.app.vault.getFiles()) {
+        const idx = file.path.indexOf(REPOS_SEGMENT);
+        if (idx === -1) continue;
+        const afterRepos = file.path.substring(idx + REPOS_SEGMENT.length);
+        const slash = afterRepos.indexOf("/");
+        if (slash === -1) continue;
+        const repoName = afterRepos.substring(0, slash);
+        if (!roots.has(repoName)) {
+          roots.set(repoName, file.path.substring(0, idx + REPOS_SEGMENT.length + slash));
+        }
+      }
+      plugin._repoRootsCache = roots;
+      plugin._repoRootsCacheTime = now;
+      return roots;
+    }
+    function resolveAtPathFromSource2(relPath, sourceFilePath, plugin) {
+      const sourceRepoRoot = getRepoRoot2(sourceFilePath);
+      if (sourceRepoRoot) {
+        const candidate = sourceRepoRoot + "/" + relPath;
+        if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+      }
+      const slashIdx = relPath.indexOf("/");
+      if (slashIdx !== -1) {
+        const firstSegment = relPath.substring(0, slashIdx);
+        const rest = relPath.substring(slashIdx + 1);
+        const repoRoots = discoverRepoRoots2(plugin);
+        const repoRoot = repoRoots.get(firstSegment);
+        if (repoRoot) {
+          const candidate = repoRoot + "/" + rest;
+          if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+        }
+      }
+      if (plugin.app.vault.getAbstractFileByPath(relPath)) return relPath;
+      return sourceRepoRoot ? sourceRepoRoot + "/" + relPath : relPath;
+    }
+    function resolveAtPathFolderFromSource(relPath, sourceFilePath, plugin) {
+      const trimmed = relPath.replace(/\/+$/, "");
+      const sourceRepoRoot = getRepoRoot2(sourceFilePath);
+      if (sourceRepoRoot) {
+        const candidate = sourceRepoRoot + "/" + trimmed;
+        const f = plugin.app.vault.getAbstractFileByPath(candidate);
+        if (f instanceof TFolder2) return candidate;
+      }
+      const slashIdx = trimmed.indexOf("/");
+      if (slashIdx !== -1) {
+        const firstSegment = trimmed.substring(0, slashIdx);
+        const rest = trimmed.substring(slashIdx + 1);
+        const repoRoots = discoverRepoRoots2(plugin);
+        const repoRoot = repoRoots.get(firstSegment);
+        if (repoRoot) {
+          const candidate = repoRoot + "/" + rest;
+          const f = plugin.app.vault.getAbstractFileByPath(candidate);
+          if (f instanceof TFolder2) return candidate;
+        }
+      }
+      const direct = plugin.app.vault.getAbstractFileByPath(trimmed);
+      if (direct instanceof TFolder2) return trimmed;
+      return sourceRepoRoot ? sourceRepoRoot + "/" + trimmed : trimmed;
+    }
+    function computeDisplayPath(targetPath, sourcePath) {
+      const sourceRepoRoot = getRepoRoot2(sourcePath);
+      if (sourceRepoRoot && targetPath.startsWith(sourceRepoRoot + "/")) {
+        return toRepoRelative2(targetPath, sourceRepoRoot);
+      }
+      const targetRepoRoot = getRepoRoot2(targetPath);
+      if (targetRepoRoot) {
+        const repoName = targetRepoRoot.substring(targetRepoRoot.lastIndexOf("/") + 1);
+        return repoName + "/" + toRepoRelative2(targetPath, targetRepoRoot);
+      }
+      return targetPath;
+    }
+    function fuzzyScore(query, candidate) {
+      if (!query) return 1;
+      const q = query.toLowerCase();
+      const c = candidate.toLowerCase();
+      if (c.includes(q)) return 1 + q.length / Math.max(c.length, 1);
+      let qi = 0;
+      for (let i = 0; i < c.length && qi < q.length; i++) {
+        if (c[i] === q[qi]) qi++;
+      }
+      return qi === q.length ? 0.5 : 0;
+    }
+    function createAtPathCore2(plugin) {
+      const { app } = plugin;
+      const folderTokenMemo = /* @__PURE__ */ new Map();
+      function resolveAtPathTarget(ref, sourcePath) {
+        if (ref && ref.kind === "folder") {
+          const rel2 = ref.vaultPath || (ref.displayPath || "").replace(/\/+$/, "");
+          const path2 = resolveAtPathFolderFromSource(rel2, sourcePath || "", plugin);
+          const folder = app.vault.getAbstractFileByPath(path2);
+          if (folder instanceof TFolder2) {
+            return { kind: "folder", target: folder, normalizedPath: folder.path };
+          }
+          return { kind: "missing", target: null, normalizedPath: path2 };
+        }
+        const rel = ref && (ref.displayPath || ref.vaultPath) || "";
+        if (!rel) return { kind: "missing", target: null, normalizedPath: "" };
+        const path = resolveAtPathFromSource2(rel, sourcePath || "", plugin);
+        const file = app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile2) {
+          return { kind: "file", target: file, normalizedPath: file.path };
+        }
+        return { kind: "missing", target: null, normalizedPath: path };
+      }
+      function getFileTokens(path) {
+        return plugin.getTokenCount(path);
+      }
+      function isIgnored(_vaultPath) {
+        return false;
+      }
+      async function getFolderTokens(folderPath) {
+        const folder = app.vault.getAbstractFileByPath(folderPath);
+        if (!(folder instanceof TFolder2)) return 0;
+        if (folderTokenMemo.has(folderPath)) return folderTokenMemo.get(folderPath);
+        const sizeCapBytes = (plugin.settings && plugin.settings.maxFileSizeMB ? plugin.settings.maxFileSizeMB : 5) * 1024 * 1024;
+        const tasks = [];
+        (function walk(node) {
+          for (const c of node.children) {
+            if (c instanceof TFolder2) {
+              walk(c);
+            } else if (c instanceof TFile2 && !isIgnored(c.path) && c.stat.size <= sizeCapBytes) {
+              tasks.push(getFileTokens(c.path));
+            }
+          }
+        })(folder);
+        const counts = await Promise.all(tasks);
+        const total = counts.reduce((a, b) => a + (b || 0), 0);
+        folderTokenMemo.set(folderPath, total);
+        return total;
+      }
+      function clearFolderTokenMemo(folderPath) {
+        if (folderPath) folderTokenMemo.delete(folderPath);
+        else folderTokenMemo.clear();
+      }
+      function* walkFolders(root) {
+        for (const c of root.children) {
+          if (c instanceof TFolder2) {
+            yield c;
+            yield* walkFolders(c);
+          }
+        }
+      }
+      function listAllFolders() {
+        if (plugin._allFoldersCache) return plugin._allFoldersCache;
+        const list = [...walkFolders(app.vault.getRoot())];
+        plugin._allFoldersCache = list;
+        return list;
+      }
+      function clearFoldersCache() {
+        plugin._allFoldersCache = null;
+      }
+      function enumerateFolderCandidates(query, sourcePath) {
+        const sp = sourcePath || "";
+        const sourceRepoRoot = getRepoRoot2(sp);
+        const trimmed = (query || "").replace(/^@/, "");
+        if (trimmed.endsWith("/")) {
+          const prefix = trimmed.replace(/\/+$/, "");
+          if (sourceRepoRoot) {
+            const sameRepoCandidate = sourceRepoRoot + "/" + prefix;
+            const same = app.vault.getAbstractFileByPath(sameRepoCandidate);
+            if (same instanceof TFolder2) {
+              return immediateChildren(same, sp, "same-repo");
+            }
+          }
+          const direct = app.vault.getAbstractFileByPath(prefix);
+          if (direct instanceof TFolder2) {
+            return immediateChildren(direct, sp, "vault-abs");
+          }
+          return prefixMatch(prefix, sp);
+        }
+        return fuzzyAll(trimmed, sp);
+      }
+      function immediateChildren(folder, sourcePath, mode) {
+        const out = [];
+        for (const c of folder.children) {
+          const isFolder = c instanceof TFolder2;
+          const isFile = c instanceof TFile2;
+          if (!isFolder && !isFile) continue;
+          out.push({
+            kind: isFolder ? "folder" : "file",
+            target: c,
+            display: computeDisplayPath(c.path, sourcePath) + (isFolder ? "/" : ""),
+            repoMode: mode,
+            score: 1
+          });
+        }
+        out.sort((a, b) => {
+          if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+          return a.display.localeCompare(b.display);
+        });
+        return out.slice(0, 50);
+      }
+      function prefixMatch(prefix, sourcePath) {
+        const lower = prefix.toLowerCase();
+        const folders = listAllFolders();
+        const files = app.vault.getFiles();
+        const matches = [];
+        for (const f of folders) {
+          if (f.path.toLowerCase().startsWith(lower)) {
+            matches.push({
+              kind: "folder",
+              target: f,
+              display: computeDisplayPath(f.path, sourcePath) + "/",
+              score: 1.3
+            });
+          }
+        }
+        for (const f of files) {
+          if (f.path.toLowerCase().startsWith(lower)) {
+            matches.push({
+              kind: "file",
+              target: f,
+              display: computeDisplayPath(f.path, sourcePath),
+              score: 1
+            });
+          }
+        }
+        matches.sort((a, b) => b.score - a.score || a.display.localeCompare(b.display));
+        return matches.slice(0, 50);
+      }
+      function fuzzyAll(query, sourcePath) {
+        const folders = listAllFolders();
+        const files = app.vault.getFiles();
+        const sourceRepoRoot = getRepoRoot2(sourcePath);
+        const sameRepo = [];
+        const crossRepo = [];
+        const loose = [];
+        function place(entry) {
+          const targetRepoRoot = getRepoRoot2(entry.target.path);
+          if (sourceRepoRoot && entry.target.path.startsWith(sourceRepoRoot + "/")) sameRepo.push(entry);
+          else if (targetRepoRoot) crossRepo.push(entry);
+          else loose.push(entry);
+        }
+        for (const f of folders) {
+          const display = computeDisplayPath(f.path, sourcePath);
+          const base = fuzzyScore(query, display);
+          if (!query || base > 0) {
+            place({
+              kind: "folder",
+              target: f,
+              display: display + "/",
+              score: base * 1.3
+            });
+          }
+        }
+        for (const f of files) {
+          const display = computeDisplayPath(f.path, sourcePath);
+          const base = fuzzyScore(query, display);
+          if (!query || base > 0) {
+            place({
+              kind: "file",
+              target: f,
+              display,
+              score: base
+            });
+          }
+        }
+        const all = [...sameRepo, ...crossRepo, ...loose];
+        if (query) all.sort((a, b) => b.score - a.score);
+        return all.slice(0, 50);
+      }
+      function formatAtPathInsertion(target, sourcePath, mode) {
+        const isFolder = target instanceof TFolder2;
+        const displayPath = computeDisplayPath(target.path, sourcePath || "");
+        if (isFolder) {
+          return "@" + displayPath + "/";
+        }
+        if (mode === "wikilink") {
+          return app.fileManager.generateMarkdownLink(target, sourcePath || "", "", "@" + displayPath);
+        }
+        return "@" + displayPath;
+      }
+      return {
+        resolveAtPathTarget,
+        getFileTokens,
+        getFolderTokens,
+        isIgnored,
+        enumerateFolderCandidates,
+        formatAtPathInsertion,
+        clearFolderTokenMemo,
+        clearFoldersCache,
+        listAllFolders,
+        computeDisplayPath: (t, s) => computeDisplayPath(t, s)
+      };
+    }
+    module2.exports = {
+      createAtPathCore: createAtPathCore2,
+      REPOS_SEGMENT,
+      getRepoRoot: getRepoRoot2,
+      toRepoRelative: toRepoRelative2,
+      discoverRepoRoots: discoverRepoRoots2,
+      resolveAtPathFromSource: resolveAtPathFromSource2,
+      resolveAtPathFolderFromSource,
+      computeDisplayPath
+    };
+  }
+});
+
 // src/html-app-publish.js
 var require_html_app_publish = __commonJS({
   "src/html-app-publish.js"(exports2, module2) {
@@ -8749,7 +9072,7 @@ var require_html_app_publish = __commonJS({
 });
 
 // src/main.js
-var { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 var { encode } = require_gpt_4o();
 var AtPathWidget = class extends WidgetType {
@@ -8876,6 +9199,16 @@ var { deployToVercel, ensureProject, checkProjectAvailability, slugify } = requi
 var { buildAuthShell } = require_auth_shell_builder();
 var { buildAuthFunction, buildApproveFunction } = require_auth_function_template();
 var { applySiteIconToDeployFiles, injectSiteIconIntoHtml } = require_site_icon();
+var {
+  createAtPathCore,
+  REPOS_SEGMENT: CORE_REPOS_SEGMENT,
+  getRepoRoot: coreGetRepoRoot,
+  toRepoRelative: coreToRepoRelative,
+  discoverRepoRoots: coreDiscoverRepoRoots,
+  resolveAtPathFromSource: coreResolveAtPathFromSource,
+  resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
+  computeDisplayPath: coreComputeDisplayPath
+} = require_atpath_core();
 var {
   HTML_APP_SCOPE_SINGLE_FILE,
   HTML_APP_SCOPE_FOLDER,
@@ -9048,60 +9381,10 @@ async function openFileByViewState(plugin, resolved) {
     state: { file: resolved.path }
   });
 }
-var REPOS_SEGMENT = "_repos/";
-function getRepoRoot(filePath) {
-  const idx = filePath.indexOf(REPOS_SEGMENT);
-  if (idx === -1) return "";
-  const afterRepos = filePath.substring(idx + REPOS_SEGMENT.length);
-  const slash = afterRepos.indexOf("/");
-  if (slash === -1) return "";
-  return filePath.substring(0, idx + REPOS_SEGMENT.length + slash);
-}
-function toRepoRelative(filePath, repoRoot) {
-  if (!repoRoot) return filePath;
-  return filePath.substring(repoRoot.length + 1);
-}
-function discoverRepoRoots(plugin) {
-  const now = Date.now();
-  if (plugin._repoRootsCache && now - plugin._repoRootsCacheTime < 5e3) {
-    return plugin._repoRootsCache;
-  }
-  const roots = /* @__PURE__ */ new Map();
-  for (const file of plugin.app.vault.getFiles()) {
-    const idx = file.path.indexOf(REPOS_SEGMENT);
-    if (idx === -1) continue;
-    const afterRepos = file.path.substring(idx + REPOS_SEGMENT.length);
-    const slash = afterRepos.indexOf("/");
-    if (slash === -1) continue;
-    const repoName = afterRepos.substring(0, slash);
-    if (!roots.has(repoName)) {
-      roots.set(repoName, file.path.substring(0, idx + REPOS_SEGMENT.length + slash));
-    }
-  }
-  plugin._repoRootsCache = roots;
-  plugin._repoRootsCacheTime = now;
-  return roots;
-}
-function resolveAtPathFromSource(relPath, sourceFilePath, plugin) {
-  const sourceRepoRoot = getRepoRoot(sourceFilePath);
-  if (sourceRepoRoot) {
-    const candidate = sourceRepoRoot + "/" + relPath;
-    if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
-  }
-  const slashIdx = relPath.indexOf("/");
-  if (slashIdx !== -1) {
-    const firstSegment = relPath.substring(0, slashIdx);
-    const rest = relPath.substring(slashIdx + 1);
-    const repoRoots = discoverRepoRoots(plugin);
-    const repoRoot = repoRoots.get(firstSegment);
-    if (repoRoot) {
-      const candidate = repoRoot + "/" + rest;
-      if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
-    }
-  }
-  if (plugin.app.vault.getAbstractFileByPath(relPath)) return relPath;
-  return sourceRepoRoot ? sourceRepoRoot + "/" + relPath : relPath;
-}
+var getRepoRoot = coreGetRepoRoot;
+var toRepoRelative = coreToRepoRelative;
+var discoverRepoRoots = coreDiscoverRepoRoots;
+var resolveAtPathFromSource = coreResolveAtPathFromSource;
 function resolveAtPath(relPath, plugin) {
   const activeFile = plugin.app.workspace.getActiveFile();
   if (!activeFile) return relPath;
@@ -10056,6 +10339,7 @@ var AtPathPlugin = class extends Plugin {
     this._rafScheduled = false;
     this._lastEditorView = null;
     this._statusBarGen = 0;
+    this.core = createAtPathCore(this);
     this.registerEditorSuggest(new AtPathSuggest(this));
     this.registerEditorExtension(buildAtPathViewPlugin(this));
     this.registerEditorExtension(buildWikilinkViewPlugin(this));
@@ -10065,19 +10349,38 @@ var AtPathPlugin = class extends Plugin {
     this.updateStatusBar();
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile) this.tokenCache.delete(file.path);
+        if (file instanceof TFile) {
+          this.tokenCache.delete(file.path);
+          if (this.core) this.core.clearFolderTokenMemo();
+        }
         this._debouncedUpdateStatusBar();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile) this.tokenCache.delete(file.path);
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
         this._debouncedUpdateStatusBar();
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.tokenCache.delete(oldPath);
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
         void this.updateAtPathReferences(file, oldPath);
         let movedPublishedState = false;
         if (this.settings.publishedPages[oldPath]) {

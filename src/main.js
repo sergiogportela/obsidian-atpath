@@ -1,7 +1,7 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
@@ -96,6 +96,16 @@ const { deployToVercel, ensureProject, checkProjectAvailability, slugify } = req
 const { buildAuthShell } = require("./auth-shell-builder");
 const { buildAuthFunction, buildApproveFunction } = require("./auth-function-template");
 const { applySiteIconToDeployFiles, injectSiteIconIntoHtml } = require("./site-icon");
+const {
+  createAtPathCore,
+  REPOS_SEGMENT: CORE_REPOS_SEGMENT,
+  getRepoRoot: coreGetRepoRoot,
+  toRepoRelative: coreToRepoRelative,
+  discoverRepoRoots: coreDiscoverRepoRoots,
+  resolveAtPathFromSource: coreResolveAtPathFromSource,
+  resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
+  computeDisplayPath: coreComputeDisplayPath,
+} = require("./atpath-core");
 const {
   HTML_APP_SCOPE_SINGLE_FILE,
   HTML_APP_SCOPE_FOLDER,
@@ -301,73 +311,15 @@ async function openFileByViewState(plugin, resolved) {
 }
 
 // ─── A) Repo root detection ──────────────────────────────────────────
+// Pure helpers live in src/atpath-core.js so Plan A (editor) and Plan B
+// (file explorer) share one implementation. Local aliases below preserve
+// the unqualified names used throughout this file.
 
-const REPOS_SEGMENT = "_repos/";
-
-function getRepoRoot(filePath) {
-  const idx = filePath.indexOf(REPOS_SEGMENT);
-  if (idx === -1) return "";
-  const afterRepos = filePath.substring(idx + REPOS_SEGMENT.length);
-  const slash = afterRepos.indexOf("/");
-  if (slash === -1) return "";
-  return filePath.substring(0, idx + REPOS_SEGMENT.length + slash);
-}
-
-function toRepoRelative(filePath, repoRoot) {
-  if (!repoRoot) return filePath;
-  return filePath.substring(repoRoot.length + 1);
-}
-
-function discoverRepoRoots(plugin) {
-  const now = Date.now();
-  if (plugin._repoRootsCache && now - plugin._repoRootsCacheTime < 5000) {
-    return plugin._repoRootsCache;
-  }
-  const roots = new Map();
-  for (const file of plugin.app.vault.getFiles()) {
-    const idx = file.path.indexOf(REPOS_SEGMENT);
-    if (idx === -1) continue;
-    const afterRepos = file.path.substring(idx + REPOS_SEGMENT.length);
-    const slash = afterRepos.indexOf("/");
-    if (slash === -1) continue;
-    const repoName = afterRepos.substring(0, slash);
-    if (!roots.has(repoName)) {
-      roots.set(repoName, file.path.substring(0, idx + REPOS_SEGMENT.length + slash));
-    }
-  }
-  plugin._repoRootsCache = roots;
-  plugin._repoRootsCacheTime = now;
-  return roots;
-}
-
-function resolveAtPathFromSource(relPath, sourceFilePath, plugin) {
-  const sourceRepoRoot = getRepoRoot(sourceFilePath);
-
-  // 1. Same-repo
-  if (sourceRepoRoot) {
-    const candidate = sourceRepoRoot + "/" + relPath;
-    if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
-  }
-
-  // 2. Cross-repo: first segment may be a repo name
-  const slashIdx = relPath.indexOf("/");
-  if (slashIdx !== -1) {
-    const firstSegment = relPath.substring(0, slashIdx);
-    const rest = relPath.substring(slashIdx + 1);
-    const repoRoots = discoverRepoRoots(plugin);
-    const repoRoot = repoRoots.get(firstSegment);
-    if (repoRoot) {
-      const candidate = repoRoot + "/" + rest;
-      if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
-    }
-  }
-
-  // 3. Vault-relative
-  if (plugin.app.vault.getAbstractFileByPath(relPath)) return relPath;
-
-  // 4. Fallback: same-repo concat (preserves old behavior)
-  return sourceRepoRoot ? sourceRepoRoot + "/" + relPath : relPath;
-}
+const REPOS_SEGMENT = CORE_REPOS_SEGMENT;
+const getRepoRoot = coreGetRepoRoot;
+const toRepoRelative = coreToRepoRelative;
+const discoverRepoRoots = coreDiscoverRepoRoots;
+const resolveAtPathFromSource = coreResolveAtPathFromSource;
 
 function resolveAtPath(relPath, plugin) {
   const activeFile = plugin.app.workspace.getActiveFile();
@@ -1570,6 +1522,7 @@ class AtPathPlugin extends Plugin {
     this._rafScheduled = false;
     this._lastEditorView = null;
     this._statusBarGen = 0;
+    this.core = createAtPathCore(this);
 
     this.registerEditorSuggest(new AtPathSuggest(this));
     this.registerEditorExtension(buildAtPathViewPlugin(this));
@@ -1584,19 +1537,38 @@ class AtPathPlugin extends Plugin {
     // Cache invalidation via vault events
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile) this.tokenCache.delete(file.path);
+        if (file instanceof TFile) {
+          this.tokenCache.delete(file.path);
+          if (this.core) this.core.clearFolderTokenMemo();
+        }
         this._debouncedUpdateStatusBar();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile) this.tokenCache.delete(file.path);
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
         this._debouncedUpdateStatusBar();
       })
     );
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
         this.tokenCache.delete(oldPath);
+        if (this.core) {
+          if (file instanceof TFolder) this.core.clearFoldersCache();
+          this.core.clearFolderTokenMemo();
+        }
         void this.updateAtPathReferences(file, oldPath);
         let movedPublishedState = false;
         // Update publishedPages key if renamed
