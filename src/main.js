@@ -2173,19 +2173,14 @@ class AtPathPlugin extends Plugin {
     let linkedTotal = 0;
 
     for (const ref of refs) {
-      let normalizedPath;
-      let kind;
+      const resolved = this.core.resolveAtPathTarget(ref, activeFile.path);
+      if (resolved.kind === "missing") continue;
+      const normalizedPath = resolved.normalizedPath;
+      if (seen.has(normalizedPath)) continue;
+      seen.add(normalizedPath);
+
       let tokens = null;
-      if (ref.kind === "folder") {
-        const resolved = this.core.resolveAtPathTarget(
-          { kind: "folder", vaultPath: ref.vaultPath || ref.displayPath },
-          activeFile.path
-        );
-        if (resolved.kind !== "folder") continue;
-        normalizedPath = resolved.normalizedPath;
-        if (seen.has(normalizedPath)) continue;
-        seen.add(normalizedPath);
-        kind = "folder";
+      if (resolved.kind === "folder") {
         const cached = this.core.getCachedFolderTokens(normalizedPath);
         if (cached != null) tokens = cached;
         else {
@@ -2196,19 +2191,14 @@ class AtPathPlugin extends Plugin {
             tokens = 0;
           }
         }
-        if (gen !== this._statusBarGen) return;
       } else {
-        normalizedPath = ref.vaultPath
-          || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
-        if (seen.has(normalizedPath)) continue;
-        seen.add(normalizedPath);
-        kind = "file";
         tokens = await this.getTokenCount(normalizedPath);
-        if (gen !== this._statusBarGen) return;
       }
+      if (gen !== this._statusBarGen) return;
+
       if (tokens != null) {
         linkedTotal += tokens;
-        linkedTargets.push({ kind, path: normalizedPath, tokens });
+        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens });
       }
     }
 
@@ -2487,25 +2477,25 @@ class AtPathPlugin extends Plugin {
     const failed = [];
 
     for (const ref of refs) {
-      const vaultPath = ref.vaultPath || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
-      if (seen.has(vaultPath)) continue;
-      seen.add(vaultPath);
-
       // Folder branch comes in step 10 — for now, skip folder refs when copying.
       if (ref.kind === "folder") continue;
+
+      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
+      const vaultPath = resolvedRef.normalizedPath;
+      if (!vaultPath || seen.has(vaultPath)) continue;
+      seen.add(vaultPath);
 
       if (filterPaths && !filterPaths.has(vaultPath)) continue;
 
       const ext = ref.displayPath.split(".").pop().toLowerCase();
       if (BINARY_EXTENSIONS.has(ext)) continue;
 
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (!(file instanceof TFile)) {
+      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) {
         failed.push(ref.displayPath);
         continue;
       }
       try {
-        const fileContent = await this.app.vault.cachedRead(file);
+        const fileContent = await this.app.vault.cachedRead(resolvedRef.target);
         resolved.push({ relPath: ref.displayPath, content: fileContent });
       } catch (e) {
         failed.push(ref.displayPath);
@@ -2591,18 +2581,18 @@ class AtPathPlugin extends Plugin {
     for (const ref of refs) {
       if (ref.kind === "folder") continue; // HTML publish inlines files only
       const relPath = ref.displayPath;
-      const vaultPath = ref.vaultPath || resolveAtPathFromSource(relPath, activeFile.path, this);
-      if (seen.has(vaultPath)) continue;
+      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
+      const vaultPath = resolvedRef.normalizedPath;
+      if (!vaultPath || seen.has(vaultPath)) continue;
       seen.add(vaultPath);
 
       const ext = relPath.split(".").pop().toLowerCase();
       if (BINARY_EXTENSIONS.has(ext)) continue;
 
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (!(file instanceof TFile)) continue;
+      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) continue;
 
       try {
-        const fileContent = await this.app.vault.cachedRead(file);
+        const fileContent = await this.app.vault.cachedRead(resolvedRef.target);
         atPathFiles.push({ relPath, content: fileContent });
       } catch (_) { /* skip */ }
     }
