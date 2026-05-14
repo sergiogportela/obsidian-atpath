@@ -9870,6 +9870,48 @@ function buildWikilinkViewPlugin(plugin) {
     }
   );
 }
+function buildBufferCountListener(plugin) {
+  let pendingTimer = null;
+  let lastDoc = null;
+  function scheduleDocRetoken(view) {
+    if (pendingTimer) return;
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      try {
+        const text = view.state.doc.toString();
+        plugin._noteBufferTokens = encode(text).length;
+      } catch (err) {
+        console.warn("[atpath] buffer token count failed", err);
+      }
+      plugin._repaintStatusBarFromBuffer();
+    }, 80);
+  }
+  function recomputeSelection(state) {
+    let total = 0;
+    for (const r of state.selection.ranges) {
+      if (r.empty) continue;
+      try {
+        total += encode(state.sliceDoc(r.from, r.to)).length;
+      } catch (err) {
+        console.warn("[atpath] selection token count failed", err);
+        return;
+      }
+    }
+    plugin._selectionTokens = total;
+    plugin._repaintStatusBarFromBuffer();
+  }
+  return EditorView.updateListener.of((update) => {
+    if (update.docChanged) {
+      if (lastDoc !== update.state.doc) {
+        lastDoc = update.state.doc;
+        scheduleDocRetoken(update.view);
+      }
+    }
+    if (update.selectionSet) {
+      recomputeSelection(update.state);
+    }
+  });
+}
 function registerPostProcessor(plugin) {
   plugin.registerMarkdownPostProcessor((el, ctx) => {
     const internalLinks = el.querySelectorAll("a.internal-link");
@@ -10577,6 +10619,9 @@ var AtPathPlugin = class extends Plugin {
     this.registerEditorSuggest(new AtPathSuggest(this));
     this.registerEditorExtension(buildAtPathViewPlugin(this));
     this.registerEditorExtension(buildWikilinkViewPlugin(this));
+    if (!Platform.isMobile) {
+      this.registerEditorExtension(buildBufferCountListener(this));
+    }
     registerPostProcessor(this);
     if (!Platform.isMobile) {
       this.noteBarEl = this.addStatusBarItem();
@@ -10649,6 +10694,16 @@ var AtPathPlugin = class extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
+        this._noteBufferTokens = 0;
+        this._selectionTokens = 0;
+        this.updateStatusBar();
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => {
+        this._noteBufferTokens = 0;
+        this._selectionTokens = 0;
+        if (this.core) this.core.clearFolderTokenMemo();
         this.updateStatusBar();
       })
     );
@@ -10852,6 +10907,16 @@ var AtPathPlugin = class extends Plugin {
     this._linkedTargets = linkedTargets;
     this._lastLinkedTotal = linkedTotal;
     this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length);
+  }
+  _repaintStatusBarFromBuffer() {
+    if (!this.noteBarEl || !this.linkedBarEl) return;
+    if (!this.settings.showTokenCounts) return;
+    const linkedCount = (this._linkedTargets || []).length;
+    this._renderStatusBarSegments(
+      this._noteBufferTokens || 0,
+      this._lastLinkedTotal || 0,
+      linkedCount
+    );
   }
   _renderStatusBarSegments(noteTokens, linkedTotal, linkedCount) {
     if (!this.noteBarEl || !this.linkedBarEl) return;
