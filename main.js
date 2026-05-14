@@ -9253,6 +9253,9 @@ var DEFAULT_SETTINGS = {
   linkFormat: "legacy",
   showTokenCounts: true,
   maxFileSizeMB: 5,
+  statusBarShowSelection: true,
+  suggestFolders: true,
+  enableDragDropAtPath: true,
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
@@ -10296,6 +10299,26 @@ var AtPathSettingTab = class extends PluginSettingTab {
           this.plugin.settings.maxFileSizeMB = num;
           await this.plugin.saveSettings();
         }
+      })
+    );
+    new Setting(containerEl).setName("Show selection tokens in status bar").setDesc("When you select text, the note segment shows `Sel: <selected> / <total>`. Disable to always show the note total only.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.statusBarShowSelection !== false).onChange(async (value) => {
+        this.plugin.settings.statusBarShowSelection = value;
+        await this.plugin.saveSettings();
+        this.plugin.updateStatusBar();
+      })
+    );
+    new Setting(containerEl).setName("Suggest folders in autocomplete").setDesc("Include folder candidates in @-autocomplete. Folders always insert as `@folder/` regardless of the wikilink setting (wikilink mode is file-only).").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.suggestFolders !== false).onChange(async (value) => {
+        this.plugin.settings.suggestFolders = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new Setting(containerEl).setName("Drag-and-drop @path inserts").setDesc("Dragging a file or folder from the file explorer into the editor inserts an `@path` ref at the drop point. Disable to restore Obsidian's default drag behavior (image embed, link-on-drop, etc.).").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.enableDragDropAtPath !== false).onChange(async (value) => {
+        this.plugin.settings.enableDragDropAtPath = value;
+        await this.plugin.saveSettings();
+        this.plugin.reconfigureDragDrop();
       })
     );
     new Setting(containerEl).setHeading().setName("Publishing");
