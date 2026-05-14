@@ -1,0 +1,17 @@
+**Findings**
+
+1. **High: The copy-note entry points can still recreate the freeze.**  
+   Fix E only scopes the cap gate to “Copy selected” / “Copy selected + note” rows, but `copyNoteWithAtPaths()` is also called with no path filter from the note status segment, the command, and the tray menu: [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2232), [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2359), [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2401). In that mode it will still walk every selected folder descendant synchronously before reading/tokenizing files: [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:3093).  
+   Suggested fix: apply the same `maxFolderFiles` / pending / over-cap skip defensively inside `copyNoteWithAtPaths()` for folder refs even when `opts.paths` is absent, or explicitly document that general copy is intentionally out of scope.
+
+2. **Medium: Status-bar scheduled folder fetches can starve CM6 decoration refreshes.**  
+   The proposed status-bar path schedules uncached folders with `this.scheduleFolderTokenFetch(normalizedPath, this._lastEditorView)` ([005_status_slowness_fix.md](/Users/sergio/Documents/code/obsidian_plugin_atpath/_work_units/improvements/plans/005_status_slowness_fix.md:321)). If `_lastEditorView` is `null` or stale, the scheduler records that value and dedupes later calls that might have a real `view`: [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2490). On completion, `_scheduleRefresh()` only dispatches when `_lastEditorView` is set: [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2520). Result: the status bar can update while inline folder decorations remain stuck on `…` until another editor transaction.  
+   Suggested fix: pass the active markdown CM6 view from `updateStatusBar` when available, and update `_lastEditorView` even on deduped scheduled fetches when a non-null view is provided.
+
+3. **Medium: The primary verification path is currently non-executable as written.**  
+   The plan tells the user to enable perf with `localStorage.atpath_perf = "1"` ([005_status_slowness_fix.md](/Users/sergio/Documents/code/obsidian_plugin_atpath/_work_units/improvements/plans/005_status_slowness_fix.md:520)), but the shipped instrumentation checks `localStorage.getItem("atpath-perf") === "1"`: [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:10), [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:16). Also, acceptance requires `getFolderTokens.encoded` and `getFolderTokens.walkedFiles` counters ([005_status_slowness_fix.md](/Users/sergio/Documents/code/obsidian_plugin_atpath/_work_units/improvements/plans/005_status_slowness_fix.md:622)), but `src/atpath-core.js` currently has no `ATPATH_PERF` plumbing around `getFolderTokens`.  
+   Suggested fix: update the plan to use `localStorage.setItem("atpath-perf", "1")`, and add explicit implementation steps for folder-walk / encoded / over-cap instrumentation or change the acceptance criteria to counters that actually exist.
+
+**Verdict**
+
+The revised plan is directionally sound, but I would not hand it to a fresh implementation agent until the copy-note cap and verification gaps are fixed.
