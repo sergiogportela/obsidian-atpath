@@ -381,6 +381,7 @@ const getRepoRoot = coreGetRepoRoot;
 const toRepoRelative = coreToRepoRelative;
 const discoverRepoRoots = coreDiscoverRepoRoots;
 const resolveAtPathFromSource = coreResolveAtPathFromSource;
+const resolveAtPathFolderFromSource = coreResolveAtPathFolderFromSource;
 
 function resolveAtPath(relPath, plugin) {
   const activeFile = plugin.app.workspace.getActiveFile();
@@ -582,7 +583,7 @@ function scanAtPathRefs(content, app, sourcePath) {
   const results = [];
   const excluded = buildExcludedRanges(content);
 
-  // Pass 1: wikilink format
+  // Pass 1: wikilink format (file refs only — wikilinks always resolve to files)
   const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
   let m;
   while ((m = wlRe.exec(content)) !== null) {
@@ -593,6 +594,7 @@ function scanAtPathRefs(content, app, sourcePath) {
       if (resolved) vaultPath = resolved.path;
     }
     results.push({
+      kind: "file",
       vaultPath,
       displayPath: m[2],
       format: "wikilink",
@@ -602,15 +604,42 @@ function scanAtPathRefs(content, app, sourcePath) {
     });
   }
 
-  // Pass 2: legacy format — skip matches that overlap wikilink hits
+  // Pass 2: folder refs (legacy @path/ form). Runs before the legacy file
+  // pass so the greedy file regex can't claim a token that's part of an
+  // @path/ folder ref (e.g. `@foo.md/` would otherwise match as @foo.md).
+  const folderRe = new RegExp(AT_PATH_FOLDER_RE.source, AT_PATH_FOLDER_RE.flags);
+  while ((m = folderRe.exec(content)) !== null) {
+    const lead = m[1] || "";
+    const relPath = m[2];
+    const start = m.index + lead.length;
+    const end = m.index + m[0].length;
+    if (isInExcludedRange(start, excluded)) continue;
+    const overlaps = results.some(r => start < r.end && end > r.start);
+    if (overlaps) continue;
+    results.push({
+      kind: "folder",
+      vaultPath: relPath,
+      displayPath: relPath + "/",
+      format: "legacy",
+      fullMatch: "@" + relPath + "/",
+      start,
+      end,
+    });
+  }
+
+  // Pass 3: legacy file format — skip matches that overlap wikilink or
+  // folder hits, and (defense-in-depth) reject matches whose end is
+  // immediately followed by `/` (would belong to a folder ref).
   const legacyRe = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
   while ((m = legacyRe.exec(content)) !== null) {
     const start = m.index;
     const end = start + m[0].length;
     if (isInExcludedRange(start, excluded)) continue;
+    if (content.charAt(end) === "/") continue;
     const overlaps = results.some(r => start < r.end && end > r.start);
     if (overlaps) continue;
     results.push({
+      kind: "file",
       vaultPath: null, // caller resolves via resolveAtPathFromSource
       displayPath: m[1],
       format: "legacy",
@@ -1688,7 +1717,7 @@ class MigrationPreviewModal extends Modal {
 
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
       let resolvable = 0;
       let unresolvable = 0;
@@ -2560,6 +2589,7 @@ class AtPathPlugin extends Plugin {
     const atPathFiles = [];
 
     for (const ref of refs) {
+      if (ref.kind === "folder") continue; // HTML publish inlines files only
       const relPath = ref.displayPath;
       const vaultPath = ref.vaultPath || resolveAtPathFromSource(relPath, activeFile.path, this);
       if (seen.has(vaultPath)) continue;
@@ -3112,7 +3142,7 @@ class AtPathPlugin extends Plugin {
 
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
       filesAffected++;
       for (const ref of refs) {
@@ -3143,7 +3173,7 @@ class AtPathPlugin extends Plugin {
 
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.read(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
 
       let updated = content;

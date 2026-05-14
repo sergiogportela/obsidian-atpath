@@ -9613,6 +9613,7 @@ function scanAtPathRefs(content, app, sourcePath) {
       if (resolved) vaultPath = resolved.path;
     }
     results.push({
+      kind: "file",
       vaultPath,
       displayPath: m[2],
       format: "wikilink",
@@ -9621,14 +9622,35 @@ function scanAtPathRefs(content, app, sourcePath) {
       end: m.index + m[0].length
     });
   }
+  const folderRe = new RegExp(AT_PATH_FOLDER_RE.source, AT_PATH_FOLDER_RE.flags);
+  while ((m = folderRe.exec(content)) !== null) {
+    const lead = m[1] || "";
+    const relPath = m[2];
+    const start = m.index + lead.length;
+    const end = m.index + m[0].length;
+    if (isInExcludedRange(start, excluded)) continue;
+    const overlaps = results.some((r) => start < r.end && end > r.start);
+    if (overlaps) continue;
+    results.push({
+      kind: "folder",
+      vaultPath: relPath,
+      displayPath: relPath + "/",
+      format: "legacy",
+      fullMatch: "@" + relPath + "/",
+      start,
+      end
+    });
+  }
   const legacyRe = new RegExp(AT_PATH_RE.source, AT_PATH_RE.flags);
   while ((m = legacyRe.exec(content)) !== null) {
     const start = m.index;
     const end = start + m[0].length;
     if (isInExcludedRange(start, excluded)) continue;
+    if (content.charAt(end) === "/") continue;
     const overlaps = results.some((r) => start < r.end && end > r.start);
     if (overlaps) continue;
     results.push({
+      kind: "file",
       vaultPath: null,
       // caller resolves via resolveAtPathFromSource
       displayPath: m[1],
@@ -10504,7 +10526,7 @@ var MigrationPreviewModal = class extends Modal {
     const fileResults = [];
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
       let resolvable = 0;
       let unresolvable = 0;
@@ -11244,6 +11266,7 @@ var AtPathPlugin = class extends Plugin {
     const seen = /* @__PURE__ */ new Set();
     const atPathFiles = [];
     for (const ref of refs) {
+      if (ref.kind === "folder") continue;
       const relPath = ref.displayPath;
       const vaultPath = ref.vaultPath || resolveAtPathFromSource(relPath, activeFile.path, this);
       if (seen.has(vaultPath)) continue;
@@ -11710,7 +11733,7 @@ var AtPathPlugin = class extends Plugin {
     let filesAffected = 0;
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
       filesAffected++;
       for (const ref of refs) {
@@ -11740,7 +11763,7 @@ var AtPathPlugin = class extends Plugin {
     let filesModified = 0;
     for (const mdFile of mdFiles) {
       const content = await this.app.vault.read(mdFile);
-      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy");
+      const refs = scanAtPathRefs(content).filter((r) => r.format === "legacy" && r.kind !== "folder");
       if (refs.length === 0) continue;
       let updated = content;
       for (let i = refs.length - 1; i >= 0; i--) {
