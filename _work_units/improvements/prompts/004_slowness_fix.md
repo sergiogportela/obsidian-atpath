@@ -1,0 +1,3 @@
+@_work_units/improvements/plans/004_status_slowness_diagnosis.md
+
+  Obsidian is crashing and extremely slow. We need to diagnose the correct root causes before doing anything else. After we find out the root causes, we go for a plan to solve this.    Put on an army of agents to find out the root cause, and if necessary, tell me what you need from me, like what tests do you need me to do. I would like you to have access to some logs of Obsidian. Go find where they are, and I can move the tool while you inspect the logs. Maybe this is the best way. Not sure. You're the expert here.
