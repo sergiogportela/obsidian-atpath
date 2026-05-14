@@ -8618,6 +8618,14 @@ var require_atpath_core = __commonJS({
     function createAtPathCore2(plugin) {
       const { app } = plugin;
       const folderTokenMemo = /* @__PURE__ */ new Map();
+      const folderTokenInflight = /* @__PURE__ */ new Map();
+      let folderTokenEpoch = 0;
+      function getPerf() {
+        if (typeof window !== "undefined" && window.__atpath_perf) return window.__atpath_perf;
+        return { inc: () => {
+        }, record: () => {
+        }, time: (_l, fn) => fn(), timeAsync: async (_l, fn) => fn(), enabled: false };
+      }
       function resolveAtPathTarget(ref, sourcePath) {
         if (ref && ref.kind === "folder") {
           const rel2 = ref.vaultPath || (ref.displayPath || "").replace(/\/+$/, "");
@@ -8644,29 +8652,83 @@ var require_atpath_core = __commonJS({
         return false;
       }
       async function getFolderTokens(folderPath) {
+        const perf = getPerf();
+        perf.inc("getFolderTokens.calls");
         const folder = app.vault.getAbstractFileByPath(folderPath);
         if (!(folder instanceof TFolder2)) return 0;
         if (folderTokenMemo.has(folderPath)) return folderTokenMemo.get(folderPath);
-        const sizeCapBytes = (plugin.settings && plugin.settings.maxFileSizeMB ? plugin.settings.maxFileSizeMB : 5) * 1024 * 1024;
-        const tasks = [];
-        (function walk(node) {
-          for (const c of node.children) {
-            if (c instanceof TFolder2) {
-              walk(c);
-            } else if (c instanceof TFile2 && !isIgnored(c.path) && c.stat.size <= sizeCapBytes) {
-              tasks.push(getFileTokens(c.path));
+        const existing = folderTokenInflight.get(folderPath);
+        if (existing) return existing;
+        const promise = (async () => {
+          const settings = plugin.settings || {};
+          const sizeCapBytes = (settings.maxFileSizeMB || 5) * 1024 * 1024;
+          const maxFiles = settings.maxFolderFiles || 500;
+          const batchSize = settings.folderEncodeBatchSize || 1;
+          const startEpoch = folderTokenEpoch;
+          const paths = [];
+          let overCap = false;
+          (function walk(node) {
+            if (overCap) return;
+            for (const c of node.children) {
+              if (overCap) return;
+              if (c instanceof TFolder2) {
+                walk(c);
+              } else if (c instanceof TFile2 && !isIgnored(c.path)) {
+                perf.inc("getFolderTokens.walkedFiles");
+                if (c.stat.size > sizeCapBytes) {
+                  perf.inc("getFolderTokens.skippedTooLarge");
+                  continue;
+                }
+                paths.push(c.path);
+                if (paths.length > maxFiles) {
+                  overCap = true;
+                  return;
+                }
+              }
+            }
+          })(folder);
+          if (overCap) {
+            perf.inc("getFolderTokens.overCap");
+            const sentinel = { overCap: true, fileCount: paths.length };
+            if (folderTokenEpoch === startEpoch) folderTokenMemo.set(folderPath, sentinel);
+            return sentinel;
+          }
+          let total = 0;
+          for (let i = 0; i < paths.length; i += batchSize) {
+            const slice = paths.slice(i, i + batchSize);
+            const counts = await perf.timeAsync(
+              "getFolderTokens.batch",
+              () => Promise.all(slice.map((p) => {
+                perf.inc("getFolderTokens.encoded");
+                const f = app.vault.getAbstractFileByPath(p);
+                if (f && f.stat) {
+                  const sz = f.stat.size;
+                  const bucket = sz < 1024 ? "lt1k" : sz < 5 * 1024 ? "1-5k" : sz < 20 * 1024 ? "5-20k" : sz < 100 * 1024 ? "20-100k" : "100k+";
+                  perf.inc("getFolderTokens.encodeSize." + bucket);
+                }
+                return getFileTokens(p);
+              }))
+            );
+            for (const n of counts) total += n || 0;
+            if (i + batchSize < paths.length) {
+              await new Promise((r) => setTimeout(r, 0));
             }
           }
-        })(folder);
-        const counts = await Promise.all(tasks);
-        const total = counts.reduce((a, b) => a + (b || 0), 0);
-        folderTokenMemo.set(folderPath, total);
-        return total;
+          if (folderTokenEpoch === startEpoch) folderTokenMemo.set(folderPath, total);
+          return total;
+        })();
+        folderTokenInflight.set(folderPath, promise);
+        try {
+          return await promise;
+        } finally {
+          folderTokenInflight.delete(folderPath);
+        }
       }
       function getCachedFolderTokens(folderPath) {
         return folderTokenMemo.has(folderPath) ? folderTokenMemo.get(folderPath) : null;
       }
       function clearFolderTokenMemo(folderPath) {
+        folderTokenEpoch++;
         if (folderPath) folderTokenMemo.delete(folderPath);
         else folderTokenMemo.clear();
       }
@@ -9080,6 +9142,72 @@ var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTa
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 var { Compartment } = require("@codemirror/state");
 var { encode } = require_gpt_4o();
+var ATPATH_PERF = (() => {
+  let enabled = false;
+  try {
+    enabled = typeof window !== "undefined" && !!window.localStorage && window.localStorage.getItem("atpath-perf") === "1";
+  } catch (_) {
+  }
+  const counts = /* @__PURE__ */ new Map();
+  const times = /* @__PURE__ */ new Map();
+  const bump = (label, dt) => {
+    counts.set(label, (counts.get(label) || 0) + 1);
+    if (dt != null) times.set(label, (times.get(label) || 0) + dt);
+  };
+  const api = {
+    enabled,
+    inc(label) {
+      if (enabled) bump(label, null);
+    },
+    record(label, dt) {
+      if (enabled) bump(label, dt);
+    },
+    time(label, fn) {
+      if (!enabled) return fn();
+      const t0 = performance.now();
+      try {
+        return fn();
+      } finally {
+        bump(label, performance.now() - t0);
+      }
+    },
+    async timeAsync(label, fn) {
+      if (!enabled) return fn();
+      const t0 = performance.now();
+      try {
+        return await fn();
+      } finally {
+        bump(label, performance.now() - t0);
+      }
+    },
+    dump() {
+      const rows = [];
+      for (const [k, n] of counts) {
+        const ms = times.get(k);
+        rows.push({
+          label: k,
+          count: n,
+          totalMs: ms != null ? Number(ms.toFixed(1)) : null,
+          avgMs: ms != null && n > 0 ? Number((ms / n).toFixed(2)) : null
+        });
+      }
+      rows.sort((a, b) => (b.totalMs || 0) - (a.totalMs || 0));
+      console.warn("[atpath-perf] dump (sorted by totalMs)", rows);
+      counts.clear();
+      times.clear();
+      return rows;
+    }
+  };
+  if (enabled && typeof window !== "undefined") {
+    try {
+      window.__atpath_perf = api;
+      window.__atpath_perf_dump = () => api.dump();
+      console.warn("[atpath-perf] enabled. Call window.__atpath_perf_dump() to print + reset.");
+    } catch (_) {
+    }
+  }
+  return api;
+})();
 var AtPathWidget = class extends WidgetType {
   constructor(fullMatch, path, tokenCount) {
     super();
@@ -9222,6 +9350,12 @@ function formatTokens(n) {
   if (n < 1e4) return (n / 1e3).toFixed(1) + "k";
   return Math.round(n / 1e3) + "k";
 }
+function formatLinkedTargetCount(t) {
+  if (!t) return "0";
+  if (t.pending) return "\u2026";
+  if (t.overCap) return "> " + t.overCap.fileCount + " files";
+  return formatTokens(t.tokens || 0);
+}
 var { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require_html_builder();
 var { deployToVercel, ensureProject, checkProjectAvailability, slugify } = require_vercel_api();
 var { buildAuthShell } = require_auth_shell_builder();
@@ -9253,6 +9387,8 @@ var DEFAULT_SETTINGS = {
   linkFormat: "legacy",
   showTokenCounts: true,
   maxFileSizeMB: 5,
+  maxFolderFiles: 500,
+  folderEncodeBatchSize: 1,
   statusBarShowSelection: true,
   suggestFolders: true,
   enableDragDropAtPath: true,
@@ -9720,8 +9856,14 @@ function buildAtPathViewPlugin(plugin) {
           );
           if (resolved.kind === "folder") {
             const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
-            if (cached != null) tokenStr = formatTokens(cached);
-            else plugin.scheduleFolderTokenFetch(resolved.normalizedPath, view);
+            if (cached == null) {
+              plugin.scheduleFolderTokenFetch(resolved.normalizedPath, view);
+              tokenStr = "\u2026";
+            } else if (cached && typeof cached === "object" && cached.overCap) {
+              tokenStr = formatLinkedTargetCount({ overCap: cached });
+            } else {
+              tokenStr = formatTokens(cached);
+            }
           }
         }
         if (selectionOverlaps(absStart, absEnd)) {
@@ -9780,10 +9922,18 @@ function buildAtPathViewPlugin(plugin) {
   }
   return ViewPlugin.define(
     (view) => ({
-      decorations: buildDecorations(view),
+      decorations: ATPATH_PERF.time("vp.atpath.buildDecorations.init", () => buildDecorations(view)),
       update(update) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet || plugin.tokenCacheDirty) {
-          this.decorations = buildDecorations(update.view);
+        ATPATH_PERF.inc("vp.atpath.update.calls");
+        const triggers = [];
+        if (update.docChanged) triggers.push("doc");
+        if (update.viewportChanged) triggers.push("vp");
+        if (update.selectionSet) triggers.push("sel");
+        if (plugin.tokenCacheDirty) triggers.push("dirty");
+        if (triggers.length > 0) {
+          for (const t of triggers) ATPATH_PERF.inc("vp.atpath.update.trigger." + t);
+          ATPATH_PERF.inc("vp.atpath.rebuild");
+          this.decorations = ATPATH_PERF.time("vp.atpath.buildDecorations", () => buildDecorations(update.view));
           plugin.tokenCacheDirty = false;
         }
       }
@@ -9880,13 +10030,19 @@ function buildWikilinkViewPlugin(plugin) {
   });
   return ViewPlugin.define(
     (view) => ({
-      decorations: decorator.createDeco(view),
+      decorations: ATPATH_PERF.time("vp.wikilink.createDeco.init", () => decorator.createDeco(view)),
       update(update) {
+        ATPATH_PERF.inc("vp.wikilink.update.calls");
+        if (update.docChanged) ATPATH_PERF.inc("vp.wikilink.update.trigger.doc");
+        if (update.selectionSet) ATPATH_PERF.inc("vp.wikilink.update.trigger.sel");
+        if (plugin.tokenCacheDirty) ATPATH_PERF.inc("vp.wikilink.update.trigger.dirty");
         if (plugin.tokenCacheDirty || update.selectionSet) {
-          this.decorations = decorator.createDeco(update.view);
+          ATPATH_PERF.inc("vp.wikilink.createDeco");
+          this.decorations = ATPATH_PERF.time("vp.wikilink.createDeco.full", () => decorator.createDeco(update.view));
           plugin.tokenCacheDirty = false;
         } else {
-          this.decorations = decorator.updateDeco(update, this.decorations);
+          ATPATH_PERF.inc("vp.wikilink.updateDeco");
+          this.decorations = ATPATH_PERF.time("vp.wikilink.updateDeco.incremental", () => decorator.updateDeco(update, this.decorations));
         }
       }
     }),
@@ -9921,11 +10077,15 @@ function buildBufferCountListener(plugin) {
   let lastDoc = null;
   function scheduleDocRetoken(view) {
     if (pendingTimer) return;
+    ATPATH_PERF.inc("buffer.scheduleDocRetoken.scheduled");
     pendingTimer = setTimeout(() => {
       pendingTimer = null;
       try {
         const text = view.state.doc.toString();
-        plugin._noteBufferTokens = encode(text).length;
+        const kb = text.length / 1024;
+        const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
+        ATPATH_PERF.inc("buffer.encode.docSize." + bucket);
+        plugin._noteBufferTokens = ATPATH_PERF.time("buffer.encode.doc", () => encode(text).length);
       } catch (err) {
         console.warn("[atpath] buffer token count failed", err);
       }
@@ -9933,33 +10093,40 @@ function buildBufferCountListener(plugin) {
     }, 80);
   }
   function recomputeSelection(state) {
+    ATPATH_PERF.inc("buffer.recomputeSelection.calls");
     let total = 0;
+    let nonEmpty = 0;
     for (const r of state.selection.ranges) {
       if (r.empty) continue;
+      nonEmpty++;
       try {
-        total += encode(state.sliceDoc(r.from, r.to)).length;
+        total += ATPATH_PERF.time("buffer.encode.selection", () => encode(state.sliceDoc(r.from, r.to)).length);
       } catch (err) {
         console.warn("[atpath] selection token count failed", err);
         return;
       }
     }
+    if (nonEmpty > 0) ATPATH_PERF.inc("buffer.recomputeSelection.nonEmpty");
     plugin._selectionTokens = total;
     plugin._repaintStatusBarFromBuffer();
   }
   return EditorView.updateListener.of((update) => {
+    ATPATH_PERF.inc("buffer.updateListener.calls");
     if (update.docChanged) {
+      ATPATH_PERF.inc("buffer.updateListener.docChanged");
       if (lastDoc !== update.state.doc) {
         lastDoc = update.state.doc;
         scheduleDocRetoken(update.view);
       }
     }
     if (update.selectionSet) {
+      ATPATH_PERF.inc("buffer.updateListener.selectionSet");
       recomputeSelection(update.state);
     }
   });
 }
-function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
-  if (!dataTransfer) return [];
+function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+  const app = plugin.app;
   const out = [];
   const seen = /* @__PURE__ */ new Set();
   const addPath = (rawPath) => {
@@ -9976,6 +10143,12 @@ function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
       out.push({ kind: "folder", vaultPath: target.path, target });
     }
   };
+  const captured = plugin._currentDragRefs;
+  if (Array.isArray(captured) && captured.length > 0) {
+    for (const r of captured) addPath(r && r.vaultPath);
+    if (out.length > 0) return out;
+  }
+  if (!dataTransfer) return out;
   const tryJsonMime = (mime) => {
     let raw;
     try {
@@ -10053,6 +10226,36 @@ function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
   }
   return out;
 }
+function captureDragRefsFromExplorerDom(plugin, evt) {
+  const app = plugin.app;
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const target = evt.target instanceof Element ? evt.target : null;
+  if (!target) return out;
+  const item = target.closest("[data-path]");
+  if (!item) return out;
+  const explorer = item.closest(".workspace-leaf-content[data-type='file-explorer']") || item.closest(".nav-files-container") || null;
+  let candidates;
+  if (explorer && item.classList.contains("is-selected")) {
+    const selected = explorer.querySelectorAll(".is-selected[data-path]");
+    candidates = selected.length > 0 ? Array.from(selected) : [item];
+  } else {
+    candidates = [item];
+  }
+  for (const el of candidates) {
+    const path = el.getAttribute("data-path");
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    const af = app.vault.getAbstractFileByPath(path);
+    if (!af) continue;
+    if (af instanceof TFile) {
+      out.push({ kind: "file", vaultPath: af.path, target: af });
+    } else if (af instanceof TFolder) {
+      out.push({ kind: "folder", vaultPath: af.path, target: af });
+    }
+  }
+  return out;
+}
 function insertAtPathRefs(view, pos, refs, plugin) {
   const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
   const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
@@ -10074,7 +10277,7 @@ function buildDragDropExtension(plugin) {
     dragover(evt, _view) {
       const refs = extractDraggedVaultPaths(
         evt.dataTransfer,
-        plugin.app,
+        plugin,
         plugin.app.workspace.getActiveFile()?.path || ""
       );
       if (!refs.length) return false;
@@ -10084,7 +10287,7 @@ function buildDragDropExtension(plugin) {
     },
     drop(evt, view) {
       const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
-      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin.app, sourcePath);
+      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
       if (!refs.length) return false;
       if (refs.length > 50) {
         new Notice("Drop limited to 50 paths");
@@ -10094,6 +10297,7 @@ function buildDragDropExtension(plugin) {
       evt.stopPropagation();
       const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
       insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+      plugin._currentDragRefs = null;
       return true;
     }
   });
@@ -10240,15 +10444,22 @@ function registerPostProcessor(plugin) {
             );
             if (resolved.kind === "folder") {
               const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
-              if (cached != null) {
-                tokenSpan.textContent = " (" + formatTokens(cached) + ")";
-              } else {
+              if (cached == null) {
+                tokenSpan.textContent = " (\u2026)";
                 plugin.core.getFolderTokens(resolved.normalizedPath).then(
-                  (tokens) => {
-                    tokenSpan.textContent = " (" + formatTokens(tokens || 0) + ")";
+                  (result) => {
+                    if (result && typeof result === "object" && result.overCap) {
+                      tokenSpan.textContent = " (" + formatLinkedTargetCount({ overCap: result }) + ")";
+                    } else {
+                      tokenSpan.textContent = " (" + formatTokens(result || 0) + ")";
+                    }
                   },
                   (err) => console.warn("[atpath] folder token count failed", err)
                 );
+              } else if (cached && typeof cached === "object" && cached.overCap) {
+                tokenSpan.textContent = " (" + formatLinkedTargetCount({ overCap: cached }) + ")";
+              } else {
+                tokenSpan.textContent = " (" + formatTokens(cached) + ")";
               }
             }
           } else {
@@ -10301,6 +10512,30 @@ var AtPathSettingTab = class extends PluginSettingTab {
         const num = parseFloat(value);
         if (!isNaN(num) && num > 0) {
           this.plugin.settings.maxFileSizeMB = num;
+          await this.plugin.saveSettings();
+          this.plugin.core.clearFolderTokenMemo();
+          this.plugin.tokenCacheDirty = true;
+          this.plugin._scheduleRefresh();
+        }
+      })
+    );
+    new Setting(containerEl).setName("Max files per folder reference").setDesc("Folder @path references that resolve to more files than this show `> N files` instead of a token count, to avoid freezing Obsidian on huge folders.").addText(
+      (text) => text.setValue(String(this.plugin.settings.maxFolderFiles)).onChange(async (value) => {
+        const num = parseInt(value, 10);
+        if (!isNaN(num) && num > 0) {
+          this.plugin.settings.maxFolderFiles = num;
+          await this.plugin.saveSettings();
+          this.plugin.core.clearFolderTokenMemo();
+          this.plugin.tokenCacheDirty = true;
+          this.plugin._scheduleRefresh();
+        }
+      })
+    );
+    new Setting(containerEl).setName("Folder encode batch size").setDesc("Lower = smoother UI but slower folder counts. Raise only if your vault is small.").addText(
+      (text) => text.setValue(String(this.plugin.settings.folderEncodeBatchSize)).onChange(async (value) => {
+        const num = parseInt(value, 10);
+        if (!isNaN(num) && num > 0) {
+          this.plugin.settings.folderEncodeBatchSize = num;
           await this.plugin.saveSettings();
         }
       })
@@ -10818,7 +11053,7 @@ var AtPathPlugin = class extends Plugin {
     this.tokenCacheDirty = false;
     this._inFlightTokenFetches = /* @__PURE__ */ new Set();
     this._inFlightFolderTokenFetches = /* @__PURE__ */ new Set();
-    this._rafScheduled = false;
+    this._refreshTimer = null;
     this._lastEditorView = null;
     this._statusBarGen = 0;
     this.core = createAtPathCore(this);
@@ -10834,6 +11069,19 @@ var AtPathPlugin = class extends Plugin {
         this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
       )
     );
+    this._currentDragRefs = null;
+    this.registerDomEvent(document, "dragstart", (evt) => {
+      this._currentDragRefs = null;
+      if (this.settings.enableDragDropAtPath === false) return;
+      const refs = captureDragRefsFromExplorerDom(this, evt);
+      if (refs.length > 0) this._currentDragRefs = refs;
+    }, { capture: true });
+    this.registerDomEvent(document, "dragend", () => {
+      this._currentDragRefs = null;
+    }, { capture: true });
+    this.registerDomEvent(document, "drop", () => {
+      this._currentDragRefs = null;
+    }, { capture: true });
     registerPostProcessor(this);
     if (!Platform.isMobile) {
       this.noteBarEl = this.addStatusBarItem();
@@ -11005,21 +11253,34 @@ var AtPathPlugin = class extends Plugin {
     }
   }
   async getTokenCount(vaultPath) {
+    ATPATH_PERF.inc("getTokenCount.calls");
     const file = this.app.vault.getAbstractFileByPath(vaultPath);
     if (!(file instanceof TFile)) return null;
     const ext = file.extension.toLowerCase();
     if (BINARY_EXTENSIONS.has(ext)) return null;
     if (file.stat.size > this.settings.maxFileSizeMB * 1024 * 1024) return null;
     const cached = this.tokenCache.get(vaultPath);
-    if (cached && cached.mtime === file.stat.mtime) return cached.tokens;
-    const content = await this.app.vault.cachedRead(file);
-    const tokens = encode(content).length;
+    if (cached && cached.mtime === file.stat.mtime) {
+      ATPATH_PERF.inc("getTokenCount.cacheHit");
+      return cached.tokens;
+    }
+    ATPATH_PERF.inc("getTokenCount.cacheMiss");
+    const content = await ATPATH_PERF.timeAsync("getTokenCount.cachedRead", () => this.app.vault.cachedRead(file));
+    const kb = content.length / 1024;
+    const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
+    ATPATH_PERF.inc("getTokenCount.encodeSize." + bucket);
+    const tokens = ATPATH_PERF.time("getTokenCount.encode", () => encode(content).length);
     this.tokenCache.set(vaultPath, { mtime: file.stat.mtime, tokens });
     return tokens;
   }
   scheduleTokenFetch(vaultPath, view) {
+    ATPATH_PERF.inc("scheduleTokenFetch.calls");
     if (!this.settings.showTokenCounts) return;
-    if (this._inFlightTokenFetches.has(vaultPath)) return;
+    if (this._inFlightTokenFetches.has(vaultPath)) {
+      ATPATH_PERF.inc("scheduleTokenFetch.deduped");
+      return;
+    }
+    ATPATH_PERF.inc("scheduleTokenFetch.dispatched");
     this._inFlightTokenFetches.add(vaultPath);
     this._lastEditorView = view;
     this.getTokenCount(vaultPath).then(
@@ -11037,10 +11298,15 @@ var AtPathPlugin = class extends Plugin {
     );
   }
   scheduleFolderTokenFetch(folderPath, view) {
+    ATPATH_PERF.inc("scheduleFolderTokenFetch.calls");
     if (!this.settings.showTokenCounts) return;
-    if (this._inFlightFolderTokenFetches.has(folderPath)) return;
+    if (view) this._lastEditorView = view;
+    if (this._inFlightFolderTokenFetches.has(folderPath)) {
+      ATPATH_PERF.inc("scheduleFolderTokenFetch.deduped");
+      return;
+    }
+    ATPATH_PERF.inc("scheduleFolderTokenFetch.dispatched");
     this._inFlightFolderTokenFetches.add(folderPath);
-    this._lastEditorView = view;
     this.core.getFolderTokens(folderPath).then(
       () => {
         this._inFlightFolderTokenFetches.delete(folderPath);
@@ -11054,24 +11320,31 @@ var AtPathPlugin = class extends Plugin {
     );
   }
   _scheduleRefresh() {
-    if (this._rafScheduled) return;
-    this._rafScheduled = true;
-    requestAnimationFrame(() => {
-      this._rafScheduled = false;
+    ATPATH_PERF.inc("scheduleRefresh.calls");
+    if (this._refreshTimer) {
+      ATPATH_PERF.inc("scheduleRefresh.coalesced");
+      return;
+    }
+    ATPATH_PERF.inc("scheduleRefresh.scheduled");
+    this._refreshTimer = window.setTimeout(() => {
+      this._refreshTimer = null;
+      ATPATH_PERF.inc("scheduleRefresh.fired");
       if (this._lastEditorView) {
         try {
-          this._lastEditorView.dispatch();
+          ATPATH_PERF.time("scheduleRefresh.dispatch", () => this._lastEditorView.dispatch());
         } catch (e) {
         }
       }
       this.updateStatusBar();
-    });
+    }, 150);
   }
   _debouncedUpdateStatusBar() {
     if (this._statusBarTimeout) clearTimeout(this._statusBarTimeout);
     this._statusBarTimeout = setTimeout(() => this.updateStatusBar(), 300);
   }
   async updateStatusBar() {
+    ATPATH_PERF.inc("updateStatusBar.calls");
+    const _usbT0 = ATPATH_PERF.enabled ? performance.now() : 0;
     if (!this.noteBarEl || !this.linkedBarEl) return;
     const clearBars = () => {
       this.noteBarEl.empty();
@@ -11079,6 +11352,7 @@ var AtPathPlugin = class extends Plugin {
       this._hideLinkedSegment();
       this._linkedTargets = [];
       this._lastLinkedTotal = 0;
+      this._linkedPartial = false;
       this._linkedSig = "";
       this._renderLinkedPopover();
     };
@@ -11100,34 +11374,41 @@ var AtPathPlugin = class extends Plugin {
     const content = mdView.editor.getValue();
     let noteTokens = this._noteBufferTokens;
     if (!noteTokens) {
-      noteTokens = encode(content).length;
+      ATPATH_PERF.inc("updateStatusBar.encodeFallback");
+      noteTokens = ATPATH_PERF.time("updateStatusBar.encodeFallback.encode", () => encode(content).length);
       this._noteBufferTokens = noteTokens;
     }
-    const refs = scanAtPathRefs(content, this.app, activeFile.path);
+    const refs = ATPATH_PERF.time("updateStatusBar.scanAtPathRefs", () => scanAtPathRefs(content, this.app, activeFile.path));
+    ATPATH_PERF.inc("updateStatusBar.refs." + (refs.length < 5 ? "lt5" : refs.length < 15 ? "5-15" : refs.length < 30 ? "15-30" : "30+"));
     const seen = /* @__PURE__ */ new Set();
     const linkedTargets = [];
     let linkedTotal = 0;
+    let pendingOrOverCap = false;
     for (const ref of refs) {
       const resolved = this.core.resolveAtPathTarget(ref, activeFile.path);
       if (resolved.kind === "missing") continue;
       const normalizedPath = resolved.normalizedPath;
       if (seen.has(normalizedPath)) continue;
       seen.add(normalizedPath);
-      let tokens = null;
       if (resolved.kind === "folder") {
         const cached = this.core.getCachedFolderTokens(normalizedPath);
-        if (cached != null) tokens = cached;
-        else {
-          try {
-            tokens = await this.core.getFolderTokens(normalizedPath);
-          } catch (err) {
-            console.warn("[atpath] folder token sum failed", err);
-            tokens = 0;
-          }
+        if (cached == null) {
+          const cm = mdView.editor && mdView.editor.cm ? mdView.editor.cm : this._lastEditorView;
+          this.scheduleFolderTokenFetch(normalizedPath, cm);
+          linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: 0, pending: true });
+          pendingOrOverCap = true;
+          continue;
         }
-      } else {
-        tokens = await this.getTokenCount(normalizedPath);
+        if (cached && typeof cached === "object" && cached.overCap) {
+          linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: 0, overCap: cached });
+          pendingOrOverCap = true;
+          continue;
+        }
+        linkedTotal += cached;
+        linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: cached });
+        continue;
       }
+      const tokens = await this.getTokenCount(normalizedPath);
       if (gen !== this._statusBarGen) return;
       if (tokens != null) {
         linkedTotal += tokens;
@@ -11136,9 +11417,13 @@ var AtPathPlugin = class extends Plugin {
     }
     this._linkedTargets = linkedTargets;
     this._lastLinkedTotal = linkedTotal;
+    this._linkedPartial = pendingOrOverCap;
     this._linkedSig = linkedTargets.map((t) => t.kind + ":" + t.path).sort().join("|");
-    this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length);
+    this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length, pendingOrOverCap);
     this._renderLinkedPopover();
+    if (ATPATH_PERF.enabled) {
+      ATPATH_PERF.record("updateStatusBar.totalMs", performance.now() - _usbT0);
+    }
   }
   _repaintStatusBarFromBuffer() {
     if (!this.noteBarEl || !this.linkedBarEl) return;
@@ -11147,10 +11432,11 @@ var AtPathPlugin = class extends Plugin {
     this._renderStatusBarSegments(
       this._noteBufferTokens || 0,
       this._lastLinkedTotal || 0,
-      linkedCount
+      linkedCount,
+      !!this._linkedPartial
     );
   }
-  _renderStatusBarSegments(noteTokens, linkedTotal, linkedCount) {
+  _renderStatusBarSegments(noteTokens, linkedTotal, linkedCount, partial) {
     if (!this.noteBarEl || !this.linkedBarEl) return;
     this.noteBarEl.empty();
     const noteLabel = this.noteBarEl.createSpan({ cls: "atpath-label" });
@@ -11177,11 +11463,12 @@ var AtPathPlugin = class extends Plugin {
     this._linkedLabelEl.removeClass("atpath-hidden");
     this._linkedValueEl.removeClass("atpath-hidden");
     this._linkedCountEl.removeClass("atpath-hidden");
-    this._linkedValueEl.setText(formatTokens(linkedTotal));
+    const suffix = partial ? "+" : "";
+    this._linkedValueEl.setText(formatTokens(linkedTotal) + suffix);
     this._linkedCountEl.setText("(" + linkedCount + ")");
     this.linkedBarEl.setAttribute(
       "aria-label",
-      "@paths (" + linkedCount + "): " + formatTokens(linkedTotal)
+      "@paths (" + linkedCount + "): " + formatTokens(linkedTotal) + suffix + (partial ? " \u2014 some targets still counting or skipped" : "")
     );
   }
   _hideLinkedSegment() {
@@ -11247,36 +11534,91 @@ var AtPathPlugin = class extends Plugin {
     if (this.linkedBarEl) this.linkedBarEl.removeClass("is-pinned");
   }
   _renderLinkedPopover() {
+    ATPATH_PERF.inc("popover.render.calls");
     if (!this._popoverEl) return;
     const targets = this._linkedTargets || [];
-    this._popoverEl.empty();
     if (targets.length === 0) {
+      this._popoverEl.empty();
+      this._popoverBuiltSig = "";
+      this._popoverRowMap = null;
+      this._popoverHeaderEl = null;
+      this._popoverSelectedEl = null;
       this._hidePopoverImmediate();
       return;
     }
+    const isSelectable = (t) => !t.pending && !t.overCap;
     if (this._popoverCheckedSig !== this._linkedSig) {
-      this._popoverCheckedPaths = new Set(targets.map((t) => t.path));
+      this._popoverCheckedPaths = new Set(targets.filter(isSelectable).map((t) => t.path));
       this._popoverCheckedSig = this._linkedSig;
     } else {
       const liveSet = new Set(targets.map((t) => t.path));
+      const selectableSet = new Set(targets.filter(isSelectable).map((t) => t.path));
       for (const p of [...this._popoverCheckedPaths]) {
-        if (!liveSet.has(p)) this._popoverCheckedPaths.delete(p);
+        if (!liveSet.has(p) || !selectableSet.has(p)) this._popoverCheckedPaths.delete(p);
       }
     }
-    const header = this._popoverEl.createDiv({ cls: "atpath-linked-popover-header" });
-    const targetWord = targets.length === 1 ? "target" : "targets";
-    header.setText(
-      "Linked @paths \xB7 " + formatTokens(this._lastLinkedTotal || 0) + " tokens \xB7 " + targets.length + " " + targetWord
-    );
-    const rowsEl = this._popoverEl.createDiv({ cls: "atpath-linked-popover-rows" });
     const activeFile = this.app.workspace.getActiveFile();
     const sourcePath = activeFile ? activeFile.path : "";
+    const renderSig = sourcePath + "\n" + targets.map(
+      (t) => t.kind + ":" + t.path + (t.pending ? ":p" : "") + (t.overCap ? ":o" : "")
+    ).join("|");
+    const partial = !!this._linkedPartial;
+    const totalSuffix = partial ? "+" : "";
+    if (this._popoverBuiltSig === renderSig && this._popoverRowMap) {
+      ATPATH_PERF.inc("popover.render.fastPath");
+      if (this._popoverHeaderEl) {
+        const w = targets.length === 1 ? "target" : "targets";
+        this._popoverHeaderEl.setText(
+          "Linked @paths \xB7 " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix + " tokens \xB7 " + targets.length + " " + w
+        );
+      }
+      for (const t of targets) {
+        const refs = this._popoverRowMap.get(t.path);
+        if (!refs) continue;
+        if (refs.countEl) refs.countEl.setText(formatLinkedTargetCount(t));
+        if (refs.cb) {
+          const selectable = isSelectable(t);
+          refs.cb.disabled = !selectable;
+          if (!selectable) refs.cb.checked = false;
+          else refs.cb.checked = this._popoverCheckedPaths.has(t.path);
+        }
+        if (refs.row) {
+          const title = t.pending ? "Still counting\u2026" : t.overCap ? "Skipped: over the configured max-files limit" : t.kind === "folder" ? t.path + "/" : t.path;
+          refs.row.setAttribute("title", title);
+          if (t.pending) refs.row.addClass("atpath-linked-popover-row--pending");
+          else refs.row.removeClass("atpath-linked-popover-row--pending");
+          if (t.overCap) refs.row.addClass("atpath-linked-popover-row--overcap");
+          else refs.row.removeClass("atpath-linked-popover-row--overcap");
+        }
+      }
+      this._refreshPopoverSelectedTotal();
+      return;
+    }
+    ATPATH_PERF.inc("popover.render.slowPath");
+    ATPATH_PERF.inc("popover.render.slowPath.targets." + (targets.length < 5 ? "lt5" : targets.length < 15 ? "5-15" : targets.length < 30 ? "15-30" : "30+"));
+    this._popoverEl.empty();
+    this._popoverRowMap = /* @__PURE__ */ new Map();
+    const header = this._popoverEl.createDiv({ cls: "atpath-linked-popover-header" });
+    this._popoverHeaderEl = header;
+    const targetWord = targets.length === 1 ? "target" : "targets";
+    header.setText(
+      "Linked @paths \xB7 " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix + " tokens \xB7 " + targets.length + " " + targetWord
+    );
+    const rowsEl = this._popoverEl.createDiv({ cls: "atpath-linked-popover-rows" });
     for (const t of targets) {
       const row = rowsEl.createEl("label", { cls: "atpath-linked-popover-row" });
       if (t.kind === "folder") row.addClass("atpath-linked-popover-row--folder");
+      if (t.pending) row.addClass("atpath-linked-popover-row--pending");
+      if (t.overCap) row.addClass("atpath-linked-popover-row--overcap");
+      const selectable = isSelectable(t);
       const cb = row.createEl("input", { type: "checkbox", cls: "atpath-linked-popover-check" });
-      cb.checked = this._popoverCheckedPaths.has(t.path);
+      cb.checked = selectable && this._popoverCheckedPaths.has(t.path);
+      cb.disabled = !selectable;
       cb.addEventListener("change", () => {
+        if (!selectable) {
+          cb.checked = false;
+          return;
+        }
         if (cb.checked) this._popoverCheckedPaths.add(t.path);
         else this._popoverCheckedPaths.delete(t.path);
         this._refreshPopoverSelectedTotal();
@@ -11287,13 +11629,15 @@ var AtPathPlugin = class extends Plugin {
         cls: "atpath-linked-popover-path",
         text: t.kind === "folder" ? t.path + "/" : t.path
       });
-      pathSpan.setAttribute("title", t.kind === "folder" ? t.path + "/" : t.path);
-      row.createSpan({
+      const rowTitle = t.pending ? "Still counting\u2026" : t.overCap ? "Skipped: over the configured max-files limit" : t.kind === "folder" ? t.path + "/" : t.path;
+      pathSpan.setAttribute("title", rowTitle);
+      row.setAttribute("title", rowTitle);
+      const countEl = row.createSpan({
         cls: "atpath-linked-popover-count",
-        text: formatTokens(t.tokens || 0)
+        text: formatLinkedTargetCount(t)
       });
       if (t.kind === "file") {
-        row.addEventListener("mouseover", (evt) => {
+        row.addEventListener("mouseenter", (evt) => {
           this.app.workspace.trigger("hover-link", {
             event: evt,
             source: "atpath-status",
@@ -11304,6 +11648,7 @@ var AtPathPlugin = class extends Plugin {
           });
         });
       }
+      this._popoverRowMap.set(t.path, { row, cb, countEl });
     }
     const footer = this._popoverEl.createDiv({ cls: "atpath-linked-popover-footer" });
     this._popoverSelectedEl = footer.createDiv({ cls: "atpath-linked-popover-selected" });
@@ -11314,7 +11659,7 @@ var AtPathPlugin = class extends Plugin {
     });
     allBtn.addEventListener("click", (evt) => {
       evt.preventDefault();
-      this._popoverCheckedPaths = new Set(targets.map((t) => t.path));
+      this._popoverCheckedPaths = new Set(targets.filter(isSelectable).map((t) => t.path));
       this._renderLinkedPopover();
       this._showPopover();
     });
@@ -11328,15 +11673,27 @@ var AtPathPlugin = class extends Plugin {
       this._renderLinkedPopover();
       this._showPopover();
     });
-    const copyBtn = actions.createEl("button", {
+    const copySelectedBtn = actions.createEl("button", {
       text: "Copy selected",
+      cls: "atpath-linked-popover-btn"
+    });
+    copySelectedBtn.setAttribute("title", "Copy only the contents of selected @paths (no note body)");
+    copySelectedBtn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      const selected = new Set(this._popoverCheckedPaths);
+      void this.copySelectedAtPathsOnly({ paths: selected });
+    });
+    const copyWithNoteBtn = actions.createEl("button", {
+      text: "Copy selected + note",
       cls: "atpath-linked-popover-btn atpath-linked-popover-btn--primary"
     });
-    copyBtn.addEventListener("click", (evt) => {
+    copyWithNoteBtn.setAttribute("title", "Copy the note body plus the contents of selected @paths");
+    copyWithNoteBtn.addEventListener("click", (evt) => {
       evt.preventDefault();
       const selected = new Set(this._popoverCheckedPaths);
       void this.copyNoteWithAtPaths({ paths: selected });
     });
+    this._popoverBuiltSig = renderSig;
     this._refreshPopoverSelectedTotal();
   }
   _refreshPopoverSelectedTotal() {
@@ -11345,14 +11702,164 @@ var AtPathPlugin = class extends Plugin {
     let total = 0;
     let count = 0;
     for (const t of targets) {
+      if (t.pending || t.overCap) continue;
       if (this._popoverCheckedPaths.has(t.path)) {
         total += t.tokens || 0;
         count += 1;
       }
     }
+    const selectableCount = targets.filter((t) => !t.pending && !t.overCap).length;
     this._popoverSelectedEl.setText(
-      "Selected: " + formatTokens(total) + " tokens (" + count + "/" + targets.length + ")"
+      "Selected: " + formatTokens(total) + " tokens (" + count + "/" + selectableCount + ")"
     );
+  }
+  async copySelectedAtPathsOnly(opts) {
+    const filterPaths = opts && opts.paths instanceof Set ? opts.paths : null;
+    if (!filterPaths || filterPaths.size === 0) {
+      new Notice("No @paths selected.");
+      return;
+    }
+    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!mdView) {
+      new Notice("No active note.");
+      return;
+    }
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new Notice("No active file.");
+      return;
+    }
+    const content = mdView.editor.getValue();
+    const refs = scanAtPathRefs(content, this.app, activeFile.path);
+    const seen = /* @__PURE__ */ new Set();
+    const blocks = [];
+    const failed = [];
+    const skippedFolders = [];
+    const sizeCapBytes = this.settings.maxFileSizeMB * 1024 * 1024;
+    const maxFiles = this.settings.maxFolderFiles || 500;
+    for (const ref of refs) {
+      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
+      const vaultPath = resolvedRef.normalizedPath;
+      if (!vaultPath || seen.has(vaultPath)) continue;
+      seen.add(vaultPath);
+      if (!filterPaths.has(vaultPath)) continue;
+      if (resolvedRef.kind === "folder") {
+        const folderTarget = resolvedRef.target;
+        if (!(folderTarget instanceof TFolder)) {
+          failed.push(ref.displayPath);
+          continue;
+        }
+        const folderFiles = [];
+        let overCap = false;
+        const walk = (node) => {
+          if (overCap) return;
+          for (const c of node.children) {
+            if (overCap) return;
+            if (c instanceof TFolder) {
+              walk(c);
+            } else if (c instanceof TFile) {
+              if (this.core.isIgnored(c.path)) continue;
+              if (c.stat.size > sizeCapBytes) continue;
+              const fext = c.extension.toLowerCase();
+              if (BINARY_EXTENSIONS.has(fext)) continue;
+              folderFiles.push(c);
+              if (folderFiles.length > maxFiles) {
+                overCap = true;
+                return;
+              }
+            }
+          }
+        };
+        walk(folderTarget);
+        if (overCap) {
+          skippedFolders.push(ref.displayPath);
+          continue;
+        }
+        let folderTokenTotal = 0;
+        const folderBlocks = [];
+        for (const f of folderFiles) {
+          try {
+            const fc = await this.app.vault.cachedRead(f);
+            const tk = await this.getTokenCount(f.path);
+            if (tk != null) folderTokenTotal += tk;
+            folderBlocks.push({ type: "file", relPath: f.path, content: fc });
+          } catch (_) {
+          }
+        }
+        if (folderBlocks.length > 0) {
+          blocks.push({
+            type: "header",
+            text: "--- @" + ref.displayPath + " (" + folderBlocks.length + (folderBlocks.length === 1 ? " file, " : " files, ") + formatTokens(folderTokenTotal) + " tokens) ---"
+          });
+          for (const fb of folderBlocks) blocks.push(fb);
+        }
+        continue;
+      }
+      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) {
+        failed.push(ref.displayPath);
+        continue;
+      }
+      const fileTarget = resolvedRef.target;
+      const fileExt = (fileTarget.extension || "").toLowerCase();
+      if (BINARY_EXTENSIONS.has(fileExt)) continue;
+      if (fileTarget.stat && fileTarget.stat.size > sizeCapBytes) {
+        failed.push(ref.displayPath);
+        continue;
+      }
+      try {
+        const fileContent = await this.app.vault.cachedRead(fileTarget);
+        blocks.push({ type: "file", relPath: ref.displayPath, content: fileContent });
+      } catch (_) {
+        failed.push(ref.displayPath);
+      }
+    }
+    if (blocks.length === 0) {
+      new Notice("Nothing to copy \u2014 no readable selected @paths.");
+      if (skippedFolders.length > 0) {
+        new Notice(
+          "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " + skippedFolders.join(", "),
+          0
+        );
+      }
+      return;
+    }
+    let output = "";
+    for (const b of blocks) {
+      if (b.type === "header") {
+        output += b.text + "\n\n";
+      } else {
+        const fence = makeFence(b.content);
+        output += "## @" + b.relPath + "\n\n" + fence + "\n" + b.content + "\n" + fence + "\n\n---\n\n";
+      }
+    }
+    output = output.replace(/\n+$/, "") + "\n";
+    try {
+      await copyToClipboard(output);
+    } catch (e) {
+      new Notice("Failed to copy to clipboard: " + e.message, 0);
+      return;
+    }
+    const fileBlockCount = blocks.filter((b) => b.type === "file").length;
+    if (failed.length > 0) {
+      const frag = document.createDocumentFragment();
+      const header = document.createElement("div");
+      header.textContent = "Copied " + fileBlockCount + " file(s), but " + failed.length + " @path(s) failed:";
+      frag.appendChild(header);
+      for (const p of failed) {
+        const line = document.createElement("div");
+        line.textContent = "  \u2022 @" + p;
+        frag.appendChild(line);
+      }
+      new Notice(frag, 0);
+    } else {
+      new Notice("Copied " + fileBlockCount + " selected file(s) to clipboard.", 5e3);
+    }
+    if (skippedFolders.length > 0) {
+      new Notice(
+        "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " + skippedFolders.join(", "),
+        0
+      );
+    }
   }
   async copyNoteWithAtPaths(opts) {
     const filterPaths = opts && opts.paths instanceof Set ? opts.paths : null;
@@ -11371,7 +11878,9 @@ var AtPathPlugin = class extends Plugin {
     const seen = /* @__PURE__ */ new Set();
     const blocks = [];
     const failed = [];
+    const skippedFolders = [];
     const sizeCapBytes = this.settings.maxFileSizeMB * 1024 * 1024;
+    const maxFiles = this.settings.maxFolderFiles || 500;
     for (const ref of refs) {
       const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
       const vaultPath = resolvedRef.normalizedPath;
@@ -11385,8 +11894,11 @@ var AtPathPlugin = class extends Plugin {
           continue;
         }
         const folderFiles = [];
+        let overCap = false;
         const walk = (node) => {
+          if (overCap) return;
           for (const c of node.children) {
+            if (overCap) return;
             if (c instanceof TFolder) {
               walk(c);
             } else if (c instanceof TFile) {
@@ -11395,10 +11907,18 @@ var AtPathPlugin = class extends Plugin {
               const fext = c.extension.toLowerCase();
               if (BINARY_EXTENSIONS.has(fext)) continue;
               folderFiles.push(c);
+              if (folderFiles.length > maxFiles) {
+                overCap = true;
+                return;
+              }
             }
           }
         };
         walk(folderTarget);
+        if (overCap) {
+          skippedFolders.push(ref.displayPath);
+          continue;
+        }
         let folderTokenTotal = 0;
         const folderBlocks = [];
         for (const f of folderFiles) {
@@ -11464,6 +11984,12 @@ var AtPathPlugin = class extends Plugin {
       new Notice("Copied note + " + fileBlockCount + " file(s) to clipboard.", 5e3);
     } else {
       new Notice("Copied note to clipboard (no @path references found).", 5e3);
+    }
+    if (skippedFolders.length > 0) {
+      new Notice(
+        "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " + skippedFolders.join(", "),
+        0
+      );
     }
   }
   async resolveLocalImages(md, activeFile) {

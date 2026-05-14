@@ -115,6 +115,13 @@ function fuzzyScore(query, candidate) {
 function createAtPathCore(plugin) {
   const { app } = plugin;
   const folderTokenMemo = new Map();
+  const folderTokenInflight = new Map();
+  let folderTokenEpoch = 0;
+
+  function getPerf() {
+    if (typeof window !== "undefined" && window.__atpath_perf) return window.__atpath_perf;
+    return { inc: () => {}, record: () => {}, time: (_l, fn) => fn(), timeAsync: async (_l, fn) => fn(), enabled: false };
+  }
 
   function resolveAtPathTarget(ref, sourcePath) {
     if (ref && ref.kind === "folder") {
@@ -144,34 +151,98 @@ function createAtPathCore(plugin) {
     return false;
   }
 
+  // getFolderTokens returns either:
+  //   - a number (sum of file token counts), or
+  //   - a sentinel { overCap: true, fileCount } when the walk hit
+  //     settings.maxFolderFiles (fileCount is > maxFolderFiles, not exact).
+  // Callers must handle both shapes via formatLinkedTargetCount(t).
   async function getFolderTokens(folderPath) {
+    const perf = getPerf();
+    perf.inc("getFolderTokens.calls");
     const folder = app.vault.getAbstractFileByPath(folderPath);
     if (!(folder instanceof TFolder)) return 0;
     if (folderTokenMemo.has(folderPath)) return folderTokenMemo.get(folderPath);
-    const sizeCapBytes = (plugin.settings && plugin.settings.maxFileSizeMB
-      ? plugin.settings.maxFileSizeMB
-      : 5) * 1024 * 1024;
-    const tasks = [];
-    (function walk(node) {
-      for (const c of node.children) {
-        if (c instanceof TFolder) {
-          walk(c);
-        } else if (c instanceof TFile && !isIgnored(c.path) && c.stat.size <= sizeCapBytes) {
-          tasks.push(getFileTokens(c.path));
+
+    const existing = folderTokenInflight.get(folderPath);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      const settings = plugin.settings || {};
+      const sizeCapBytes = (settings.maxFileSizeMB || 5) * 1024 * 1024;
+      const maxFiles = settings.maxFolderFiles || 500;
+      const batchSize = settings.folderEncodeBatchSize || 1;
+      const startEpoch = folderTokenEpoch;
+
+      const paths = [];
+      let overCap = false;
+      (function walk(node) {
+        if (overCap) return;
+        for (const c of node.children) {
+          if (overCap) return;
+          if (c instanceof TFolder) {
+            walk(c);
+          } else if (c instanceof TFile && !isIgnored(c.path)) {
+            perf.inc("getFolderTokens.walkedFiles");
+            if (c.stat.size > sizeCapBytes) {
+              perf.inc("getFolderTokens.skippedTooLarge");
+              continue;
+            }
+            paths.push(c.path);
+            if (paths.length > maxFiles) { overCap = true; return; }
+          }
+        }
+      })(folder);
+
+      if (overCap) {
+        perf.inc("getFolderTokens.overCap");
+        const sentinel = { overCap: true, fileCount: paths.length };
+        if (folderTokenEpoch === startEpoch) folderTokenMemo.set(folderPath, sentinel);
+        return sentinel;
+      }
+
+      let total = 0;
+      for (let i = 0; i < paths.length; i += batchSize) {
+        const slice = paths.slice(i, i + batchSize);
+        const counts = await perf.timeAsync(
+          "getFolderTokens.batch",
+          () => Promise.all(slice.map((p) => {
+            perf.inc("getFolderTokens.encoded");
+            const f = app.vault.getAbstractFileByPath(p);
+            if (f && f.stat) {
+              const sz = f.stat.size;
+              const bucket = sz < 1024 ? "lt1k"
+                : sz < 5 * 1024 ? "1-5k"
+                : sz < 20 * 1024 ? "5-20k"
+                : sz < 100 * 1024 ? "20-100k"
+                : "100k+";
+              perf.inc("getFolderTokens.encodeSize." + bucket);
+            }
+            return getFileTokens(p);
+          }))
+        );
+        for (const n of counts) total += n || 0;
+        if (i + batchSize < paths.length) {
+          await new Promise((r) => setTimeout(r, 0));
         }
       }
-    })(folder);
-    const counts = await Promise.all(tasks);
-    const total = counts.reduce((a, b) => a + (b || 0), 0);
-    folderTokenMemo.set(folderPath, total);
-    return total;
+      if (folderTokenEpoch === startEpoch) folderTokenMemo.set(folderPath, total);
+      return total;
+    })();
+
+    folderTokenInflight.set(folderPath, promise);
+    try { return await promise; }
+    finally { folderTokenInflight.delete(folderPath); }
   }
 
+  // Returns the memoized result for `folderPath`, or null if not yet
+  // computed. The result is either a number (token sum) or a sentinel
+  // { overCap: true, fileCount } when the prior walk hit the file cap.
   function getCachedFolderTokens(folderPath) {
     return folderTokenMemo.has(folderPath) ? folderTokenMemo.get(folderPath) : null;
   }
 
   function clearFolderTokenMemo(folderPath) {
+    folderTokenEpoch++;
     if (folderPath) folderTokenMemo.delete(folderPath);
     else folderTokenMemo.clear();
   }
