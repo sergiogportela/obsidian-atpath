@@ -451,60 +451,84 @@ class AtPathSuggest extends EditorSuggest {
   getSuggestions(context) {
     const file = context.file;
     if (!file) return [];
+    const sourcePath = file.path;
+    const query = context.query || "";
+    const showFolders = this.plugin.settings.suggestFolders !== false;
+    const core = this.plugin.core;
 
-    const repoRoot = getRepoRoot(file.path);
-    const allFiles = this.app.vault.getFiles();
-    const query = context.query;
+    // Source-aware slash-trigger: @prefix/ → enumerate immediate children
+    // of that folder (same-repo → vault-abs → prefix-match), per §3.4.6.
+    if (showFolders && query.endsWith("/")) {
+      const items = core.enumerateFolderCandidates(query, sourcePath);
+      return items.map((item) => ({
+        kind: item.kind,
+        target: item.target,
+        display: item.display,
+        fuzzyResult: null,
+      }));
+    }
 
     const fuzzy = query ? prepareFuzzySearch(query) : null;
+    const sourceRepoRoot = getRepoRoot(sourcePath);
+    const tierOf = (path) => {
+      if (sourceRepoRoot && path.startsWith(sourceRepoRoot + "/")) return 0;
+      if (getRepoRoot(path)) return 1;
+      return 2;
+    };
+    const tiers = [[], [], []];
 
-    const sameRepo = [];
-    const crossRepo = [];
-    const loose = [];
+    for (const f of this.app.vault.getFiles()) {
+      const display = core.computeDisplayPath(f.path, sourcePath);
+      let fuzzyResult = null;
+      let score = 1;
+      if (fuzzy) {
+        fuzzyResult = fuzzy(display);
+        if (!fuzzyResult) continue;
+        score = fuzzyResult.score;
+      }
+      tiers[tierOf(f.path)].push({
+        kind: "file", target: f, display, fuzzyResult, score,
+      });
+    }
 
-    for (const f of allFiles) {
-      if (repoRoot && f.path.startsWith(repoRoot + "/")) {
-        const rel = toRepoRelative(f.path, repoRoot);
-        const candidate = { file: f, display: rel, repoRoot, fuzzyResult: null };
+    if (showFolders) {
+      for (const folder of core.listAllFolders()) {
+        const display = core.computeDisplayPath(folder.path, sourcePath) + "/";
+        let fuzzyResult = null;
+        let score = 1.3;
         if (fuzzy) {
-          const result = fuzzy(rel);
-          if (!result) continue;
-          candidate.fuzzyResult = result;
+          fuzzyResult = fuzzy(display);
+          if (!fuzzyResult) continue;
+          score = fuzzyResult.score * 1.3; // folder bias so they're not buried
         }
-        sameRepo.push(candidate);
-      } else {
-        const fRepoRoot = getRepoRoot(f.path);
-        if (fRepoRoot) {
-          const repoName = fRepoRoot.substring(fRepoRoot.lastIndexOf("/") + 1);
-          const rel = repoName + "/" + toRepoRelative(f.path, fRepoRoot);
-          const candidate = { file: f, display: rel, repoRoot: fRepoRoot, fuzzyResult: null };
-          if (fuzzy) {
-            const result = fuzzy(rel);
-            if (!result) continue;
-            candidate.fuzzyResult = result;
-          }
-          crossRepo.push(candidate);
-        } else {
-          const candidate = { file: f, display: f.path, repoRoot: "", fuzzyResult: null };
-          if (fuzzy) {
-            const result = fuzzy(f.path);
-            if (!result) continue;
-            candidate.fuzzyResult = result;
-          }
-          loose.push(candidate);
-        }
+        tiers[tierOf(folder.path)].push({
+          kind: "folder", target: folder, display, fuzzyResult, score,
+        });
       }
     }
 
-    const all = [...sameRepo, ...crossRepo, ...loose];
     if (fuzzy) {
-      all.sort((a, b) => b.fuzzyResult.score - a.fuzzyResult.score);
+      for (const t of tiers) t.sort((a, b) => b.score - a.score);
+    } else {
+      // Empty query: folders first within each tier, then alphabetical.
+      for (const t of tiers) {
+        t.sort((a, b) => {
+          if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+          return a.display.localeCompare(b.display);
+        });
+      }
     }
-    return all.slice(0, 50);
+
+    return [...tiers[0], ...tiers[1], ...tiers[2]].slice(0, 50);
   }
 
   renderSuggestion(value, el) {
-    const titleEl = el.createDiv();
+    const row = el.createDiv({ cls: "atpath-suggest-row" });
+    if (value.kind === "folder") {
+      const iconEl = row.createSpan({ cls: "atpath-suggest-icon" });
+      setIcon(iconEl, "folder");
+    }
+    const titleEl = row.createDiv({ cls: "atpath-suggest-title" });
     if (value.fuzzyResult) {
       renderResults(titleEl, value.display, value.fuzzyResult);
     } else {
@@ -515,15 +539,12 @@ class AtPathSuggest extends EditorSuggest {
   selectSuggestion(value, evt) {
     const { editor } = this.context;
     const { start, end } = this.context;
-    if (this.plugin.settings.linkFormat === "wikilink") {
-      const sourcePath = this.context.file?.path || "";
-      const link = this.plugin.app.fileManager.generateMarkdownLink(
-        value.file, sourcePath, undefined, "@" + value.display
-      );
-      editor.replaceRange(link + " ", start, end);
-    } else {
-      editor.replaceRange("@" + value.display + " ", start, end);
-    }
+    const sourcePath = this.context.file?.path || "";
+    const mode = this.plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
+    // Wikilink mode + folder = legacy `@folder/` form (formatAtPathInsertion
+    // ignores `mode` for folders, per §3.4.7).
+    const insertion = this.plugin.core.formatAtPathInsertion(value.target, sourcePath, mode);
+    editor.replaceRange(insertion + " ", start, end);
   }
 }
 

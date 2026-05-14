@@ -235,3 +235,25 @@ a.internal-link.atpath-link[data-tokens]::after {
 .atpath-linked-popover-btn {
   cursor: pointer;
 }
+
+/* Suggester rows — folder icon + path display (Plan A §3.4.7) */
+.atpath-suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.atpath-suggest-icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.7;
+}
+.atpath-suggest-icon .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+.atpath-suggest-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
