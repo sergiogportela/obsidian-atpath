@@ -9076,7 +9076,7 @@ var require_html_app_publish = __commonJS({
 });
 
 // src/main.js
-var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 var { encode } = require_gpt_4o();
 var AtPathWidget = class extends WidgetType {
@@ -10578,9 +10578,18 @@ var AtPathPlugin = class extends Plugin {
     this.registerEditorExtension(buildAtPathViewPlugin(this));
     this.registerEditorExtension(buildWikilinkViewPlugin(this));
     registerPostProcessor(this);
-    this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.addClass("mod-clickable");
-    this.updateStatusBar();
+    if (!Platform.isMobile) {
+      this.noteBarEl = this.addStatusBarItem();
+      this.noteBarEl.addClass("mod-clickable", "atpath-status-note");
+      this.noteBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+      this.linkedBarEl = this.addStatusBarItem();
+      this.linkedBarEl.addClass("mod-clickable", "atpath-status-linked");
+      this.linkedBarEl.setAttribute("aria-haspopup", "true");
+      this._noteBufferTokens = 0;
+      this._selectionTokens = 0;
+      this._noteDocVersion = -1;
+      this.updateStatusBar();
+    }
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof TFile) {
@@ -10669,11 +10678,12 @@ var AtPathPlugin = class extends Plugin {
       name: "Migrate @path references to wikilinks",
       callback: () => this.migrateToWikilinks()
     });
-    this.trayBarEl = this.addStatusBarItem();
-    this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
-    this.trayBarEl.setText("@Path");
-    this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
-    this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+    if (!Platform.isMobile) {
+      this.trayBarEl = this.addStatusBarItem();
+      this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
+      this.trayBarEl.setText("@Path");
+      this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
+    }
   }
   showTrayMenu(event) {
     const menu = new Menu();
@@ -10768,56 +10778,113 @@ var AtPathPlugin = class extends Plugin {
     this._statusBarTimeout = setTimeout(() => this.updateStatusBar(), 300);
   }
   async updateStatusBar() {
+    if (!this.noteBarEl || !this.linkedBarEl) return;
+    const clearBars = () => {
+      this.noteBarEl.empty();
+      this.noteBarEl.removeAttribute("aria-label");
+      this.linkedBarEl.empty();
+      this.linkedBarEl.removeAttribute("aria-label");
+      this._linkedTargets = [];
+    };
     if (!this.settings.showTokenCounts) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
+      clearBars();
       return;
     }
     const gen = ++this._statusBarGen;
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
+      clearBars();
+      return;
+    }
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      clearBars();
       return;
     }
     const content = mdView.editor.getValue();
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
-      return;
+    let noteTokens = this._noteBufferTokens;
+    if (!noteTokens) {
+      noteTokens = encode(content).length;
+      this._noteBufferTokens = noteTokens;
     }
-    const noteTokens = await this.getTokenCount(activeFile.path) || 0;
-    if (gen !== this._statusBarGen) return;
     const refs = scanAtPathRefs(content, this.app, activeFile.path);
-    const seenPaths = /* @__PURE__ */ new Set();
-    let linkedTokens = 0;
-    let linkedCount = 0;
+    const seen = /* @__PURE__ */ new Set();
+    const linkedTargets = [];
+    let linkedTotal = 0;
     for (const ref of refs) {
-      const vaultPath = ref.vaultPath || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
-      if (seenPaths.has(vaultPath)) continue;
-      seenPaths.add(vaultPath);
-      const tokens = await this.getTokenCount(vaultPath);
-      if (gen !== this._statusBarGen) return;
+      let normalizedPath;
+      let kind;
+      let tokens = null;
+      if (ref.kind === "folder") {
+        const resolved = this.core.resolveAtPathTarget(
+          { kind: "folder", vaultPath: ref.vaultPath || ref.displayPath },
+          activeFile.path
+        );
+        if (resolved.kind !== "folder") continue;
+        normalizedPath = resolved.normalizedPath;
+        if (seen.has(normalizedPath)) continue;
+        seen.add(normalizedPath);
+        kind = "folder";
+        const cached = this.core.getCachedFolderTokens(normalizedPath);
+        if (cached != null) tokens = cached;
+        else {
+          try {
+            tokens = await this.core.getFolderTokens(normalizedPath);
+          } catch (err) {
+            console.warn("[atpath] folder token sum failed", err);
+            tokens = 0;
+          }
+        }
+        if (gen !== this._statusBarGen) return;
+      } else {
+        normalizedPath = ref.vaultPath || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
+        if (seen.has(normalizedPath)) continue;
+        seen.add(normalizedPath);
+        kind = "file";
+        tokens = await this.getTokenCount(normalizedPath);
+        if (gen !== this._statusBarGen) return;
+      }
       if (tokens != null) {
-        linkedTokens += tokens;
-        linkedCount++;
+        linkedTotal += tokens;
+        linkedTargets.push({ kind, path: normalizedPath, tokens });
       }
     }
-    const total = noteTokens + linkedTokens;
-    if (total === 0) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
+    this._linkedTargets = linkedTargets;
+    this._lastLinkedTotal = linkedTotal;
+    this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length);
+  }
+  _renderStatusBarSegments(noteTokens, linkedTotal, linkedCount) {
+    if (!this.noteBarEl || !this.linkedBarEl) return;
+    this.noteBarEl.empty();
+    const noteLabel = this.noteBarEl.createSpan({ cls: "atpath-label" });
+    const noteValue = this.noteBarEl.createSpan({ cls: "atpath-value" });
+    const sel = this._selectionTokens || 0;
+    if (sel > 0 && this.settings.statusBarShowSelection !== false) {
+      this.noteBarEl.addClass("atpath-status-has-selection");
+      noteLabel.setText("Sel");
+      noteValue.setText(formatTokens(sel) + " / " + formatTokens(noteTokens));
+      this.noteBarEl.setAttribute(
+        "aria-label",
+        "Selection: " + formatTokens(sel) + "\nNote: " + formatTokens(noteTokens)
+      );
+    } else {
+      this.noteBarEl.removeClass("atpath-status-has-selection");
+      noteLabel.setText("Note");
+      noteValue.setText(formatTokens(noteTokens));
+      this.noteBarEl.setAttribute("aria-label", "Note: " + formatTokens(noteTokens));
+    }
+    this.linkedBarEl.empty();
+    if (linkedCount === 0) {
+      this.linkedBarEl.removeAttribute("aria-label");
       return;
     }
-    this.statusBarEl.setText("Tokens: " + formatTokens(total));
-    const tooltipLines = ["Note: " + formatTokens(noteTokens)];
-    if (linkedCount > 0) {
-      tooltipLines.push("@paths (" + linkedCount + "): " + formatTokens(linkedTokens));
-    }
-    tooltipLines.push("Total: " + formatTokens(total));
-    tooltipLines.push("Click to copy with @path contents");
-    this.statusBarEl.setAttribute("aria-label", tooltipLines.join("\n"));
+    this.linkedBarEl.createSpan({ cls: "atpath-label", text: "@paths" });
+    this.linkedBarEl.createSpan({ cls: "atpath-value", text: formatTokens(linkedTotal) });
+    this.linkedBarEl.createSpan({ cls: "atpath-count", text: "(" + linkedCount + ")" });
+    this.linkedBarEl.setAttribute(
+      "aria-label",
+      "@paths (" + linkedCount + "): " + formatTokens(linkedTotal)
+    );
   }
   async copyNoteWithAtPaths() {
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);

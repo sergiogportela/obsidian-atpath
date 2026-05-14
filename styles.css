@@ -104,3 +104,43 @@ a.internal-link.atpath-link[data-tokens]::after {
   position: fixed;
   opacity: 0;
 }
+
+/* Status bar segments (Plan A §3.1) */
+.atpath-status-note,
+.atpath-status-linked {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.atpath-status-linked {
+  position: relative;
+}
+.atpath-status-note .atpath-label,
+.atpath-status-linked .atpath-label {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+.atpath-status-note .atpath-value,
+.atpath-status-linked .atpath-value {
+  font-weight: 500;
+}
+.atpath-status-linked .atpath-count {
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+.atpath-status-note.atpath-status-has-selection .atpath-value {
+  color: var(--text-accent);
+}
+
+/* Hide labels on narrow status bars so numbers stay legible */
+@media (max-width: 600px) {
+  .atpath-status-note .atpath-label,
+  .atpath-status-linked .atpath-label {
+    display: none;
+  }
+}
+
+/* Folder ref styling — distinguish from file refs visually */
+.atpath-folder-link {
+  font-style: italic;
+}

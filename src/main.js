@@ -1,7 +1,7 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
@@ -1787,10 +1787,24 @@ class AtPathPlugin extends Plugin {
     this.registerEditorExtension(buildWikilinkViewPlugin(this));
     registerPostProcessor(this);
 
-    // Status bar
-    this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.addClass("mod-clickable");
-    this.updateStatusBar();
+    // Status bar (desktop only — Obsidian's status bar is desktop-scoped)
+    if (!Platform.isMobile) {
+      this.noteBarEl = this.addStatusBarItem();
+      this.noteBarEl.addClass("mod-clickable", "atpath-status-note");
+      this.noteBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+
+      this.linkedBarEl = this.addStatusBarItem();
+      this.linkedBarEl.addClass("mod-clickable", "atpath-status-linked");
+      this.linkedBarEl.setAttribute("aria-haspopup", "true");
+      // Click handler / hover popover wiring lives in step 6.
+
+      // Buffer-aware live counts (selection + active doc) — step 5.
+      this._noteBufferTokens = 0;
+      this._selectionTokens = 0;
+      this._noteDocVersion = -1;
+
+      this.updateStatusBar();
+    }
 
     // Cache invalidation via vault events
     this.registerEvent(
@@ -1896,13 +1910,12 @@ class AtPathPlugin extends Plugin {
     });
 
     // Tray menu button in status bar
-    this.trayBarEl = this.addStatusBarItem();
-    this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
-    this.trayBarEl.setText("@Path");
-    this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
-
-    this.statusBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
-
+    if (!Platform.isMobile) {
+      this.trayBarEl = this.addStatusBarItem();
+      this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
+      this.trayBarEl.setText("@Path");
+      this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
+    }
   }
 
   showTrayMenu(event) {
@@ -2007,65 +2020,125 @@ class AtPathPlugin extends Plugin {
   }
 
   async updateStatusBar() {
+    if (!this.noteBarEl || !this.linkedBarEl) return; // mobile or pre-init
+
+    const clearBars = () => {
+      this.noteBarEl.empty();
+      this.noteBarEl.removeAttribute("aria-label");
+      this.linkedBarEl.empty();
+      this.linkedBarEl.removeAttribute("aria-label");
+      this._linkedTargets = [];
+    };
+
     if (!this.settings.showTokenCounts) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
+      clearBars();
       return;
     }
 
     const gen = ++this._statusBarGen;
 
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!mdView) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
-      return;
-    }
+    if (!mdView) { clearBars(); return; }
+
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) { clearBars(); return; }
 
     const content = mdView.editor.getValue();
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
-      return;
+
+    // Note tokens — prefer the live buffer count (step 5 maintains it).
+    // Fallback to encoding here if the listener hasn't ticked yet.
+    let noteTokens = this._noteBufferTokens;
+    if (!noteTokens) {
+      noteTokens = encode(content).length;
+      this._noteBufferTokens = noteTokens;
     }
 
-    // Count current file tokens
-    const noteTokens = await this.getTokenCount(activeFile.path) || 0;
-    if (gen !== this._statusBarGen) return;
-
-    // Find all @paths (both formats) and count their tokens
+    // Linked tokens — file + folder refs, deduped by normalized path.
     const refs = scanAtPathRefs(content, this.app, activeFile.path);
-    const seenPaths = new Set();
-    let linkedTokens = 0;
-    let linkedCount = 0;
+    const seen = new Set();
+    const linkedTargets = [];
+    let linkedTotal = 0;
+
     for (const ref of refs) {
-      const vaultPath = ref.vaultPath || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
-      if (seenPaths.has(vaultPath)) continue;
-      seenPaths.add(vaultPath);
-      const tokens = await this.getTokenCount(vaultPath);
-      if (gen !== this._statusBarGen) return;
+      let normalizedPath;
+      let kind;
+      let tokens = null;
+      if (ref.kind === "folder") {
+        const resolved = this.core.resolveAtPathTarget(
+          { kind: "folder", vaultPath: ref.vaultPath || ref.displayPath },
+          activeFile.path
+        );
+        if (resolved.kind !== "folder") continue;
+        normalizedPath = resolved.normalizedPath;
+        if (seen.has(normalizedPath)) continue;
+        seen.add(normalizedPath);
+        kind = "folder";
+        const cached = this.core.getCachedFolderTokens(normalizedPath);
+        if (cached != null) tokens = cached;
+        else {
+          try {
+            tokens = await this.core.getFolderTokens(normalizedPath);
+          } catch (err) {
+            console.warn("[atpath] folder token sum failed", err);
+            tokens = 0;
+          }
+        }
+        if (gen !== this._statusBarGen) return;
+      } else {
+        normalizedPath = ref.vaultPath
+          || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
+        if (seen.has(normalizedPath)) continue;
+        seen.add(normalizedPath);
+        kind = "file";
+        tokens = await this.getTokenCount(normalizedPath);
+        if (gen !== this._statusBarGen) return;
+      }
       if (tokens != null) {
-        linkedTokens += tokens;
-        linkedCount++;
+        linkedTotal += tokens;
+        linkedTargets.push({ kind, path: normalizedPath, tokens });
       }
     }
 
-    const total = noteTokens + linkedTokens;
-    if (total === 0) {
-      this.statusBarEl.empty();
-      this.statusBarEl.removeAttribute("aria-label");
-      return;
+    this._linkedTargets = linkedTargets;
+    this._lastLinkedTotal = linkedTotal;
+
+    this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length);
+  }
+
+  _renderStatusBarSegments(noteTokens, linkedTotal, linkedCount) {
+    if (!this.noteBarEl || !this.linkedBarEl) return;
+
+    this.noteBarEl.empty();
+    const noteLabel = this.noteBarEl.createSpan({ cls: "atpath-label" });
+    const noteValue = this.noteBarEl.createSpan({ cls: "atpath-value" });
+    const sel = this._selectionTokens || 0;
+    if (sel > 0 && this.settings.statusBarShowSelection !== false) {
+      this.noteBarEl.addClass("atpath-status-has-selection");
+      noteLabel.setText("Sel");
+      noteValue.setText(formatTokens(sel) + " / " + formatTokens(noteTokens));
+      this.noteBarEl.setAttribute(
+        "aria-label",
+        "Selection: " + formatTokens(sel) + "\nNote: " + formatTokens(noteTokens)
+      );
+    } else {
+      this.noteBarEl.removeClass("atpath-status-has-selection");
+      noteLabel.setText("Note");
+      noteValue.setText(formatTokens(noteTokens));
+      this.noteBarEl.setAttribute("aria-label", "Note: " + formatTokens(noteTokens));
     }
 
-    this.statusBarEl.setText("Tokens: " + formatTokens(total));
-    const tooltipLines = ["Note: " + formatTokens(noteTokens)];
-    if (linkedCount > 0) {
-      tooltipLines.push("@paths (" + linkedCount + "): " + formatTokens(linkedTokens));
+    this.linkedBarEl.empty();
+    if (linkedCount === 0) {
+      this.linkedBarEl.removeAttribute("aria-label");
+      return;
     }
-    tooltipLines.push("Total: " + formatTokens(total));
-    tooltipLines.push("Click to copy with @path contents");
-    this.statusBarEl.setAttribute("aria-label", tooltipLines.join("\n"));
+    this.linkedBarEl.createSpan({ cls: "atpath-label", text: "@paths" });
+    this.linkedBarEl.createSpan({ cls: "atpath-value", text: formatTokens(linkedTotal) });
+    this.linkedBarEl.createSpan({ cls: "atpath-count", text: "(" + linkedCount + ")" });
+    this.linkedBarEl.setAttribute(
+      "aria-label",
+      "@paths (" + linkedCount + "): " + formatTokens(linkedTotal)
+    );
   }
 
   async copyNoteWithAtPaths() {
