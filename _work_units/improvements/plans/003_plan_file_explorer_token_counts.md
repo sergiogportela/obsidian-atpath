@@ -2,6 +2,7 @@
 
 Source prompt: `../prompts/001_improvements.md`
 Codex review of prior revision folded in.
+Final codex review (post drag-and-drop): 4 findings affecting Plan B (1 critical, 3 major) — folded in below.
 
 This plan owns the **ignore-pattern infrastructure** and the **event-driven folder token cache** that Plan A stubs out. It also patches Obsidian's internal file-explorer view to decorate every file/folder row with a token-count badge.
 
@@ -69,7 +70,13 @@ On launch the file-explorer leaf may be deferred. Sequence:
 
 #### 3.1.6 Cleanup (`onunload`)
 
-Strip every appended `.atpath-token-badge` we own; disconnect MutationObserver; clear caches. Use `WeakSet<HTMLElement>` to remember which `selfEl`s we badged so the cleanup is deterministic.
+Strip every appended `.atpath-token-badge` we own; disconnect MutationObserver; clear caches. **Use `Map<HTMLElement, HTMLElement>` keyed by `selfEl` with the appended badge `<span>` as value** — `WeakSet` was wrong (not iterable, can't enumerate during cleanup). The `Map` also doubles as the duplicate-prevention lookup (§3.4): before appending, check `badgeMap.has(selfEl)`; if yes, update the existing badge's `textContent` in place.
+
+Memory note: a `Map<HTMLElement, …>` holds strong references, so explorer leaves that get destroyed mid-session would leak. Guard against this:
+- `layout-change` handler diffs the live `fileItems` against `badgeMap.keys()` and deletes entries whose `selfEl` is no longer attached (`!document.contains(el)`).
+- `onunload` iterates `badgeMap.values()` once to remove every badge `<span>`, then calls `badgeMap.clear()`.
+
+(An alternative — `WeakMap<HTMLElement, HTMLElement>` — gives garbage-collection for free but is also not iterable. We choose `Map` + explicit pruning so the cleanup pass is auditable.)
 
 ### 3.2 Folder aggregation — explicit contribution map
 
@@ -97,31 +104,57 @@ folderTokenCache: Map<folderPath, {
 
 #### 3.2.2 Operations
 
+**State-transition rules (explicit, addressing Codex M12).** Every file has three boolean dimensions: `present` (in vault), `included` (counts toward tokens), `skipped-or-ignored` (in vault but suppressed). Each operation produces the new triple and applies *exactly one* delta per ancestor:
+
+| Transition | `fileCount` Δ | `includedCount` Δ | `tokens` Δ |
+|---|---|---|---|
+| Absent → included (new file, eligible) | `+1` | `+1` | `+new.tokens` |
+| Absent → skipped/ignored (new file, suppressed) | `+1` | `0` | `0` |
+| Included → included, tokens change (modify with no flag change) | `0` | `0` | `new.tokens − old.tokens` |
+| Included → skipped/ignored (flag flip; modify or settings save) | `0` | `−1` | `−old.tokens` |
+| Skipped/ignored → included (un-ignore, or grow under size cap is **not** counted — see note below) | `0` | `+1` | `+new.tokens` |
+| Included → absent (delete) | `−1` | `−1` | `−old.tokens` |
+| Skipped/ignored → absent (delete) | `−1` | `0` | `0` |
+
+Notes:
+- **Modify of an ignored file**: re-tokenization is **skipped entirely** (no point computing tokens we'll never count). The flag check happens first; only files whose new flag is `included` get tokenized. This prevents the "double-counts on modify" bug Codex flagged.
+- The `size cap` flag (`skipped`) is recomputed on every modify because file size changed. Use the size from `TFile.stat.size` (no read needed). The `ignored` flag is recomputed on every settings save (matcher changed) but stays constant across modify (matcher unchanged).
+- The new triple is committed to `contributionMap[path]` **after** the deltas are applied. If anything throws mid-walk, the cache is left in the pre-delta state.
+
 **Add or update a file** (`create`, `modify`, or first sight during initial walk):
-1. Compute new `{tokens, ignored, skipped}` for `path`.
-2. If `path` already in `contributionMap`, compute deltas: `Δtokens = new.tokens - old.tokens` (or `-old.tokens` if newly ignored/skipped; or `+new.tokens` if previously ignored/skipped and now included).
-3. Walk `parents`. For each ancestor folder: adjust `tokens`, `includedCount`, `fileCount`.
-4. Overwrite `contributionMap[path]` with the new snapshot.
+1. Compute new `{tokens, ignored, skipped, parents}` for `path`. If `ignored || skipped`, skip tokenization (set `tokens: 0`).
+2. Look up `old = contributionMap.get(path)`; if missing, treat as `{tokens: 0, parents: [], ignored: false, skipped: false, present: false}`.
+3. Determine the transition row above and the delta triple `(Δfile, Δincl, Δtokens)`.
+4. Walk the **union** of `old.parents` and `new.parents`. For ancestors in both, apply the delta. For ancestors only in `old.parents` (this is a move — see below), subtract `old` contribution. For ancestors only in `new.parents`, add `new` contribution.
+5. Commit `contributionMap[path] = new`.
 
 **Delete a file**:
-1. Read `contributionMap[path]` for last-known `{tokens, parents, ignored, skipped}`.
-2. Walk those parents; subtract `tokens` (if it was contributing), decrement `fileCount` and `includedCount` as appropriate.
-3. Remove `contributionMap[path]`.
+1. Read `old = contributionMap.get(path)`; if missing, no-op.
+2. Apply `(−1, old.included ? −1 : 0, old.included ? −old.tokens : 0)` to each ancestor in `old.parents`.
+3. `contributionMap.delete(path)`.
 
 **Rename a file** (TFile only):
-1. Run the delete sequence on `oldPath`.
-2. Run the add/update sequence on `newPath`.
+1. Run the **delete** sequence on `oldPath`.
+2. Run the **add/update** sequence on `newPath` (recomputes parents, re-evaluates ignore flag against the new path).
 
-**Rename a folder with descendants** (the hard one):
-1. `vault.on('rename')` fires once for the folder itself; **descendants are NOT re-emitted** by Obsidian.
-2. Detect folder rename via `file instanceof TFolder`.
-3. For every entry in `contributionMap` whose `parents` includes `oldPath`, rewrite the key (path prefix swap) and rebuild `parents`. No tokenization needed (content unchanged).
-4. For every entry in `folderTokenCache` under `oldPath`, rewrite the key. The aggregated totals don't change values — only paths.
-5. Bump `generation` so any in-flight walks abort.
+**Rename or move a folder with descendants — full subtree delete + re-add (critical finding C3).** The prior plan only swapped keys, which leaves the *old ancestors* still inflated (they no longer contain the subtree but their counts still include it) and the *new ancestors* missing (they now contain the subtree but their counts haven't been bumped). Cross-parent moves (`a/sub/` → `b/sub/`) hit this. Correct sequence:
+
+1. `vault.on('rename')` fires once for the folder itself; descendants are NOT re-emitted.
+2. Detect folder rename via `file instanceof TFolder`. Also detect whether it's a pure rename (`dirname(old) === dirname(new)`) or a move (`dirname(old) !== dirname(new)`).
+3. Enumerate all entries in `contributionMap` whose key starts with `oldPath + "/"` — call this `affected[]`.
+4. For each `affected[i]`:
+   a. Apply the **delete** sequence using `old.parents` (subtracts from old ancestors).
+   b. Rewrite the key from `oldPath + suffix` to `newPath + suffix`.
+   c. Re-evaluate `ignored` against the new path (the ignore matcher may flip if `oldPath` matched a pattern that `newPath` doesn't, or vice versa).
+   d. Apply the **add/update** sequence at the new key with freshly computed `parents` (climbs from `newPath`).
+5. Rewrite any keys in `folderTokenCache` from `oldPath...` to `newPath...`. Aggregated values for the *moved subtree's internal folders* don't change in absolute value; their parent-chain bookkeeping is already handled by steps 4a–4d above.
+6. Bump `generation` so any in-flight walks abort.
+
+Pure renames (`dirname(old) === dirname(new)`) still go through this path; in that case `old.parents` and `new.parents` for every descendant share all ancestors above `dirname(old)`, so the deltas cancel for the shared ancestors and only the moved-subtree folders see net change (which is what we want).
 
 **Ignore-pattern change** (settings save):
 1. Bump `generation`.
-2. For each `contributionMap[path]`: re-evaluate `ignored`; if it flipped, push deltas through `parents`.
+2. For each `contributionMap[path]`: re-evaluate `ignored`; if it flipped, walk the transition table above (Included → ignored or Ignored → Included). For Ignored → Included transitions where `tokens` was `0` (never computed), enqueue a tokenization task instead of applying the delta synchronously.
 3. Schedule a debounced badge refresh.
 
 #### 3.2.3 Bounded background queue
@@ -256,12 +289,12 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 ## 6. Implementation steps (in order)
 
-1. **Replace Plan A stubs** in `src/atpath-core.js`: real `isIgnored` (§3.3 matcher) and real `getFolderTokens` (reads `folderTokenCache`).
+1. **Replace Plan A stubs** in `src/atpath-core.js`: real `isIgnored` (§3.3 matcher) and real `getFolderTokens` (§9 — `folderTokenCache` lookup + `enqueueSubtreeIndex` for cache misses, async contract preserved).
 2. **Contribution map + folder cache infrastructure** (§3.2.1).
 3. **Token queue** with concurrency / dedupe / generation cancellation (§3.2.3).
 4. **Vault event handlers** — `create` (with settle-window), `modify`, `delete`, `rename` (file vs. folder branches).
 5. **Decorator core** — per-leaf scan, MutationObserver fallback, multi-leaf + pop-out support.
-6. **Badge DOM** + cleanup `WeakSet`; styles in `styles.css`.
+6. **Badge DOM** + cleanup `Map<selfEl, badgeEl>` with `document.contains` pruning on `layout-change` (§3.1.6); styles in `styles.css`.
 7. **Settings panel** — four fields, live-validation of ignore patterns.
 8. **Fallback `FolderStatsView`** — `ItemView` subclass; refresh button; include-ignored toggle.
 9. **Automated tests** (see §10).
@@ -283,7 +316,9 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 - Every visible file row shows a token badge OR no badge if ignored/oversized/in-configDir/in-trash.
 - Every visible folder row shows an aggregated badge with the sum of non-ignored, non-oversized descendants.
-- **Folder rename** with descendants: badges remain correct without re-tokenizing any file.
+- **Folder rename** (same parent): badges remain correct without re-tokenizing any file.
+- **Folder move** (cross-parent rename, e.g., `a/sub/` → `b/sub/`): old ancestors' counts shrink by the moved subtree's contribution; new ancestors' counts grow by the same amount; subtree internal totals unchanged. No re-tokenization.
+- `getFolderTokens(path)` from Plan A's status bar returns the correct count for any folder, even if that folder has never been rendered in the explorer (visibility-independent).
 - **File create / modify / delete**: badges and ancestor totals update within ~1 s.
 - Edits to ignore patterns take effect within ~1 s; previously-ignored folders re-decorate, newly-ignored folders shed their badges.
 - Disabling `showFolderTokenBadges` removes all badges within one paint cycle; re-enabling restores them.
@@ -294,11 +329,33 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 ---
 
-## 9. Migration / interaction with Plan A
+## 9. Migration / interaction with Plan A — **visibility-independent `getFolderTokens`**
 
-- Plan A ships with stub `isIgnored -> false` and a session-scoped synchronous `getFolderTokens`. **Plan B's first step replaces both stubs in `src/atpath-core.js`.** No Plan A call sites change.
+- Plan A ships with stub `isIgnored -> false` and a session-scoped **async** `getFolderTokens`. **Plan B's first step replaces both stubs in `src/atpath-core.js`.** No Plan A call sites change.
 - Status bar's "linked tokens" total automatically benefits from the real `getFolderTokens` once Plan B lands.
 - Copy-with-folder honors the same `isIgnored` once Plan B lands.
+
+**Critical finding M13 — `folderTokenCache` must serve arbitrary linked folders, not just visible-row folders.** Plan B's cache as initially designed was populated lazily as folders became visible in the explorer. Plan A's status-bar popover and renderers need the count for *any* `@folder/` ref the user has typed, regardless of whether that folder's row is currently visible in the explorer. The cache contract must therefore be:
+
+```js
+async getFolderTokens(folderPath) {
+  const cached = folderTokenCache.get(folderPath);
+  if (cached) return cached.tokens;
+  // Not yet aggregated. Enqueue a subtree index and await completion.
+  return enqueueSubtreeIndex(folderPath);
+}
+```
+
+`enqueueSubtreeIndex(folderPath)`:
+1. Resolves the `TFolder`; returns `0` if missing.
+2. Recursively enumerates all descendant `TFile`s; for each, enqueues a tokenization task in `TokenizeQueue` (§3.2.3) if not already cached in `contributionMap`.
+3. Awaits all enqueued tasks (with `generation` cancellation).
+4. Walks the subtree once more, summing `contributionMap[child.tokens]` for `child where !ignored && !skipped`. Writes the result to `folderTokenCache[folderPath]`.
+5. Returns the sum.
+
+This makes `getFolderTokens` work for any path regardless of whether the explorer has ever rendered that folder. The decorator (visible-row code path) calls the same function — first call from the decorator populates the cache; subsequent calls (from Plan A or the decorator's re-paint) return the cached value.
+
+**Deduplication**: if a second `enqueueSubtreeIndex(path)` arrives while one is in flight for the same path, return the existing in-flight Promise (keyed in a `Map<path, Promise>` cleared on resolve). Prevents duplicate enqueues when both the explorer and the status bar request the same folder.
 
 ---
 
@@ -310,7 +367,10 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 | `contributionMap` add/update | New file → parents updated. Modify changes token count → ancestor deltas correct. Modify flips ignored → ancestors lose contribution. |
 | `contributionMap` delete | Parents' totals shrink; entry removed. |
 | `contributionMap` file rename | Old key removed; new key with correct parents; deltas net to zero in shared ancestors. |
-| `contributionMap` folder rename | All affected keys path-prefix-swapped; no re-tokenization; `generation` bumped. |
+| `contributionMap` folder rename (same parent) | Keys path-prefix-swapped; ancestors above shared parent net to zero delta; no re-tokenization; `generation` bumped. |
+| `contributionMap` folder move (cross-parent) | Old ancestors lose subtree contribution; new ancestors gain subtree contribution; subtree-internal totals unchanged; no re-tokenization. |
+| Transition table | Each row from §3.2.2 hits exactly the expected `(Δfile, Δincl, Δtokens)` triple. Specifically: modify-with-flag-flip does not double-count; modify of ignored file is not retokenized. |
+| `getFolderTokens` visibility independence | Calling `getFolderTokens(unvisitedFolderPath)` resolves to the correct sum; in-flight dedupe returns the same Promise for concurrent calls. |
 | `folderTokenCache` generation cancellation | In-flight walk with old generation aborts before committing results. |
 | Queue dedupe | Enqueueing the same path twice yields one tokenization. |
 | Queue concurrency | At most N tasks running concurrently. |
