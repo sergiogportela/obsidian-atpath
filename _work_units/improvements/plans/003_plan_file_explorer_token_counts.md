@@ -1,8 +1,7 @@
 # Plan B — File explorer token counts (per-file + per-folder)
 
 Source prompt: `../prompts/001_improvements.md`
-Codex review of prior revision folded in.
-Final codex review (post drag-and-drop): 4 findings affecting Plan B (1 critical, 3 major) — folded in below.
+Codex review history is in §12. Two rounds; round-2 findings affecting Plan B: 4 (1 critical, 3 major). All folded in inline; no finding dismissed.
 
 This plan owns the **ignore-pattern infrastructure** and the **event-driven folder token cache** that Plan A stubs out. It also patches Obsidian's internal file-explorer view to decorate every file/folder row with a token-count badge.
 
@@ -287,22 +286,61 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 ---
 
-## 6. Implementation steps (in order)
+## 6. Implementation strategy — agent delegation
 
-1. **Replace Plan A stubs** in `src/atpath-core.js`: real `isIgnored` (§3.3 matcher) and real `getFolderTokens` (§9 — `folderTokenCache` lookup + `enqueueSubtreeIndex` for cache misses, async contract preserved).
-2. **Contribution map + folder cache infrastructure** (§3.2.1).
-3. **Token queue** with concurrency / dedupe / generation cancellation (§3.2.3).
-4. **Vault event handlers** — `create` (with settle-window), `modify`, `delete`, `rename` (file vs. folder branches).
-5. **Decorator core** — per-leaf scan, MutationObserver fallback, multi-leaf + pop-out support.
-6. **Badge DOM** + cleanup `Map<selfEl, badgeEl>` with `document.contains` pruning on `layout-change` (§3.1.6); styles in `styles.css`.
-7. **Settings panel** — four fields, live-validation of ignore patterns.
-8. **Fallback `FolderStatsView`** — `ItemView` subclass; refresh button; include-ignored toggle.
-9. **Automated tests** (see §10).
-10. **Manual smoke test** — large vault (1 k+ files), folder rename with 100+ descendants, ignore pattern toggle, pop-out leaf, deferred file-explorer, dark/light theme, plugin disable → DOM clean.
+Plan B touches subtle event-driven state (`contributionMap`, `folderTokenCache`, generation cancellation), an undocumented Obsidian internal surface (`view.fileItems[path].selfEl`), and a separate sidebar view — three independent worlds that the main agent **must not** try to hold in its head at once. Delegate aggressively; treat the defaults below as the floor.
+
+### Delegation defaults
+
+| Agent | When to use it |
+|---|---|
+| **Explore** (read-only) | Mapping the current file-explorer integration (= none today), locating the existing `tokenCache` / `getTokenCount` paths, surveying Obsidian's `ItemView` / `registerView` usage in the codebase, mapping CSS classes already defined. **First action of every session.** Use `"very thorough"` for the initial survey because Plan B reads across Obsidian's internal DOM AND the existing token-cache code. |
+| **general-purpose** | Multi-step research like "find every place where the file-explorer DOM is referenced in the plugin or in `node_modules/obsidian/obsidian.d.ts`" or any cross-file refactor. Also the natural owner of the ignore-pattern matcher (§3.3.1) — the matcher is a self-contained ~50 LOC function with clear test cases (§11), perfect for a parallel subagent. |
+| **Plan** | Architectural sub-decisions on the transition table (§3.2.2) if the implementer disagrees with any row; sub-decision on whether to materialize `folderTokenCache` lazily or eagerly. **Do not** spawn Plan for code-writing. |
+| **code-reviewer** (general-purpose with a review prompt) | After each commit, before pushing — verify the diff against the acceptance criteria in §9 and the Community Plugin rules. The cross-cutting nature of Plan B (state machine + DOM + sidebar view) makes an independent review especially valuable. |
+
+**Global rules (CLAUDE.md):**
+- `model: "opus"` on every Agent invocation.
+- Run independent subagents **in parallel** (single message, multiple `Agent` blocks).
+- Never delegate **understanding** — read each subagent's report and act on it; don't pipe a research result into a follow-up agent's prompt as "based on this, do X."
+- `ultrareview` is user-triggered. Suggest it at the end; do not invoke it.
 
 ---
 
-## 7. Out of scope
+## 7. Implementation steps (in order)
+
+Each step lists `[DELEGATE: <agent>]` where delegation is the recommended path.
+
+0. **Initial Explore — survey current state** `[DELEGATE: Explore, "very thorough"]`.
+   Hand the Explore subagent these questions: (a) Where in `src/main.js` does the plugin already touch the workspace / vault event surface? (b) Is there any existing code that iterates `getLeavesOfType("file-explorer")` (expected: none)? (c) What CSS classes does `styles.css` already define that we might collide with on a `.atpath-token-badge` selector? (d) What's the current `tokenCache` invalidation flow (line numbers)? (e) Are there any `ItemView` subclasses in the codebase to crib from for `FolderStatsView`? Report under 400 words with file:line citations. **No edits in this step.**
+
+1. **Replace Plan A stubs** in `src/atpath-core.js`: real `isIgnored` (§3.3 matcher) and real `getFolderTokens` (§10 — `folderTokenCache` lookup + `enqueueSubtreeIndex` for cache misses, async contract preserved). **`[DELEGATE: general-purpose]`** for the ignore-pattern matcher itself (self-contained ~50 LOC with the test cases from §11 row 1). Main agent reviews and integrates.
+
+2. **Contribution map + folder cache infrastructure** (§3.2.1). Main agent writes this — the state-machine semantics are load-bearing and any subagent will need re-reading anyway.
+
+3. **Token queue** with concurrency / dedupe / generation cancellation (§3.2.3). **`[DELEGATE: general-purpose]`** — self-contained class with explicit contracts; pair with the queue's test rows from §11. Main agent reviews the cancellation semantics carefully (this is where bugs hide).
+
+4. **Vault event handlers** — `create` (with settle-window), `modify`, `delete`, `rename` (file vs. folder branches per §3.2.2). **Main agent writes the dispatcher** because the transition-table application logic must match §3.2.2 exactly; **`[DELEGATE: Explore]`** first to confirm the current event subscription pattern in `src/main.js` (lines drift).
+
+5. **Decorator core** — per-leaf scan, MutationObserver fallback, multi-leaf + pop-out support (§3.1.1–§3.1.4). Main agent. **`[DELEGATE: Explore]`** in parallel with step 4 to map Obsidian's `view.fileItems` shape against the version in `node_modules/obsidian/`.
+
+6. **Badge DOM** + cleanup `Map<selfEl, badgeEl>` with `document.contains` pruning on `layout-change` (§3.1.6); styles in `styles.css`. Main agent.
+
+7. **Settings panel** — four fields, live-validation of ignore patterns. **`[DELEGATE: general-purpose]`** for the settings UI scaffolding; main agent wires the validation callback.
+
+8. **Fallback `FolderStatsView`** — `ItemView` subclass; refresh button; include-ignored toggle. **`[DELEGATE: general-purpose]`** — this is a self-contained `ItemView` and the fallback is an explicit acceptance-criterion item, so it can be built in parallel with the inline-badge work. Main agent reviews integration and merges.
+
+9. **Automated tests** (see §11). **`[DELEGATE: general-purpose]`** — every test in §11 has explicit input/expected output; the subagent iterates against `node --test` without burning main context. The transition-table test (§11 row 7) is especially well-suited to delegation because it's mechanical row-by-row coverage.
+
+10. **Independent diff review before push** `[DELEGATE: general-purpose with code-review prompt]`. Hand the subagent the full diff plus a checklist: (a) all promises awaited / `.catch()`-ed / `void`-ed, (b) no inline styles, no hardcoded `.obsidian` (must use `app.vault.configDir`), no `innerHTML`, no `console.log`, no `var`, (c) sentence-case UI strings, (d) `WeakSet` / `Map` cleanup audit — every `<span>` we appended is removed on unload, (e) no internal-API access without a `try/catch` + `console.warn` fallback. Cap report at 300 words. Main agent acts on findings.
+
+11. **Manual smoke test** — large vault (1 k+ files), folder rename with 100+ descendants, **folder move cross-parent** (e.g., `a/sub/` → `b/sub/`), ignore pattern toggle, pop-out leaf, deferred file-explorer, dark/light theme, plugin disable → DOM clean. Main agent (needs the user's vault + eyes).
+
+12. **(Optional, user-triggered.)** Suggest the user run `/ultrareview` on the PR once 0–11 are green. Do **not** invoke it from the main agent.
+
+---
+
+## 8. Out of scope
 
 - Mobile support (deferred; file-explorer DOM differs significantly).
 - `.gitignore` file integration (future enhancement).
@@ -312,7 +350,7 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 ---
 
-## 8. Acceptance criteria
+## 9. Acceptance criteria
 
 - Every visible file row shows a token badge OR no badge if ignored/oversized/in-configDir/in-trash.
 - Every visible folder row shows an aggregated badge with the sum of non-ignored, non-oversized descendants.
@@ -329,7 +367,7 @@ All labels sentence-case. `configDir` and trash auto-excluded — not exposed as
 
 ---
 
-## 9. Migration / interaction with Plan A — **visibility-independent `getFolderTokens`**
+## 10. Migration / interaction with Plan A — **visibility-independent `getFolderTokens`**
 
 - Plan A ships with stub `isIgnored -> false` and a session-scoped **async** `getFolderTokens`. **Plan B's first step replaces both stubs in `src/atpath-core.js`.** No Plan A call sites change.
 - Status bar's "linked tokens" total automatically benefits from the real `getFolderTokens` once Plan B lands.
@@ -359,7 +397,7 @@ This makes `getFolderTokens` work for any path regardless of whether the explore
 
 ---
 
-## 10. Automated test plan
+## 11. Automated test plan
 
 | Target | Test cases |
 |---|---|
@@ -378,4 +416,38 @@ This makes `getFolderTokens` work for any path regardless of whether the explore
 | Badge DOM | Duplicate-prevention: re-decorating the same `selfEl` updates the existing badge, doesn't append a second. Cleanup removes every badge we appended (`WeakSet` audit). |
 | Ignored UX | Ignored file → no badge appended; ignored folder → no badge appended; descendants unbadged; "Include ignored" in fallback view shows them. |
 
-Manual smoke test in §6 step 10 still runs in addition.
+Manual smoke test in §7 step 11 still runs in addition.
+
+---
+
+## 12. Codex review
+
+This plan has been audited twice by `codex exec --sandbox read-only --skip-git-repo-check`. Every finding has been folded into the body of the plan inline — no recommendation was dismissed. This section is the audit trail.
+
+### Round 1 — prior revision (findings affecting Plan B folded in)
+
+Pre-cross-cutting-with-Plan-A revision. The round-1 audit drove these structural changes the plan now treats as load-bearing:
+
+- Settled on **per-instance `view.fileItems[path].selfEl` decoration** over `FileExplorerView.prototype` patching (Community Plugin reviewer hostility to prototype mutation).
+- **No new dependencies**: hand-rolled the ignore-pattern matcher rather than adding `picomatch` (global "ask first" rule on packages).
+- Replaced literal `.obsidian` references with `app.vault.configDir` (CLAUDE.md compliance rule).
+- Defined the **`contributionMap`** separate from `tokenCache` because aggregate folder math needs an explicit per-file snapshot — the prior plan's "adjust by `(new - old)`" was broken (old contribution is lost when `tokenCache` is invalidated).
+- Added the **fallback `FolderStatsView`** so the feature still works if the internal-API decoration is rejected during review.
+
+### Round 2 — post drag-and-drop (4 findings affecting Plan B: 1 critical, 3 major)
+
+| ID | Severity | Subject | Folded into |
+|---|---|---|---|
+| **C3** | critical | Folder rename / move with descendants: prior plan only swapped keys, leaving old ancestors inflated and new ancestors deflated. Cross-parent moves (`a/sub/` → `b/sub/`) hit this. | §3.2.2 "Rename or move a folder with descendants — full subtree delete + re-add"; §9 acceptance row "Folder move (cross-parent rename)"; §11 test row |
+| **M11** | major | `WeakSet<HTMLElement>` cleanup is not iterable; can't enumerate appended badges to strip on unload. | §3.1.6 (replaced with `Map<HTMLElement, HTMLElement>` keyed by `selfEl`, value = badge `<span>`; `document.contains` pruning on `layout-change`) |
+| **M12** | major | Transition rules between `(present, included, ignored)` triples were implicit; modify-of-ignored could double-count, modify-with-flag-flip drifted. | §3.2.2 (explicit 7-row state-transition table; modify of ignored file skips tokenization entirely) |
+| **M13** | major | `folderTokenCache` was implicitly visibility-bound (populated lazily as folders became visible). Plan A's status bar needs `getFolderTokens(arbitraryPath)` regardless of explorer visibility. | §10 (visibility-independent contract: `enqueueSubtreeIndex` for cache misses, `Map<path, Promise>` in-flight dedupe); §9 acceptance row "visibility-independent" |
+
+### How to re-run
+
+```sh
+codex exec --sandbox read-only --skip-git-repo-check \
+  --prompt 'Review _work_units/improvements/plans/003_plan_file_explorer_token_counts.md. Focus on: event-driven cache correctness across rename/move/ignore-flip, Obsidian internal-API exposure surface, DOM cleanup completeness, settle-window correctness on vault load, Community Plugin rule violations. Report findings as critical/major/minor with file:section references.'
+```
+
+`/ultrareview` (user-triggered) is suggested as the final gate after this plan is implemented, before opening the PR.

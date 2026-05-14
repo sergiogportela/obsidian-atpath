@@ -1,8 +1,7 @@
 # Plan A — Status bar overhaul + folder autocomplete
 
 Source prompt: `../prompts/001_improvements.md`
-Codex review of prior revision: 14 findings (1 critical, 10 major, 3 minor) — folded in.
-Final codex review (post drag-and-drop): 15 additional findings (4 critical, 10 major, 1 minor) — folded in below.
+Codex review history is in §13. Two rounds: 14 findings (round 1) + 11 findings affecting this plan (round 2). All folded in inline; no finding dismissed.
 
 This plan covers two related features that live in the editor/status-bar/suggest layer. **Folder autocomplete is upgraded from a suggester tweak to a full folder-reference feature** (per user decision): scanner, renderer, click, copy, and token policy all learn about folder refs. Plan B (`003_plan_file_explorer_token_counts.md`) consumes the shared helpers defined here.
 
@@ -492,27 +491,71 @@ Add to `styles.css` (no inline styles anywhere in JS):
 
 ---
 
-## 6. Implementation steps (in order)
+## 6. Implementation strategy — agent delegation
 
-0. **Community Plugin compliance sweep** (§0.5) — land as a separate commit before feature work.
-1. **Carve out `src/atpath-core.js`** with the plugin-bound factory (§0). Wire `this.core = createAtPathCore(this)` in `onload`. Plan A ships with stubs for `isIgnored` / async `getFolderTokens` per §0. Includes `formatAtPathInsertion` (shared by suggest + drop).
-2. **Renderer hook updates (C1)**: rewrite `buildAtPathViewPlugin` (Live Preview, `src/main.js:610`) to consume both file + folder regexes; extend `registerPostProcessor` (Reading mode, `src/main.js:777`) legacy-text walker to handle folder refs. Both branches use `core.resolveAtPathTarget` and async `getFolderTokens` with a `…` placeholder + refresh-on-resolve.
-3. **Refactor status bar setup**: two `addStatusBarItem()` calls; preserve click-to-copy on the note segment.
-4. **CodeMirror 6 update listener**: 80 ms debounce for doc-change re-tokenization; immediate selection updates. Active-buffer tokenization via `encode(editor.getValue()).length`. `Platform.isMobile` guard.
-5. **Build the popover**: stylesheet-anchored DOM; mouseenter/leave + 150 ms grace; click-to-pin + click-outside dismissal; `registerHoverLinkSource` integration; all async listeners properly awaited or `void`-ed.
-6. **Folder regex + scanner pass**: add `AT_PATH_FOLDER_RE` in capture-group form (no second lookbehind); run folder pass first; defense-in-depth reject for file matches followed by `/`. Respect existing excluded-ranges.
-7. **`resolveAtPathTarget`**: file + folder branches; consumers (click, popover, copy, renderers) switch to using it instead of inline `getFirstLinkpathDest`.
-8. **Click handler folder branch**: `revealFolderInExplorer` helper iterates all explorer leaves, falls back to `openLinkText` for folder-note convention.
-9. **`copyNoteWithAtPaths({ paths })`** folder branch: descendant walk, ignore filter, max-size filter, header line. Awaits `getFolderTokens` for the header count.
-10. **`AtPathSuggest`** updates: source-aware `enumerateFolderCandidates` traversing `app.vault.getRoot()`; slash-trigger same-repo → vault-absolute → prefix fallback chain; 1.3× bias; folder rendering; folder insertion via `core.formatAtPathInsertion`.
-11. **Drag-and-drop extension** (§3.5): CM6 `EditorView.domEventHandlers({dragover, drop})` inside a `Compartment` for runtime toggle; `extractDraggedVaultPaths` with three-tier MIME probe; `insertAtPathRefs` calls `core.formatAtPathInsertion`; 50-ref cap with `Notice`.
-12. **Settings**: three new fields (`statusBarShowSelection`, `suggestFolders`, `enableDragDropAtPath`); drop `folderInsertTrailingSlash`. Drag-drop toggle reconfigures the compartment live across open leaves.
-13. **Automated tests** (see §10).
-14. **Manual smoke test** against a real vault.
+The implementing agent (the human's primary Claude session) **must delegate aggressively** during this plan. Plan A touches a dozen call sites across `src/main.js`, two renderer pipelines, the suggester, the status bar, and a new CM6 extension; doing every read/edit in the main context is wasteful and risks losing track of the cross-cutting contracts (`formatAtPathInsertion`, async `getFolderTokens`, `resolveAtPathTarget`). The defaults below should be treated as the floor, not the ceiling — when in doubt, delegate.
+
+### Delegation defaults
+
+| Agent | When to use it |
+|---|---|
+| **Explore** (read-only) | Locating code, mapping call sites, verifying line numbers, surveying current DOM structure, finding existing CSS classes. **First action of every session** is an Explore survey before any edit. Specify `"medium"` for single-area work, `"very thorough"` for cross-cutting changes (renderer + scanner + suggester touch many sites). |
+| **general-purpose** | Multi-step refactors that span several files but don't need architectural input — e.g., "extract these 6 inline-style sites into a `.atpath-clipboard-fallback` class and verify with a re-grep." |
+| **Plan** | Whenever a sub-decision needs architecture (e.g., "should the popover use Portal-style detachment or stay anchored?"). Do **not** spawn Plan for code-writing tasks. |
+| **code-reviewer** (via `Agent({ subagent_type: "general-purpose", ... })` with a review-only prompt) | After each commit, before pushing — independent second-opinion read of the diff. |
+
+**Global rules (CLAUDE.md):**
+- Pass `model: "opus"` on every Agent invocation (highest-capability subagents per project rule).
+- Run independent subagents **in parallel** (single message, multiple `Agent` blocks) whenever their work doesn't depend on each other.
+- Never delegate **understanding** — the main agent reads the agent's report and decides. Don't say "based on findings, implement it"; read the findings, then write the edit yourself or hand a specific, file-and-line-scoped edit to a follow-up agent.
+- `ultrareview` is user-triggered (the human runs `/ultrareview` manually). The main agent does **not** invoke it; just suggest it at the end of a feature if useful.
 
 ---
 
-## 7. Risks & mitigations
+## 7. Implementation steps (in order)
+
+Each step lists `[DELEGATE: <agent>]` where delegation is the recommended path. Steps without a tag are short enough that the main agent should handle them directly.
+
+0. **Initial Explore — survey current state** `[DELEGATE: Explore, "very thorough"]`.
+   Prompt the Explore subagent to verify every line-numbered reference in §2 and §0.5 against the current `src/main.js` (lines drift between revisions), to map every call site of `getTokenCount`, `AT_PATH_RE`, `scanAtPathRefs`, `copyNoteWithAtPaths`, `addStatusBarItem`, `AtPathSuggest`, `buildAtPathViewPlugin`, and `registerPostProcessor`, and to enumerate existing CSS classes in `styles.css` that we might collide with. Report under 400 words with file:line citations. **Do not edit anything in this step.**
+
+1. **Community Plugin compliance sweep** (§0.5) — land as a **separate commit** before feature work. `[DELEGATE: general-purpose]` for the inline-style → CSS-class extraction (it touches 4+ sites mechanically); the main agent reviews the diff and commits.
+
+2. **Carve out `src/atpath-core.js`** with the plugin-bound factory (§0). Wire `this.core = createAtPathCore(this)` in `onload`. Ship Plan A with stubs for `isIgnored` / async `getFolderTokens` per §0. Includes `formatAtPathInsertion` (shared by suggest + drop). `[DELEGATE: general-purpose]` for the routing rewrite (every existing helper call switches to `this.core.*`); main agent reviews and tests.
+
+3. **Renderer hook updates (C1)**: rewrite `buildAtPathViewPlugin` (Live Preview) to consume both file + folder regexes; extend `registerPostProcessor` (Reading mode) legacy-text walker to handle folder refs. Both branches use `core.resolveAtPathTarget` and async `getFolderTokens` with a `…` placeholder + refresh-on-resolve. **Main agent writes this** — the async-render-refresh dance is subtle and re-reading a subagent's CM6 transaction code burns the context anyway. **`[DELEGATE: Explore]` first** to confirm exactly what `MatchDecorator` consumers expect and how the existing post-processor branches are wired.
+
+4. **Refactor status bar setup**: two `addStatusBarItem()` calls; preserve click-to-copy on the note segment. Short — main agent.
+
+5. **CodeMirror 6 update listener**: 80 ms debounce for doc-change re-tokenization; immediate selection updates. Active-buffer tokenization via `encode(editor.getValue()).length`. `Platform.isMobile` guard. Main agent.
+
+6. **Build the popover**: stylesheet-anchored DOM; mouseenter/leave + 150 ms grace; click-to-pin + click-outside dismissal; `registerHoverLinkSource` integration; all async listeners properly awaited or `void`-ed. **Main agent writes the DOM + listeners**; `[DELEGATE: general-purpose]` for the styles.css additions if they balloon past ~80 lines.
+
+7. **Folder regex + scanner pass**: add `AT_PATH_FOLDER_RE` in capture-group form (no second lookbehind); run folder pass first; defense-in-depth reject for file matches followed by `/`. Respect existing excluded-ranges. Main agent.
+
+8. **`resolveAtPathTarget`**: file + folder branches; consumers (click, popover, copy, renderers) switch to using it. `[DELEGATE: general-purpose]` for the call-site rewrite once the resolver is in place — there are 5+ call sites and the rewrite is mechanical.
+
+9. **Click handler folder branch**: `revealFolderInExplorer` helper iterates all explorer leaves, falls back to `openLinkText`. Main agent.
+
+10. **`copyNoteWithAtPaths({ paths })`** folder branch: descendant walk, ignore filter, max-size filter, header line. Awaits `getFolderTokens` for the header count. Main agent.
+
+11. **`AtPathSuggest`** updates: source-aware `enumerateFolderCandidates` traversing `app.vault.getRoot()`; slash-trigger same-repo → vault-absolute → prefix fallback chain; 1.3× bias; folder rendering; folder insertion via `core.formatAtPathInsertion`. Main agent.
+
+12. **Drag-and-drop extension** (§3.5): CM6 `EditorView.domEventHandlers({dragover, drop})` inside a `Compartment` for runtime toggle; `extractDraggedVaultPaths` with three-tier MIME probe; `insertAtPathRefs` calls `core.formatAtPathInsertion`; 50-ref cap with `Notice`. **`[DELEGATE: Plan]` first** to confirm the Compartment reconfigure approach against the current Obsidian + CodeMirror versions if there's any doubt; otherwise main agent writes it.
+
+13. **Settings**: three new fields (`statusBarShowSelection`, `suggestFolders`, `enableDragDropAtPath`); drop `folderInsertTrailingSlash`. Drag-drop toggle reconfigures the compartment live across open leaves. Main agent.
+
+14. **Automated tests** (see §11). `[DELEGATE: general-purpose]` — tests are well-scoped and the agent can iterate against `node --test` without context cost on the main session.
+
+15. **Independent diff review before push** `[DELEGATE: general-purpose with code-review prompt]`. Hand the subagent the full diff and a checklist: (a) all promises awaited / `.catch()`-ed / `void`-ed, (b) no inline styles, no `innerHTML`, no `console.log`, no `var`, no `fetch`, (c) sentence-case UI strings, (d) renderer covers both `@file` and `@folder/`, (e) suggest and drop produce identical text via `formatAtPathInsertion`. Cap report at 300 words. Main agent acts on findings, then commits and pushes.
+
+16. **Manual smoke test** against a real vault. Main agent (can't be delegated — needs the user's vault + eyes).
+
+17. **(Optional, user-triggered.)** Suggest the user run `/ultrareview` on the PR once 0–16 are green. Do **not** invoke it from the main agent.
+
+---
+
+## 8. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -530,7 +573,7 @@ Add to `styles.css` (no inline styles anywhere in JS):
 
 ---
 
-## 8. Out of scope
+## 9. Out of scope
 
 - File-explorer sidebar decoration (Plan B).
 - Persisting popover checkbox state.
@@ -540,7 +583,7 @@ Add to `styles.css` (no inline styles anywhere in JS):
 
 ---
 
-## 9. Acceptance criteria
+## 10. Acceptance criteria
 
 - Status bar shows two segments; selection count appears within ~100 ms of selecting text.
 - **Note count reflects unsaved edits within 80 ms.** (Regression from current state.)
@@ -563,7 +606,7 @@ Add to `styles.css` (no inline styles anywhere in JS):
 
 ---
 
-## 10. Automated test plan
+## 11. Automated test plan
 
 Plan A introduces small, testable functions. Tests live under `tests/` and run with `node --test` (or `vitest` if approved as a dep — currently planning on the zero-dep `node:test` runner).
 
@@ -580,13 +623,57 @@ Plan A introduces small, testable functions. Tests live under `tests/` and run w
 | `insertAtPathRefs` | File in legacy mode → `@<path>`. File in wikilink mode → `[[…|@<path>]]` via `generateMarkdownLink`. Folder in either mode → `@<path>/`. Multi-ref drop → space-separated single transaction; cursor lands at end. >50 refs → `Notice` + first 50 only. |
 | Drag-and-drop hook | `dragover` with recognized payload calls `preventDefault`; with unrecognized payload returns `false` (default behavior preserved). `drop` outside the editor DOM does not trigger our handler. `enableDragDropAtPath=false` → extension not registered, default drag behavior intact. |
 
-Manual smoke test in §6 step 12 still runs (real vault, narrow window, light/dark theme, deferred file-explorer).
+Manual smoke test in §7 step 16 still runs (real vault, narrow window, light/dark theme, deferred file-explorer).
 
 ---
 
-## 11. Dependencies on Plan B
+## 12. Dependencies on Plan B
 
 Plan A ships with stubs (`isIgnored -> false`, `getFolderTokens -> synchronous walk`). When Plan B lands:
 - `isIgnored` becomes the hand-rolled matcher (Plan B §3.3).
 - `getFolderTokens` becomes the event-driven `folderTokenCache` consumer.
 - No Plan A call site changes.
+
+---
+
+## 13. Codex review
+
+This plan has been audited twice by `codex exec --sandbox read-only --skip-git-repo-check`. Every finding has been folded into the body of the plan inline — no recommendation was dismissed. This section is the audit trail.
+
+### Round 1 — prior revision (14 findings: 1 critical, 10 major, 3 minor)
+
+Pre-drag-and-drop revision of Plan A. The round-1 audit drove the structural changes the plan now treats as load-bearing:
+
+- Established the **shared `atpath-core.js` module** so file/folder helpers don't drift between Plan A (editor) and Plan B (file explorer).
+- Decided the **plugin-bound factory** shape over free exports (helpers need `app` + `plugin.settings` context).
+- Replaced ad-hoc `getAllFolders()` / `getAllLoadedFiles()` (undocumented Vault APIs) with `app.vault.getRoot()` traversal.
+- Fixed the `getFolderTokens` contract to be **async from day one** (the stub already returns a Promise) so Plan B's event-driven cache can drop in without changing Plan A call sites.
+- Killed the `folderInsertTrailingSlash` setting (trailing slash is mandatory; making it optional creates dead text).
+- Hardened the popover against inline-style violations (all positioning lives in `styles.css`, JS toggles a `hidden` attribute / `.is-open` class only).
+
+### Round 2 — post drag-and-drop (15 total findings; 11 affect Plan A: 3 critical, 7 major, 1 minor)
+
+Audit run after the drag-and-drop section (§3.5) was added and after the renderer-coverage gap was suspected. Findings folded into the indicated sections:
+
+| ID | Severity | Subject | Folded into |
+|---|---|---|---|
+| **C1** | critical | Renderer coverage for `@folder/` — adding folder refs to the scanner doesn't make them render. Live Preview and Reading-mode hooks needed dedicated branches. | §3.4.1 (renderer coverage block); §7 step 3 |
+| **C2** | critical | `getFolderTokens` must be async because `vault.cachedRead` has no sync path. The contract is async from the stub; renderers paint a `…` placeholder and refresh on resolve. | §3.4.5; §0 (stub contract) |
+| **C4** | critical | Acceptance criterion "no inline styles / unawaited promises" can't pass while current `src/main.js` has multiple violations. Required a prerequisite compliance sweep. | §0.5; §7 step 1 |
+| **M5** | major | `revealInFolder` is internal and `getLeavesOfType("file-explorer")[0]` ignores split-pane reality. | §3.4.3 (`revealFolderInExplorer` helper iterates all leaves with try/catch + fallback) |
+| **M6** | major | Suggester slash-trigger was vault-absolute only; doesn't work when the active note lives under `_repos/foo/`. | §3.4.6 (source-aware: same-repo → vault-absolute → prefix fallback) |
+| **M7** | major | `enumerateFolderCandidates` was missing a required `sourcePath` parameter for same-repo resolution. | §3.4.6 / §0 module surface |
+| **M8** | major | Drop-insertion referenced undefined `relPath` / raw `folder.path`; would have produced broken or inconsistent inserts vs suggester. | §3.4.7 / §3.5.3 (single `formatAtPathInsertion(target, sourcePath, mode)` shared by suggest + drop) |
+| **M9** | major | Second lookbehind in `AT_PATH_FOLDER_RE` would have compounded the existing iOS-Safari risk. | §3.4.1 (capture-group boundary `(^|[\s(])` + `m[1].length` offset, no second lookbehind) |
+| **M10** | major | `registerEditorExtension` cannot be unregistered; the drag-drop toggle would have required a plugin reload to take effect. | §3.5.6 (CodeMirror 6 `Compartment` for runtime reconfigure) |
+| **M14** | major | Status bar's "linked total" needs `getFolderTokens` to work for any `@folder/` ref the user has typed, not just folders visible in the explorer. | §3.4.5 + Plan B §9 visibility-independent contract |
+| **m15** | minor | Scanner ordering: `AT_PATH_RE` matches `@foo.md` greedily so `@foo.md/` would never reach the folder pass. | §3.4.1 (run folder pass first; defense-in-depth reject file matches followed by `/`) |
+
+### How to re-run
+
+```sh
+codex exec --sandbox read-only --skip-git-repo-check \
+  --prompt 'Review _work_units/improvements/plans/002_plan_statusbar_and_folder_autocomplete.md. Focus on: contract drift between Plan A and Plan B, async vs sync helper signatures, Obsidian internal-API surface area, Community Plugin rule violations, regex correctness on iOS Safari. Report findings as critical/major/minor with file:section references.'
+```
+
+`/ultrareview` (user-triggered) is suggested as the final gate after this plan is implemented, before opening the PR.
