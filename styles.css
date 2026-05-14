@@ -144,3 +144,94 @@ a.internal-link.atpath-link[data-tokens]::after {
 .atpath-folder-link {
   font-style: italic;
 }
+
+/* Linked-files hover popover (Plan A §3.3) */
+.atpath-linked-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: min(420px, 90vw);
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--background-modifier-box-shadow);
+  padding: 8px 0;
+  z-index: var(--layer-popover);
+}
+.atpath-linked-popover[hidden] {
+  display: none;
+}
+.atpath-status-linked.is-pinned .atpath-linked-popover {
+  border-color: var(--interactive-accent);
+}
+.atpath-linked-popover-header {
+  padding: 4px 12px 8px;
+  font-size: 0.85em;
+  opacity: 0.75;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 4px;
+}
+.atpath-linked-popover-rows {
+  display: flex;
+  flex-direction: column;
+}
+.atpath-linked-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+.atpath-linked-popover-row:hover {
+  background: var(--background-modifier-hover);
+}
+.atpath-linked-popover-check {
+  margin: 0;
+}
+.atpath-linked-popover-icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.7;
+}
+.atpath-linked-popover-icon .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+.atpath-linked-popover-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-monospace);
+}
+.atpath-linked-popover-row--folder .atpath-linked-popover-path {
+  font-style: italic;
+}
+.atpath-linked-popover-count {
+  opacity: 0.6;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+.atpath-linked-popover-footer {
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 8px 12px 4px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.atpath-linked-popover-selected {
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+.atpath-linked-popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.atpath-linked-popover-btn {
+  cursor: pointer;
+}

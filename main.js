@@ -10630,6 +10630,21 @@ var AtPathPlugin = class extends Plugin {
       this.linkedBarEl = this.addStatusBarItem();
       this.linkedBarEl.addClass("mod-clickable", "atpath-status-linked");
       this.linkedBarEl.setAttribute("aria-haspopup", "true");
+      this._linkedLabelEl = this.linkedBarEl.createSpan({ cls: "atpath-label", text: "@paths" });
+      this._linkedValueEl = this.linkedBarEl.createSpan({ cls: "atpath-value", text: "" });
+      this._linkedCountEl = this.linkedBarEl.createSpan({ cls: "atpath-count", text: "" });
+      this._popoverEl = this.linkedBarEl.createDiv({ cls: "atpath-linked-popover" });
+      this._popoverEl.setAttribute("role", "dialog");
+      this._popoverEl.setAttribute("hidden", "");
+      this._popoverPinned = false;
+      this._popoverHideTimer = null;
+      this._popoverCheckedPaths = /* @__PURE__ */ new Set();
+      this._popoverCheckedSig = null;
+      this.registerHoverLinkSource("atpath-status", {
+        display: "AtPath status bar",
+        defaultMod: true
+      });
+      this._wireLinkedPopoverEvents();
       this._noteBufferTokens = 0;
       this._selectionTokens = 0;
       this._noteDocVersion = -1;
@@ -10837,9 +10852,11 @@ var AtPathPlugin = class extends Plugin {
     const clearBars = () => {
       this.noteBarEl.empty();
       this.noteBarEl.removeAttribute("aria-label");
-      this.linkedBarEl.empty();
-      this.linkedBarEl.removeAttribute("aria-label");
+      this._hideLinkedSegment();
       this._linkedTargets = [];
+      this._lastLinkedTotal = 0;
+      this._linkedSig = "";
+      this._renderLinkedPopover();
     };
     if (!this.settings.showTokenCounts) {
       clearBars();
@@ -10906,7 +10923,9 @@ var AtPathPlugin = class extends Plugin {
     }
     this._linkedTargets = linkedTargets;
     this._lastLinkedTotal = linkedTotal;
+    this._linkedSig = linkedTargets.map((t) => t.kind + ":" + t.path).sort().join("|");
     this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length);
+    this._renderLinkedPopover();
   }
   _repaintStatusBarFromBuffer() {
     if (!this.noteBarEl || !this.linkedBarEl) return;
@@ -10938,20 +10957,192 @@ var AtPathPlugin = class extends Plugin {
       noteValue.setText(formatTokens(noteTokens));
       this.noteBarEl.setAttribute("aria-label", "Note: " + formatTokens(noteTokens));
     }
-    this.linkedBarEl.empty();
     if (linkedCount === 0) {
-      this.linkedBarEl.removeAttribute("aria-label");
+      this._hideLinkedSegment();
       return;
     }
-    this.linkedBarEl.createSpan({ cls: "atpath-label", text: "@paths" });
-    this.linkedBarEl.createSpan({ cls: "atpath-value", text: formatTokens(linkedTotal) });
-    this.linkedBarEl.createSpan({ cls: "atpath-count", text: "(" + linkedCount + ")" });
+    this._linkedLabelEl.removeClass("atpath-hidden");
+    this._linkedValueEl.removeClass("atpath-hidden");
+    this._linkedCountEl.removeClass("atpath-hidden");
+    this._linkedValueEl.setText(formatTokens(linkedTotal));
+    this._linkedCountEl.setText("(" + linkedCount + ")");
     this.linkedBarEl.setAttribute(
       "aria-label",
       "@paths (" + linkedCount + "): " + formatTokens(linkedTotal)
     );
   }
-  async copyNoteWithAtPaths() {
+  _hideLinkedSegment() {
+    if (!this.linkedBarEl) return;
+    this.linkedBarEl.removeAttribute("aria-label");
+    if (this._linkedLabelEl) this._linkedLabelEl.addClass("atpath-hidden");
+    if (this._linkedValueEl) this._linkedValueEl.addClass("atpath-hidden");
+    if (this._linkedCountEl) this._linkedCountEl.addClass("atpath-hidden");
+    this._hidePopoverImmediate();
+  }
+  _wireLinkedPopoverEvents() {
+    if (!this.linkedBarEl || !this._popoverEl) return;
+    this.registerDomEvent(this.linkedBarEl, "mouseenter", () => this._showPopover());
+    this.registerDomEvent(this.linkedBarEl, "mouseleave", () => this._scheduleHidePopover());
+    this.registerDomEvent(this._popoverEl, "mouseenter", () => this._showPopover());
+    this.registerDomEvent(this._popoverEl, "mouseleave", () => this._scheduleHidePopover());
+    this.registerDomEvent(this.linkedBarEl, "click", (evt) => {
+      if (this._popoverEl && this._popoverEl.contains(evt.target)) return;
+      this._popoverPinned = !this._popoverPinned;
+      if (this._popoverPinned) {
+        this.linkedBarEl.addClass("is-pinned");
+        this._showPopover();
+      } else {
+        this.linkedBarEl.removeClass("is-pinned");
+        this._scheduleHidePopover();
+      }
+    });
+    this.registerDomEvent(document, "click", (evt) => {
+      if (!this._popoverPinned) return;
+      if (!this._popoverEl || this._popoverEl.hasAttribute("hidden")) return;
+      const t = evt.target;
+      if (this.linkedBarEl.contains(t)) return;
+      if (this._popoverEl.contains(t)) return;
+      this._hidePopoverImmediate();
+    });
+  }
+  _showPopover() {
+    if (!this._popoverEl) return;
+    if ((this._linkedTargets || []).length === 0) return;
+    if (this._popoverHideTimer) {
+      window.clearTimeout(this._popoverHideTimer);
+      this._popoverHideTimer = null;
+    }
+    this._popoverEl.removeAttribute("hidden");
+  }
+  _scheduleHidePopover() {
+    if (!this._popoverEl) return;
+    if (this._popoverPinned) return;
+    if (this._popoverHideTimer) window.clearTimeout(this._popoverHideTimer);
+    this._popoverHideTimer = window.setTimeout(() => {
+      if (this._popoverEl) this._popoverEl.setAttribute("hidden", "");
+      this._popoverHideTimer = null;
+    }, 150);
+  }
+  _hidePopoverImmediate() {
+    if (!this._popoverEl) return;
+    if (this._popoverHideTimer) {
+      window.clearTimeout(this._popoverHideTimer);
+      this._popoverHideTimer = null;
+    }
+    this._popoverEl.setAttribute("hidden", "");
+    this._popoverPinned = false;
+    if (this.linkedBarEl) this.linkedBarEl.removeClass("is-pinned");
+  }
+  _renderLinkedPopover() {
+    if (!this._popoverEl) return;
+    const targets = this._linkedTargets || [];
+    this._popoverEl.empty();
+    if (targets.length === 0) {
+      this._hidePopoverImmediate();
+      return;
+    }
+    if (this._popoverCheckedSig !== this._linkedSig) {
+      this._popoverCheckedPaths = new Set(targets.map((t) => t.path));
+      this._popoverCheckedSig = this._linkedSig;
+    } else {
+      const liveSet = new Set(targets.map((t) => t.path));
+      for (const p of [...this._popoverCheckedPaths]) {
+        if (!liveSet.has(p)) this._popoverCheckedPaths.delete(p);
+      }
+    }
+    const header = this._popoverEl.createDiv({ cls: "atpath-linked-popover-header" });
+    const targetWord = targets.length === 1 ? "target" : "targets";
+    header.setText(
+      "Linked @paths \xB7 " + formatTokens(this._lastLinkedTotal || 0) + " tokens \xB7 " + targets.length + " " + targetWord
+    );
+    const rowsEl = this._popoverEl.createDiv({ cls: "atpath-linked-popover-rows" });
+    const activeFile = this.app.workspace.getActiveFile();
+    const sourcePath = activeFile ? activeFile.path : "";
+    for (const t of targets) {
+      const row = rowsEl.createEl("label", { cls: "atpath-linked-popover-row" });
+      if (t.kind === "folder") row.addClass("atpath-linked-popover-row--folder");
+      const cb = row.createEl("input", { type: "checkbox", cls: "atpath-linked-popover-check" });
+      cb.checked = this._popoverCheckedPaths.has(t.path);
+      cb.addEventListener("change", () => {
+        if (cb.checked) this._popoverCheckedPaths.add(t.path);
+        else this._popoverCheckedPaths.delete(t.path);
+        this._refreshPopoverSelectedTotal();
+      });
+      const iconEl = row.createSpan({ cls: "atpath-linked-popover-icon" });
+      setIcon(iconEl, t.kind === "folder" ? "folder" : "file-text");
+      const pathSpan = row.createSpan({
+        cls: "atpath-linked-popover-path",
+        text: t.kind === "folder" ? t.path + "/" : t.path
+      });
+      pathSpan.setAttribute("title", t.kind === "folder" ? t.path + "/" : t.path);
+      row.createSpan({
+        cls: "atpath-linked-popover-count",
+        text: formatTokens(t.tokens || 0)
+      });
+      if (t.kind === "file") {
+        row.addEventListener("mouseover", (evt) => {
+          this.app.workspace.trigger("hover-link", {
+            event: evt,
+            source: "atpath-status",
+            hoverParent: this,
+            targetEl: row,
+            linktext: t.path,
+            sourcePath
+          });
+        });
+      }
+    }
+    const footer = this._popoverEl.createDiv({ cls: "atpath-linked-popover-footer" });
+    this._popoverSelectedEl = footer.createDiv({ cls: "atpath-linked-popover-selected" });
+    const actions = footer.createDiv({ cls: "atpath-linked-popover-actions" });
+    const allBtn = actions.createEl("button", {
+      text: "All",
+      cls: "atpath-linked-popover-btn"
+    });
+    allBtn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      this._popoverCheckedPaths = new Set(targets.map((t) => t.path));
+      this._renderLinkedPopover();
+      this._showPopover();
+    });
+    const noneBtn = actions.createEl("button", {
+      text: "None",
+      cls: "atpath-linked-popover-btn"
+    });
+    noneBtn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      this._popoverCheckedPaths.clear();
+      this._renderLinkedPopover();
+      this._showPopover();
+    });
+    const copyBtn = actions.createEl("button", {
+      text: "Copy selected",
+      cls: "atpath-linked-popover-btn atpath-linked-popover-btn--primary"
+    });
+    copyBtn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      const selected = new Set(this._popoverCheckedPaths);
+      void this.copyNoteWithAtPaths({ paths: selected });
+    });
+    this._refreshPopoverSelectedTotal();
+  }
+  _refreshPopoverSelectedTotal() {
+    if (!this._popoverSelectedEl) return;
+    const targets = this._linkedTargets || [];
+    let total = 0;
+    let count = 0;
+    for (const t of targets) {
+      if (this._popoverCheckedPaths.has(t.path)) {
+        total += t.tokens || 0;
+        count += 1;
+      }
+    }
+    this._popoverSelectedEl.setText(
+      "Selected: " + formatTokens(total) + " tokens (" + count + "/" + targets.length + ")"
+    );
+  }
+  async copyNoteWithAtPaths(opts) {
+    const filterPaths = opts && opts.paths instanceof Set ? opts.paths : null;
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) {
       new Notice("No active note to copy.");
@@ -10971,6 +11162,8 @@ var AtPathPlugin = class extends Plugin {
       const vaultPath = ref.vaultPath || resolveAtPathFromSource(ref.displayPath, activeFile.path, this);
       if (seen.has(vaultPath)) continue;
       seen.add(vaultPath);
+      if (ref.kind === "folder") continue;
+      if (filterPaths && !filterPaths.has(vaultPath)) continue;
       const ext = ref.displayPath.split(".").pop().toLowerCase();
       if (BINARY_EXTENSIONS.has(ext)) continue;
       const file = this.app.vault.getAbstractFileByPath(vaultPath);
