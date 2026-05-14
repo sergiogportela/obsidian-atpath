@@ -3,6 +3,7 @@
 
 const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
+const { Compartment } = require("@codemirror/state");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
 // ─── AtPathWidget — renders @path as a single span immune to emphasis splitting
@@ -987,6 +988,135 @@ function buildBufferCountListener(plugin) {
   });
 }
 
+// ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
+
+function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
+  if (!dataTransfer) return [];
+  const out = [];
+  const seen = new Set();
+  const addPath = (rawPath) => {
+    if (!rawPath || typeof rawPath !== "string") return;
+    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!path || seen.has(path)) return;
+    const target = app.vault.getAbstractFileByPath(path);
+    if (!target) return;
+    if (sourcePath && target.path === sourcePath) return; // skip self-ref
+    seen.add(path);
+    if (target instanceof TFile) {
+      out.push({ kind: "file", vaultPath: target.path, target });
+    } else if (target instanceof TFolder) {
+      out.push({ kind: "folder", vaultPath: target.path, target });
+    }
+  };
+
+  const tryJsonMime = (mime) => {
+    let raw;
+    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
+    if (!raw) return false;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (_) { return false; }
+    if (parsed && Array.isArray(parsed.files)) {
+      for (const f of parsed.files) addPath(f && f.path);
+      return out.length > 0;
+    }
+    if (Array.isArray(parsed)) {
+      for (const f of parsed) addPath(f && (f.path || f));
+      return out.length > 0;
+    }
+    return false;
+  };
+
+  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
+  if (tryJsonMime("application/obsidian-files")) return out;
+  if (tryJsonMime("application/obsidian-file")) return out;
+  if (tryJsonMime("application/x-obsidian-files")) return out;
+
+  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
+  let uriList;
+  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
+  if (uriList) {
+    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
+      ? app.vault.adapter.getBasePath()
+      : "";
+    for (const line of uriList.split(/\r?\n/)) {
+      const url = line.trim();
+      if (!url || url.startsWith("#")) continue;
+      if (url.startsWith("obsidian://")) {
+        try {
+          const u = new URL(url);
+          const fileParam = u.searchParams.get("file");
+          if (fileParam) addPath(decodeURIComponent(fileParam));
+        } catch (_) { /* skip malformed */ }
+      } else if (url.startsWith("file://")) {
+        let abs;
+        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
+        if (basePath && abs.startsWith(basePath + "/")) {
+          addPath(abs.substring(basePath.length + 1));
+        }
+      }
+    }
+    if (out.length > 0) return out;
+  }
+
+  // Tier 3: text/plain — bare vault path(s), one per line.
+  let plain;
+  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
+  if (plain) {
+    for (const line of plain.split(/\r?\n/)) {
+      const path = line.trim();
+      if (path) addPath(path);
+    }
+  }
+  return out;
+}
+
+function insertAtPathRefs(view, pos, refs, plugin) {
+  const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+  const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
+  const parts = [];
+  for (const r of refs) {
+    if (!r || !r.target) continue;
+    parts.push(plugin.core.formatAtPathInsertion(r.target, sourcePath, mode));
+  }
+  if (parts.length === 0) return;
+  const text = parts.join(" ") + " ";
+  view.dispatch({
+    changes: { from: pos, to: pos, insert: text },
+    selection: { anchor: pos + text.length },
+    userEvent: "input.drop",
+  });
+}
+
+function buildDragDropExtension(plugin) {
+  return EditorView.domEventHandlers({
+    dragover(evt, _view) {
+      const refs = extractDraggedVaultPaths(
+        evt.dataTransfer,
+        plugin.app,
+        plugin.app.workspace.getActiveFile()?.path || ""
+      );
+      if (!refs.length) return false;
+      evt.preventDefault();
+      if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
+      return true;
+    },
+    drop(evt, view) {
+      const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin.app, sourcePath);
+      if (!refs.length) return false;
+      if (refs.length > 50) {
+        new Notice("Drop limited to 50 paths");
+        refs = refs.slice(0, 50);
+      }
+      evt.preventDefault();
+      evt.stopPropagation();
+      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+      return true;
+    },
+  });
+}
+
 // ─── D) markdownPostProcessor — Clickable links in Reading mode ──────
 
 function registerPostProcessor(plugin) {
@@ -1886,6 +2016,16 @@ class AtPathPlugin extends Plugin {
     if (!Platform.isMobile) {
       this.registerEditorExtension(buildBufferCountListener(this));
     }
+
+    // Drag-and-drop — registered behind a CM6 Compartment so the
+    // `enableDragDropAtPath` toggle can reconfigure live without reload.
+    this.dragDropCompartment = new Compartment();
+    this.registerEditorExtension(
+      this.dragDropCompartment.of(
+        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
+      )
+    );
+
     registerPostProcessor(this);
 
     // Status bar (desktop only — Obsidian's status bar is desktop-scoped)
@@ -2080,6 +2220,19 @@ class AtPathPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  reconfigureDragDrop() {
+    if (!this.dragDropCompartment) return;
+    const ext = this.settings.enableDragDropAtPath !== false
+      ? buildDragDropExtension(this)
+      : [];
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
+      if (cm) {
+        cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+      }
+    }
   }
 
   async getTokenCount(vaultPath) {

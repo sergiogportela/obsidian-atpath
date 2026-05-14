@@ -9078,6 +9078,7 @@ var require_html_app_publish = __commonJS({
 // src/main.js
 var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
+var { Compartment } = require("@codemirror/state");
 var { encode } = require_gpt_4o();
 var AtPathWidget = class extends WidgetType {
   constructor(fullMatch, path, tokenCount) {
@@ -9954,6 +9955,142 @@ function buildBufferCountListener(plugin) {
     }
   });
 }
+function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
+  if (!dataTransfer) return [];
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const addPath = (rawPath) => {
+    if (!rawPath || typeof rawPath !== "string") return;
+    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!path || seen.has(path)) return;
+    const target = app.vault.getAbstractFileByPath(path);
+    if (!target) return;
+    if (sourcePath && target.path === sourcePath) return;
+    seen.add(path);
+    if (target instanceof TFile) {
+      out.push({ kind: "file", vaultPath: target.path, target });
+    } else if (target instanceof TFolder) {
+      out.push({ kind: "folder", vaultPath: target.path, target });
+    }
+  };
+  const tryJsonMime = (mime) => {
+    let raw;
+    try {
+      raw = dataTransfer.getData(mime);
+    } catch (_) {
+      return false;
+    }
+    if (!raw) return false;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      return false;
+    }
+    if (parsed && Array.isArray(parsed.files)) {
+      for (const f of parsed.files) addPath(f && f.path);
+      return out.length > 0;
+    }
+    if (Array.isArray(parsed)) {
+      for (const f of parsed) addPath(f && (f.path || f));
+      return out.length > 0;
+    }
+    return false;
+  };
+  if (tryJsonMime("application/obsidian-files")) return out;
+  if (tryJsonMime("application/obsidian-file")) return out;
+  if (tryJsonMime("application/x-obsidian-files")) return out;
+  let uriList;
+  try {
+    uriList = dataTransfer.getData("text/uri-list");
+  } catch (_) {
+    uriList = "";
+  }
+  if (uriList) {
+    const basePath = app.vault.adapter && typeof app.vault.adapter.getBasePath === "function" ? app.vault.adapter.getBasePath() : "";
+    for (const line of uriList.split(/\r?\n/)) {
+      const url = line.trim();
+      if (!url || url.startsWith("#")) continue;
+      if (url.startsWith("obsidian://")) {
+        try {
+          const u = new URL(url);
+          const fileParam = u.searchParams.get("file");
+          if (fileParam) addPath(decodeURIComponent(fileParam));
+        } catch (_) {
+        }
+      } else if (url.startsWith("file://")) {
+        let abs;
+        try {
+          abs = decodeURIComponent(url.replace(/^file:\/\//, ""));
+        } catch (_) {
+          continue;
+        }
+        if (basePath && abs.startsWith(basePath + "/")) {
+          addPath(abs.substring(basePath.length + 1));
+        }
+      }
+    }
+    if (out.length > 0) return out;
+  }
+  let plain;
+  try {
+    plain = dataTransfer.getData("text/plain");
+  } catch (_) {
+    plain = "";
+  }
+  if (plain) {
+    for (const line of plain.split(/\r?\n/)) {
+      const path = line.trim();
+      if (path) addPath(path);
+    }
+  }
+  return out;
+}
+function insertAtPathRefs(view, pos, refs, plugin) {
+  const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+  const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
+  const parts = [];
+  for (const r of refs) {
+    if (!r || !r.target) continue;
+    parts.push(plugin.core.formatAtPathInsertion(r.target, sourcePath, mode));
+  }
+  if (parts.length === 0) return;
+  const text = parts.join(" ") + " ";
+  view.dispatch({
+    changes: { from: pos, to: pos, insert: text },
+    selection: { anchor: pos + text.length },
+    userEvent: "input.drop"
+  });
+}
+function buildDragDropExtension(plugin) {
+  return EditorView.domEventHandlers({
+    dragover(evt, _view) {
+      const refs = extractDraggedVaultPaths(
+        evt.dataTransfer,
+        plugin.app,
+        plugin.app.workspace.getActiveFile()?.path || ""
+      );
+      if (!refs.length) return false;
+      evt.preventDefault();
+      if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
+      return true;
+    },
+    drop(evt, view) {
+      const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin.app, sourcePath);
+      if (!refs.length) return false;
+      if (refs.length > 50) {
+        new Notice("Drop limited to 50 paths");
+        refs = refs.slice(0, 50);
+      }
+      evt.preventDefault();
+      evt.stopPropagation();
+      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+      return true;
+    }
+  });
+}
 function registerPostProcessor(plugin) {
   plugin.registerMarkdownPostProcessor((el, ctx) => {
     const internalLinks = el.querySelectorAll("a.internal-link");
@@ -10664,6 +10801,12 @@ var AtPathPlugin = class extends Plugin {
     if (!Platform.isMobile) {
       this.registerEditorExtension(buildBufferCountListener(this));
     }
+    this.dragDropCompartment = new Compartment();
+    this.registerEditorExtension(
+      this.dragDropCompartment.of(
+        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
+      )
+    );
     registerPostProcessor(this);
     if (!Platform.isMobile) {
       this.noteBarEl = this.addStatusBarItem();
@@ -10821,6 +10964,16 @@ var AtPathPlugin = class extends Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  reconfigureDragDrop() {
+    if (!this.dragDropCompartment) return;
+    const ext = this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : [];
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
+      if (cm) {
+        cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+      }
+    }
   }
   async getTokenCount(vaultPath) {
     const file = this.app.vault.getAbstractFileByPath(vaultPath);
