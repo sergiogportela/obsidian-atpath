@@ -9998,6 +9998,10 @@ function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
       for (const f of parsed) addPath(f && (f.path || f));
       return out.length > 0;
     }
+    if (parsed && typeof parsed.path === "string") {
+      addPath(parsed.path);
+      return out.length > 0;
+    }
     return false;
   };
   if (tryJsonMime("application/obsidian-files")) return out;
@@ -10834,7 +10838,7 @@ var AtPathPlugin = class extends Plugin {
     if (!Platform.isMobile) {
       this.noteBarEl = this.addStatusBarItem();
       this.noteBarEl.addClass("mod-clickable", "atpath-status-note");
-      this.noteBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+      this.registerDomEvent(this.noteBarEl, "click", () => this.copyNoteWithAtPaths());
       this.linkedBarEl = this.addStatusBarItem();
       this.linkedBarEl.addClass("mod-clickable", "atpath-status-linked");
       this.linkedBarEl.setAttribute("aria-haspopup", "true");
@@ -10855,7 +10859,6 @@ var AtPathPlugin = class extends Plugin {
       this._wireLinkedPopoverEvents();
       this._noteBufferTokens = 0;
       this._selectionTokens = 0;
-      this._noteDocVersion = -1;
       this.updateStatusBar();
     }
     this.registerEvent(
@@ -10960,7 +10963,7 @@ var AtPathPlugin = class extends Plugin {
       this.trayBarEl = this.addStatusBarItem();
       this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
       this.trayBarEl.setText("@Path");
-      this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
+      this.registerDomEvent(this.trayBarEl, "click", (event) => this.showTrayMenu(event));
     }
   }
   showTrayMenu(event) {
@@ -10993,8 +10996,11 @@ var AtPathPlugin = class extends Plugin {
     const ext = this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : [];
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
-      if (cm) {
+      if (!cm) continue;
+      try {
         cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+      } catch (err) {
+        console.warn("[atpath] drag-drop reconfigure failed for one leaf", err);
       }
     }
   }

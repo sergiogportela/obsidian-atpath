@@ -1026,6 +1026,10 @@ function extractDraggedVaultPaths(dataTransfer, app, sourcePath) {
       for (const f of parsed) addPath(f && (f.path || f));
       return out.length > 0;
     }
+    if (parsed && typeof parsed.path === "string") {
+      addPath(parsed.path);
+      return out.length > 0;
+    }
     return false;
   };
 
@@ -2073,7 +2077,7 @@ class AtPathPlugin extends Plugin {
     if (!Platform.isMobile) {
       this.noteBarEl = this.addStatusBarItem();
       this.noteBarEl.addClass("mod-clickable", "atpath-status-note");
-      this.noteBarEl.addEventListener("click", () => this.copyNoteWithAtPaths());
+      this.registerDomEvent(this.noteBarEl, "click", () => this.copyNoteWithAtPaths());
 
       this.linkedBarEl = this.addStatusBarItem();
       this.linkedBarEl.addClass("mod-clickable", "atpath-status-linked");
@@ -2104,7 +2108,6 @@ class AtPathPlugin extends Plugin {
       // Buffer-aware live counts (selection + active doc) — step 5.
       this._noteBufferTokens = 0;
       this._selectionTokens = 0;
-      this._noteDocVersion = -1;
 
       this.updateStatusBar();
     }
@@ -2227,7 +2230,7 @@ class AtPathPlugin extends Plugin {
       this.trayBarEl = this.addStatusBarItem();
       this.trayBarEl.addClass("mod-clickable", "atpath-tray-btn");
       this.trayBarEl.setText("@Path");
-      this.trayBarEl.addEventListener("click", (event) => this.showTrayMenu(event));
+      this.registerDomEvent(this.trayBarEl, "click", (event) => this.showTrayMenu(event));
     }
   }
 
@@ -2269,9 +2272,15 @@ class AtPathPlugin extends Plugin {
       ? buildDragDropExtension(this)
       : [];
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      // `leaf.view.editor.cm` is the internal CM6 handle. Wrap in try/catch
+      // so an Obsidian API rename doesn't crash the settings toggle —
+      // a missed live-reconfigure is recoverable by reload, a crash isn't.
       const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
-      if (cm) {
+      if (!cm) continue;
+      try {
         cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+      } catch (err) {
+        console.warn("[atpath] drag-drop reconfigure failed for one leaf", err);
       }
     }
   }
