@@ -2473,13 +2473,11 @@ class AtPathPlugin extends Plugin {
 
     const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = new Set();
-    const resolved = [];
+    const blocks = []; // [{type:"file", relPath, content} | {type:"header", text}]
     const failed = [];
+    const sizeCapBytes = this.settings.maxFileSizeMB * 1024 * 1024;
 
     for (const ref of refs) {
-      // Folder branch comes in step 10 — for now, skip folder refs when copying.
-      if (ref.kind === "folder") continue;
-
       const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
       const vaultPath = resolvedRef.normalizedPath;
       if (!vaultPath || seen.has(vaultPath)) continue;
@@ -2487,6 +2485,51 @@ class AtPathPlugin extends Plugin {
 
       if (filterPaths && !filterPaths.has(vaultPath)) continue;
 
+      if (resolvedRef.kind === "folder") {
+        const folderTarget = resolvedRef.target;
+        if (!(folderTarget instanceof TFolder)) {
+          failed.push(ref.displayPath);
+          continue;
+        }
+
+        const folderFiles = [];
+        const walk = (node) => {
+          for (const c of node.children) {
+            if (c instanceof TFolder) {
+              walk(c);
+            } else if (c instanceof TFile) {
+              if (this.core.isIgnored(c.path)) continue;
+              if (c.stat.size > sizeCapBytes) continue;
+              const fext = c.extension.toLowerCase();
+              if (BINARY_EXTENSIONS.has(fext)) continue;
+              folderFiles.push(c);
+            }
+          }
+        };
+        walk(folderTarget);
+
+        let folderTokenTotal = 0;
+        const folderBlocks = [];
+        for (const f of folderFiles) {
+          try {
+            const fc = await this.app.vault.cachedRead(f);
+            const tk = await this.getTokenCount(f.path);
+            if (tk != null) folderTokenTotal += tk;
+            folderBlocks.push({ type: "file", relPath: f.path, content: fc });
+          } catch (_) { /* skip unreadable file inside folder */ }
+        }
+
+        blocks.push({
+          type: "header",
+          text: "--- @" + ref.displayPath + " (" + folderBlocks.length +
+            (folderBlocks.length === 1 ? " file, " : " files, ") +
+            formatTokens(folderTokenTotal) + " tokens) ---",
+        });
+        for (const fb of folderBlocks) blocks.push(fb);
+        continue;
+      }
+
+      // File branch
       const ext = ref.displayPath.split(".").pop().toLowerCase();
       if (BINARY_EXTENSIONS.has(ext)) continue;
 
@@ -2496,7 +2539,7 @@ class AtPathPlugin extends Plugin {
       }
       try {
         const fileContent = await this.app.vault.cachedRead(resolvedRef.target);
-        resolved.push({ relPath: ref.displayPath, content: fileContent });
+        blocks.push({ type: "file", relPath: ref.displayPath, content: fileContent });
       } catch (e) {
         failed.push(ref.displayPath);
       }
@@ -2504,11 +2547,16 @@ class AtPathPlugin extends Plugin {
 
     // Strip wikilink syntax for clean clipboard output
     let output = content.replace(new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags), (_, _target, display) => "@" + display);
-    if (resolved.length > 0) {
+    const fileBlockCount = blocks.filter((b) => b.type === "file").length;
+    if (blocks.length > 0) {
       output += "\n\n---\n";
-      for (const { relPath, content: fileContent } of resolved) {
-        const fence = makeFence(fileContent);
-        output += "\n## @" + relPath + "\n\n" + fence + "\n" + fileContent + "\n" + fence + "\n\n---\n";
+      for (const b of blocks) {
+        if (b.type === "header") {
+          output += "\n" + b.text + "\n";
+        } else {
+          const fence = makeFence(b.content);
+          output += "\n## @" + b.relPath + "\n\n" + fence + "\n" + b.content + "\n" + fence + "\n\n---\n";
+        }
       }
     }
 
@@ -2530,8 +2578,8 @@ class AtPathPlugin extends Plugin {
         frag.appendChild(line);
       }
       new Notice(frag, 0);
-    } else if (resolved.length > 0) {
-      new Notice("Copied note + " + resolved.length + " @path(s) to clipboard.", 5000);
+    } else if (fileBlockCount > 0) {
+      new Notice("Copied note + " + fileBlockCount + " file(s) to clipboard.", 5000);
     } else {
       new Notice("Copied note to clipboard (no @path references found).", 5000);
     }
