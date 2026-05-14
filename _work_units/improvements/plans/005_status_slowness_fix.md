@@ -30,8 +30,10 @@ This plan ships five surgical changes that:
    consumer (CM6 inline, post-processor, popover slow + fast paths) via
    one shared `formatLinkedTargetCount(t)` helper, with `pending` /
    `overCap` baked into the popover `renderSig`
-5. **E.** Gate the copy actions so over-cap / pending folder rows
-   cannot recreate the freeze via "Copy selected"
+5. **E.** Gate **every** copy entry point — popover "Copy selected",
+   note-status-segment click, command palette, tray menu — and cap the
+   folder walk inside `copyNoteWithAtPaths` itself, so over-cap / pending
+   folders cannot recreate the freeze from any caller
 
 No new abstractions beyond the shared helper, no backwards-compat
 shims, no settings migration. Clean break — per user preference
@@ -41,7 +43,7 @@ shims, no settings migration. Clean break — per user preference
 
 ## Evidence (perf dump excerpts from the freeze repro)
 
-From the `localStorage.atpath_perf = "1"` instrumentation Phase 1 run.
+From the `localStorage.setItem("atpath-perf", "1")` instrumentation Phase 1 run.
 Numbers are the user's actual session before Obsidian froze:
 
 ```
@@ -185,6 +187,7 @@ function clearFolderTokenMemo(folderPath) {
 }
 
 async function getFolderTokens(folderPath) {
+  ATPATH_PERF.inc("getFolderTokens.calls");
   const folder = app.vault.getAbstractFileByPath(folderPath);
   if (!(folder instanceof TFolder)) return 0;
   const memo = folderTokenMemo.get(folderPath);
@@ -207,7 +210,12 @@ async function getFolderTokens(folderPath) {
       for (const c of node.children) {
         if (overCap) return;
         if (c instanceof TFolder) walk(c);
-        else if (c instanceof TFile && !isIgnored(c.path) && c.stat.size <= sizeCapBytes) {
+        else if (c instanceof TFile && !isIgnored(c.path)) {
+          ATPATH_PERF.inc("getFolderTokens.walkedFiles");
+          if (c.stat.size > sizeCapBytes) {
+            ATPATH_PERF.inc("getFolderTokens.skippedTooLarge");
+            continue;
+          }
           paths.push(c.path);
           if (paths.length > maxFiles) { overCap = true; return; }
         }
@@ -215,6 +223,7 @@ async function getFolderTokens(folderPath) {
     })(folder);
 
     if (overCap) {
+      ATPATH_PERF.inc("getFolderTokens.overCap");
       const sentinel = { overCap: true, fileCount: paths.length }; // > maxFiles
       if (folderTokenEpoch === startEpoch) folderTokenMemo.set(folderPath, sentinel);
       return sentinel;
@@ -223,7 +232,24 @@ async function getFolderTokens(folderPath) {
     let total = 0;
     for (let i = 0; i < paths.length; i += batchSize) {
       const slice = paths.slice(i, i + batchSize);
-      const counts = await Promise.all(slice.map(getFileTokens));
+      const counts = await ATPATH_PERF.timeAsync(
+        "getFolderTokens.batch",
+        () => Promise.all(slice.map(p => {
+          ATPATH_PERF.inc("getFolderTokens.encoded");
+          // size bucket counter — read TFile size from the cache or app.vault
+          const f = app.vault.getAbstractFileByPath(p);
+          if (f && f.stat) {
+            const sz = f.stat.size;
+            const bucket = sz < 1024 ? "lt1k"
+                         : sz < 5 * 1024 ? "1-5k"
+                         : sz < 20 * 1024 ? "5-20k"
+                         : sz < 100 * 1024 ? "20-100k"
+                         : "100k+";
+            ATPATH_PERF.inc("getFolderTokens.encodeSize." + bucket);
+          }
+          return getFileTokens(p);
+        }))
+      );
       for (const n of counts) total += n || 0;
       if (i + batchSize < paths.length) {
         await new Promise(r => setTimeout(r, 0));
@@ -238,6 +264,15 @@ async function getFolderTokens(folderPath) {
   finally { folderTokenInflight.delete(folderPath); }
 }
 ```
+
+The `ATPATH_PERF.*` counters above are required: the verification path
+in the test plan reads them by name. Without this instrumentation the
+acceptance criteria cannot be measured. `ATPATH_PERF` is already
+defined in `src/main.js:9-65`; export the same symbol from there or
+re-import it in `src/atpath-core.js` (the plugin closure already passes
+`plugin` and `app`; pass `ATPATH_PERF` the same way, or read it off
+`window.__atpath_perf` since the existing code already publishes it
+there for the dump command).
 
 Notes:
 
@@ -318,7 +353,11 @@ for (const ref of refs) {
   if (resolved.kind === "folder") {
     const cached = this.core.getCachedFolderTokens(normalizedPath);
     if (cached == null) {
-      this.scheduleFolderTokenFetch(normalizedPath, this._lastEditorView);
+      // Pass the live markdown CM6 view rather than the possibly-stale
+      // _lastEditorView — see "Scheduler view-freshness" below.
+      const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const cm = mdView && mdView.editor && mdView.editor.cm ? mdView.editor.cm : this._lastEditorView;
+      this.scheduleFolderTokenFetch(normalizedPath, cm);
       // render placeholder this pass; re-render fires when fetch settles
       linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: null, pending: true });
       pendingOrOverCap = true;
@@ -367,6 +406,31 @@ Notes:
   yielding) walk finishes. The scheduler still has a synchronous
   prefix until the walk's first `await`; with the short-circuit cap
   in Fix A that prefix is bounded.
+
+**Scheduler view-freshness** (`src/main.js:2487-2508`): the current
+`scheduleFolderTokenFetch` writes `this._lastEditorView = view` only
+on the dispatched (non-deduped) path. If the first call passed `null`
+or a stale view and a later call passes a real one, the later call is
+deduped at line 2491 and the fresh view is dropped — so when the walk
+resolves, `_scheduleRefresh()` finds no view to dispatch and the
+inline CM6 decoration stays on `…` until the next editor transaction.
+Fix: lift the `view` assignment out of the dedupe gate and overwrite
+`_lastEditorView` on every call where the incoming `view` is non-null:
+
+```javascript
+scheduleFolderTokenFetch(folderPath, view) {
+  ATPATH_PERF.inc("scheduleFolderTokenFetch.calls");
+  if (!this.settings.showTokenCounts) return;
+  if (view) this._lastEditorView = view;          // ← always refresh
+  if (this._inFlightFolderTokenFetches.has(folderPath)) {
+    ATPATH_PERF.inc("scheduleFolderTokenFetch.deduped");
+    return;
+  }
+  ATPATH_PERF.inc("scheduleFolderTokenFetch.dispatched");
+  this._inFlightFolderTokenFetches.add(folderPath);
+  this.core.getFolderTokens(folderPath).then(/* unchanged */);
+}
+```
 
 ### Fix D — Render affordances via one shared helper
 
@@ -421,26 +485,83 @@ Sites:
      **and** disabling the row from being counted in the selection
      (see Fix E).
 
-### Fix E — Gate copy actions for over-cap / pending rows
+### Fix E — Gate every copy entry point (not just the popover)
 
-`src/main.js:2955`, `src/main.js:3086`, and any other "Copy selected"
-or "Copy selected + note" handlers:
+`copyNoteWithAtPaths()` is invoked from four sites and only one
+passes a path filter:
 
-- A row with `t.pending` or `t.overCap` must be **unchecked and
-  disabled** in the popover's selection UI. Show a tooltip: "Skipped:
-  too many files" / "Still counting…".
-- The copy paths must defensively skip such rows even if a stale
-  selection list contains them, and emit a `Notice` ("Skipped N
-  folder(s): over the configured max-files limit").
-- This prevents "Copy selected" from triggering the same unbounded
-  walk we just removed from the status bar.
+- `src/main.js:2901` — popover "Copy selected" (`{paths: selected}`)
+- `src/main.js:2232` — note status segment click (no filter)
+- `src/main.js:2359` — command palette (no filter)
+- `src/main.js:2401` — tray menu / file menu (no filter)
+
+The unfiltered three would still walk every folder descendant
+synchronously inside the folder branch at `src/main.js:3086-3127`
+(the loop at lines 3093-3107 is the same unbounded walk pattern that
+caused the original freeze, and at lines 3111-3117 it then awaits
+`cachedRead + getTokenCount` per file in a tight loop). Three changes:
+
+1. **Popover UI gate** (slow + fast paths in `_renderLinkedPopover`
+   around `src/main.js:2740`-onward): a row with `t.pending` or
+   `t.overCap` must be **unchecked and disabled** in the selection
+   UI; tooltip "Skipped: too many files" or "Still counting…". The
+   "Copy selected" footer's selected total uses `formatLinkedTargetCount`
+   and treats pending/over-cap as `0` (already covered in Fix D).
+
+2. **Defensive cap inside `copyNoteWithAtPaths` folder walk**
+   (`src/main.js:3086-3127`): the walk at lines 3093-3107 must
+   short-circuit at `maxFolderFiles + 1` exactly like Fix A's walk.
+   When the cap fires for a given folder ref, **skip the entire
+   folder** (do not push a header, do not encode any descendants),
+   record the ref's display path, and continue. Pseudocode:
+
+   ```javascript
+   const maxFiles = this.settings.maxFolderFiles || 500;
+   const folderFiles = [];
+   let overCap = false;
+   const walk = (node) => {
+     if (overCap) return;
+     for (const c of node.children) {
+       if (overCap) return;
+       if (c instanceof TFolder) walk(c);
+       else if (c instanceof TFile) {
+         if (this.core.isIgnored(c.path)) continue;
+         if (c.stat.size > sizeCapBytes) continue;
+         const fext = c.extension.toLowerCase();
+         if (BINARY_EXTENSIONS.has(fext)) continue;
+         folderFiles.push(c);
+         if (folderFiles.length > maxFiles) { overCap = true; return; }
+       }
+     }
+   };
+   walk(folderTarget);
+   if (overCap) {
+     skippedFolders.push(ref.displayPath);
+     continue; // skip this folder ref entirely
+   }
+   ```
+
+3. **Combined `Notice` after the loop**: if `skippedFolders.length > 0`,
+   emit one `Notice`: `"Skipped " + skippedFolders.length + " folder(s)
+   over the max-files limit: " + skippedFolders.join(", ")`. This runs
+   regardless of which entry point invoked `copyNoteWithAtPaths`, so
+   all three unfiltered call sites get the same protection.
+
+Together these protect every caller — popover, status-segment click,
+command, tray menu — and remove the last path that could re-trigger
+the unbounded folder walk.
 
 ---
 
 ## Implementation order
 
 1. **`src/atpath-core.js`**: rewrite `getFolderTokens` per Fix A —
-   short-circuit walk, batch=1 default, in-flight map, epoch counter.
+   short-circuit walk, batch=1 default, in-flight map, epoch counter,
+   and `ATPATH_PERF` instrumentation (calls / walkedFiles /
+   skippedTooLarge / overCap / encoded / encodeSize.* / batch). The
+   `ATPATH_PERF` symbol lives in `src/main.js`; either pass it into
+   the core closure (next to `app` / `plugin`) or read off
+   `window.__atpath_perf` (already published at `src/main.js:61`).
    Update `clearFolderTokenMemo` to bump the epoch. Update
    `getCachedFolderTokens` doc comment to note the union return shape.
    Build, run unit tests.
@@ -448,8 +569,12 @@ or "Copy selected + note" handlers:
    wire `maxFolderFiles` / `maxFileSizeMB` `onChange` to clear folder
    memo and trigger the refresh path.
 3. **`src/main.js`**: update `updateStatusBar` per Fix C, including
-   `pending`/`overCap` fields on `linkedTargets` and the `+` total
-   suffix when partial.
+   `pending`/`overCap` fields on `linkedTargets`, the `+` total
+   suffix when partial, and passing the live `MarkdownView` CM6
+   editor to `scheduleFolderTokenFetch` instead of `_lastEditorView`.
+   Also update `scheduleFolderTokenFetch` per the "Scheduler
+   view-freshness" subsection of Fix C — lift the
+   `_lastEditorView = view` assignment out of the dedupe gate.
 4. **`src/main.js`**: add the shared `formatLinkedTargetCount(t)`
    helper. Update the 3 render sites for Fix D. Find them with:
    ```
@@ -460,9 +585,16 @@ or "Copy selected + note" handlers:
    consumers like the popover selected-total.) Include `pending` /
    `overCap` truthiness in the popover `renderSig`. Update tooltips /
    classes / `title` in the fast path.
-5. **`src/main.js`**: gate copy actions per Fix E — disable selection
-   for over-cap/pending rows, defensive skip + `Notice` in the copy
-   handlers.
+5. **`src/main.js`**: gate copy actions per Fix E. Three sub-steps:
+   (a) disable selection for over-cap/pending rows in
+   `_renderLinkedPopover` (slow + fast paths);
+   (b) inside `copyNoteWithAtPaths`'s folder branch
+   (`src/main.js:3086-3127`), short-circuit the walk at
+   `maxFolderFiles + 1` and skip over-cap folders entirely;
+   (c) emit a single combined `Notice` listing skipped folders after
+   the loop. This protects all four entry points (popover at `:2901`,
+   status segment click at `:2232`, command at `:2359`, tray menu at
+   `:2401`).
 6. **`src/main.js`**: update `scheduleFolderTokenFetch.then` callback
    to no-op gracefully when the result is a sentinel (no token sum to
    surface — the next render reads it from the cache anyway).
@@ -509,6 +641,15 @@ steps for the user beyond "open Obsidian and the test note."
     transitions for the same row.
   - Copy-selected handler skips over-cap / pending rows and emits a
     `Notice`.
+  - `copyNoteWithAtPaths` (called with no path filter, simulating the
+    note-segment / command / tray-menu entry points) skips folder
+    refs whose walk hits `maxFolderFiles + 1` files; the resulting
+    output contains no header / blocks for those folders; one
+    combined `Notice` is emitted listing the skipped folder paths.
+  - `scheduleFolderTokenFetch` updates `_lastEditorView` even on a
+    deduped call when the incoming `view` is non-null (regression
+    test: first call with `null` view, second call with real view,
+    assert `_lastEditorView` equals the real view).
 
 ### Verification (primary: ATPATH_PERF; opportunistic: Playwright)
 
@@ -517,9 +658,13 @@ The fresh `ATPATH_PERF` dump from a real Obsidian session is the
 diagnosed this whole class of bugs, and we trust it more than any
 Electron automation. After build:
 
-1. Ask the user to open Obsidian, run `localStorage.atpath_perf = "1"`,
-   open `STATUS_ai_dev.md`, type for ~10 sec, then run the dump
-   command and paste the output.
+1. Ask the user to open Obsidian, run
+   `localStorage.setItem("atpath-perf", "1")` in devtools, reload
+   Obsidian, open `STATUS_ai_dev.md`, type for ~10 sec, then run
+   `window.__atpath_perf_dump()` and paste the console output. (The
+   key is `atpath-perf` with a hyphen — `src/main.js:10,16`. The
+   counters checked below are added by Fix A's instrumentation step;
+   they do not exist on `main` today.)
 2. Acceptance: `getFolderTokens.encoded` ≤ `maxFolderFiles ×
    number-of-folder-refs`; no `cachedRead.avg` blow-up; no console
    `File system operation timed out`.
