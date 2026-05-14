@@ -12,7 +12,8 @@
     "claude"
   ],
   "scripts": {
-    "build": "node esbuild.config.mjs"
+    "build": "node esbuild.config.mjs",
+    "test": "node --test --require ./tests/_setup.js tests/*.test.js"
   },
   "dependencies": {
     "gpt-tokenizer": "^2.8.1",
