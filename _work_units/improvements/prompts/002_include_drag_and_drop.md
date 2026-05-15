@@ -1,0 +1,1 @@
+  I want to be able to drag and drop files from the Obsidian file explorer to the node in a way that it preserves the add path format of that file, so it's easier for me to create prompts.
