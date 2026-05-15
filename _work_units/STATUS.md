@@ -76,8 +76,9 @@ versus what needs the installer refresh.
       and reinstall) to unlock `dev:screenshot`, `dev:css`, `dev:cdp`,
       `vaults`. Existing vault + settings are preserved; this is the
       Electron binary refresh, not a data migration.
-- [ ] **Add an agent diagnosis runbook** to `AGENTS.md` once the
-      installer is refreshed. Working channel today:
+- [x] ~~Add an agent diagnosis runbook to `AGENTS.md`~~ — landed
+      2026-05-15. See `AGENTS.md` → "Testing" → "Agent diagnosis
+      runbook (Obsidian CLI)". Working channel today:
       `dev:debug on` → `dev:errors` → `dev:console level=error` →
       `dev:dom selector="…"` → `eval code='…'` for live probes.
 - [ ] **Fix latent mobile bug:** `src/main.js:383` calls

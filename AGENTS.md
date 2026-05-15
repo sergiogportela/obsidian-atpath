@@ -9,7 +9,19 @@
 - `package.json` — npm metadata, version, and dependencies
 - `versions.json` — Obsidian min-app-version mapping per release
 - `styles.css` — plugin styles
+- `tests/` — unit tests (Node `node --test`)
+- `_work_units/` — plans, reviews, research, status (see below)
 - `.github/workflows/release.yml` — automated release workflow
+
+`CLAUDE.md` is a **symlink** to this file. Edit `AGENTS.md` only; never write to `CLAUDE.md` directly. The symlink ensures Codex (`AGENTS.md`) and Claude Code (`CLAUDE.md`) read the same instructions.
+
+### `_work_units/` layout
+
+- `_work_units/STATUS.md` — living index of shipped plans, latest research, and open follow-ups. Update on every plan ship or research land.
+- `_work_units/improvements/plans/` — implementation plans (`00N_*.md`).
+- `_work_units/improvements/prompts/` — prompt/feedback docs that seed plans.
+- `_work_units/0_llm/research/` — LLM-driven research notes.
+- `_work_units/0_llm/reviews/` — codex review prompts and outputs.
 
 ## Building
 
@@ -19,6 +31,78 @@ npm run build
 ```
 
 Edit `src/main.js`, then run `npm run build` to regenerate `main.js`. The built file bundles `gpt-tokenizer` (~2.9 MB) and must be committed.
+
+## Testing
+
+### Unit tests (primary regression backstop)
+
+```
+node --test --require ./tests/_setup.js tests/*.test.js
+```
+
+41 tests today, covering parser, fuzzy match, link resolution, status-bar logic, popover display-path truncation. **Keep investing here** — extracted pure logic is the right place to land regressions before touching the Obsidian-dependent surface.
+
+### Agent diagnosis runbook (Obsidian CLI)
+
+For UI/runtime issues, use the **official Obsidian CLI** (shipped Feb 2026, available in 1.12.4+; docs assume 1.12.7+ installer). This is the canonical diagnosis channel — replaces hand-driving DevTools.
+
+**One-time user setup:**
+1. Obsidian ≥ **1.12.7** (app) AND installer ≥ **1.12.x** (download a fresh installer from https://obsidian.md/download; in-app update bumps the asar but not the installer binary, and the four richer commands below need the modern installer).
+2. `Settings → General → Command line interface` → enable + register (places `/usr/local/bin/obsidian` on macOS).
+3. Sanity check: `obsidian version` → reports both app and installer version.
+
+**Operational constraints** (from https://obsidian.md/help/cli):
+- Obsidian must be **running** — the CLI is a remote control over IPC, not headless. If closed it auto-launches (slow cold start).
+- Vault targeting: vault-scoped commands hit the *currently active* vault. When running from the plugin repo against a specific vault, pass `vault=<name-or-id>` explicitly to avoid silently targeting the wrong vault.
+
+**Per-session attach** (required before `dev:*` console capture works):
+
+```
+obsidian dev:debug on
+```
+
+**Core diagnosis commands** (verified working against installer 1.7.7+, 2026-05-15):
+
+| Command | Use case |
+|---|---|
+| `obsidian eval code='app.plugins.plugins.atpath?.manifest?.version'` | Confirm plugin loaded and at expected version |
+| `obsidian plugins:enabled` | Confirm `atpath` is in the enabled set |
+| `obsidian plugin:reload id=atpath` | Hot-reload after `npm run build` — no app restart |
+| `obsidian dev:errors` | Any captured errors since launch |
+| `obsidian dev:console level=error` | Recent console output (levels: log/warn/error/info/debug) |
+| `obsidian dev:dom selector='.atpath-status-linked'` | Inspect rendered DOM (`outerHTML` by default; supports `text`/`inner`/`all`/`attr`) |
+| `obsidian eval code='document.querySelectorAll(".atpath-link").length'` | Probe live document state |
+
+**Commands that require the modern installer** (silent failures on installer 1.7.7):
+
+- `obsidian dev:screenshot path=…` — visual confirmation
+- `obsidian dev:css selector='…'` — computed styles
+- `obsidian dev:cdp method=…` — raw CDP calls
+- `obsidian vaults` — list registered vaults
+
+If these return empty/exit non-zero, the installer is the cause. Each CLI invocation also prints `Your Obsidian installer is out of date…`.
+
+**Standard diagnosis loop** for a reported UI regression:
+
+1. `obsidian dev:debug on`
+2. `obsidian dev:errors` → look for stack traces
+3. `obsidian dev:console level=error` → look for runtime warnings
+4. `obsidian dev:dom selector='<the affected surface>'` → confirm rendered structure
+5. `obsidian eval code='…'` → probe specific plugin state
+6. After patching: `npm run build && obsidian plugin:reload id=atpath` → re-verify with the same probes
+
+### Fallbacks (if the CLI is unavailable)
+
+1. **Logstravaganza** community plugin — writes console to a vault file, `tail -F` from agent side.
+2. **DIY in-plugin logger** — gate behind a dev build flag; derive paths from `this.app.vault.configDir` (never hardcode `.obsidian`); do **not** ship console monkey-patching to community-plugins reviewers.
+3. `--remote-debugging-port=9222` + CDP via Playwright `chromium.connectOverCDP` — works on any version; requires relaunching Obsidian with the flag.
+
+Background research and the full decision rationale: `_work_units/0_llm/research/2026-05-15_obsidian_log_and_cli_access.md`.
+
+### What we do NOT use
+
+- **No full E2E framework** (e.g. `wdio-obsidian-service`) — unit tests + agent-driven CLI loop covers ~80% of bug surface at a fraction of the maintenance cost. Revisit only if manual regressions become recurrent.
+- **No `console.log`** in shipped code — community-plugin rule. The CLI captures whatever `console.warn`/`error`/`debug` we emit; that's enough.
 
 ## Releasing a new version
 
