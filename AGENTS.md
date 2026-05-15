@@ -9,19 +9,23 @@
 - `package.json` — npm metadata, version, and dependencies
 - `versions.json` — Obsidian min-app-version mapping per release
 - `styles.css` — plugin styles
+- `STATUS.md` — living snapshot of shipped plans, environment, open follow-ups. Update on every plan ship or research land.
 - `tests/` — unit tests (Node `node --test`)
-- `_work_units/` — plans, reviews, research, status (see below)
+- `_work_units/` — plans, reviews, research (see below)
 - `.github/workflows/release.yml` — automated release workflow
 
 `CLAUDE.md` is a **symlink** to this file. Edit `AGENTS.md` only — the symlink keeps Codex and Claude Code on the same instructions.
 
 ### `_work_units/` layout
 
-- `STATUS.md` — living index of shipped plans, latest research, open follow-ups. Update on every plan ship or research land.
 - `improvements/plans/` — implementation plans (`00N_*.md`).
 - `improvements/prompts/` — prompt/feedback docs that seed plans.
 - `0_llm/research/` — LLM-driven research notes.
 - `0_llm/reviews/` — codex review prompts and outputs.
+
+### STATUS.md contract
+
+Single repo-root status file. First line: `Updated at YYYY-MM-DD HH:MM` local time. Factual snapshot only — current reality from WU docs, Git, source files, and explicit user requirements. ~30 lines max; link out instead of expanding. Start with 1-3 sentences describing current state. List open work only when it comes from active plans/docs/user requests — never add recommended next steps, priorities, or strategy. Verify carried-forward claims before keeping them; drop closed detail to linked plans/findings/commits.
 
 ## Building
 

@@ -79,20 +79,25 @@ Rename or move a file and all `@path` references across the vault update automat
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| Preferred insert format | Legacy @path | Wikilink (`[[path\|@display]]`) or legacy `@path` |
 | Show token counts | On | Inline badges + status bar total |
 | Max file size (MB) | 5 | Skip token counting above this |
+| Max files per folder reference | — | Folder @paths over this show `> N files` instead of a token count |
+| Folder encode batch size | — | Lower = smoother UI but slower folder counts |
+| Show selection tokens in status bar | On | When text is selected, status bar shows `Sel: <selected> / <total>` |
+| Suggest folders in autocomplete | On | Include folder candidates in @-autocomplete |
+| Drag-and-drop @path inserts | On | Dragging a file/folder from the explorer inserts an `@path` ref |
 | Vercel API token | — | For one-click publishing |
 | Contact URL | — | Button link on published pages |
-| Preferred insert format | Legacy @path | Wikilink (`[[path\|@display]]`) or legacy `@path` |
 | Contact button label | Entre em contato | Button text |
+| Site icon | — | Reusable favicon for published notes and HTML apps |
 | Clerk publishable key | — | Required for private publishing |
 | Clerk secret key | — | Required for private publishing |
 | Publisher email | — | Used in private access requests |
-| Site icon | — | Reusable favicon for published notes and HTML apps |
 
 ## Install
 
-- **Community Plugins** — not listed in the official Obsidian Community Plugins catalog as of April 2, 2026
+- **Community Plugins** — not yet listed in the official Obsidian Community Plugins catalog; submission pending
 - **BRAT** — install `BRAT` from Obsidian Community Plugins, open `Settings` -> `BRAT`, choose `Add beta plugin`, enter `https://github.com/sergiogportela/obsidian-atpath`, then enable `AtPath`
 - **Release zip** — download `atpath-x.y.z.zip` from the latest release, extract it into `.obsidian/plugins/` so it creates `.obsidian/plugins/atpath/`, then enable or reload the plugin
 - **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable or reload the plugin
