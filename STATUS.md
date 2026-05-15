@@ -1,8 +1,8 @@
-Updated at 2026-05-15 11:16
+Updated at 2026-05-15 12:19
 
 # AtPath — Status
 
-Plugin at **v1.8.3**, branch `main` clean, head `d8e71a8`. Built `main.js` committed; 41 unit tests passing via `node --test --require ./tests/_setup.js tests/*.test.js`. Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook").
+Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Built `main.js` committed; 41 unit tests passing via `node --test --require ./tests/_setup.js tests/*.test.js`. Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook").
 
 ## Shipped plans
 

@@ -101,7 +101,7 @@ Full rationale: `_work_units/0_llm/research/2026-05-15_obsidian_log_and_cli_acce
 
 ## Obsidian Community Plugin compliance
 
-This plugin is submitted (or will be submitted) to the Obsidian Community Plugin directory.
+This plugin is listed in the Obsidian Community Plugin directory (`id: atpath`); manual review by Obsidian staff is still pending.
 All code changes **must** follow these rules to pass the automated review bot and human review.
 
 See `COMMUNITY_PLUGINS.md` for the full reference. Key rules summarized here:

@@ -82,8 +82,8 @@ Rename or move a file and all `@path` references across the vault update automat
 | Preferred insert format | Legacy @path | Wikilink (`[[path\|@display]]`) or legacy `@path` |
 | Show token counts | On | Inline badges + status bar total |
 | Max file size (MB) | 5 | Skip token counting above this |
-| Max files per folder reference | — | Folder @paths over this show `> N files` instead of a token count |
-| Folder encode batch size | — | Lower = smoother UI but slower folder counts |
+| Max files per folder reference | 500 | Folder @paths over this show `> N files` instead of a token count |
+| Folder encode batch size | 1 | Lower = smoother UI but slower folder counts |
 | Show selection tokens in status bar | On | When text is selected, status bar shows `Sel: <selected> / <total>` |
 | Suggest folders in autocomplete | On | Include folder candidates in @-autocomplete |
 | Drag-and-drop @path inserts | On | Dragging a file/folder from the explorer inserts an `@path` ref |
@@ -97,7 +97,7 @@ Rename or move a file and all `@path` references across the vault update automat
 
 ## Install
 
-- **Community Plugins** — not yet listed in the official Obsidian Community Plugins catalog; submission pending
+- **Community Plugins** — in Obsidian, open `Settings` -> `Community plugins` -> `Browse`, search for `AtPath`, install, then enable
 - **BRAT** — install `BRAT` from Obsidian Community Plugins, open `Settings` -> `BRAT`, choose `Add beta plugin`, enter `https://github.com/sergiogportela/obsidian-atpath`, then enable `AtPath`
 - **Release zip** — download `atpath-x.y.z.zip` from the latest release, extract it into `.obsidian/plugins/` so it creates `.obsidian/plugins/atpath/`, then enable or reload the plugin
 - **Manual** — copy `main.js`, `manifest.json`, `styles.css` to `.obsidian/plugins/atpath/`, then enable or reload the plugin
