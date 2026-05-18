@@ -4,6 +4,14 @@ Verify Plan A (002) executed cleanly and diagnose why drag-and-drop @path insert
 Drive an interactive Obsidian CLI session with the user: build, reload, capture errors/DOM/console, then propose and verify a fix.
 Do not write code until the failure mode is observed and confirmed with the user.
 
+## working style
+
+Before doing anything else, **dispatch two Explore subagents in parallel** (single message, two `Agent` calls with `subagent_type: "Explore"`):
+1. One over `src/main.js` and the rest of the source tree — map the DnD code surface, related extensions, and any recent changes that could have regressed it.
+2. One over the entire `_work_units/` tree — read Plan A (002), its codex review history, all DnD-related prompts/findings, the slowness-fix plans (004/005) that touched the editor extension stack, and any review notes for plan 006.
+
+Use what they return to decide **what is priority and what to verify first**. Do **not** start reading a pile of files yourself before that — preserve your own context window so you can judge, synthesize, and run the live CLI loop with the user. Read files directly only after the Explores narrow the surface to a handful of targeted spots.
+
 ## context
 
 - **What "plan execution" refers to:** Master "Plan A" — @_work_units/improvements/plans/002_plan_statusbar_and_folder_autocomplete.md (status bar overhaul + folder autocomplete + DnD). Drag-and-drop was §3.5 step 12, landed in commit `534e9e1`. The original DnD seed prompt is @_work_units/improvements/prompts/002_include_drag_and_drop.md. Subsequent shipped plans 003-006 are in @_work_units/improvements/plans/; latest is @_work_units/improvements/plans/006_popover_path_alignment.md (commit `e49a454`).
@@ -31,3 +39,5 @@ Do not write code until the failure mode is observed and confirmed with the user
 - **Repo conventions (must follow):** @CLAUDE.md is a symlink — edit only @AGENTS.md. Compliance rules in @COMMUNITY_PLUGINS.md (no `console.log`, no `innerHTML`/`outerHTML`, never hardcode `.obsidian` — use `this.app.vault.configDir`, all promises awaited/voided, no `var`, sentence-case UI text).
 
 - **User collaboration preferences:** Prefer the simplest reliable fix (clean break, no backwards-compat shims). Verify through the CLI/agent loop with the user live in Obsidian — do not hand back a "manual test plan." When checking Obsidian version, use the running app version, not Info.plist (which reports installer).
+
+/codex-review
