@@ -72,6 +72,12 @@ For UI/runtime issues, use the **official Obsidian CLI** (shipped Feb 2026, in 1
 
 **Standard loop** for a reported UI regression: `dev:debug on` → `dev:errors` → `dev:console level=error` → `dev:dom selector='<surface>'` → `eval code='…'` for state probes → after patching, `npm run build && obsidian plugin:reload id=atpath` and re-verify.
 
+**CLI gotchas** (learned the hard way):
+- `obsidian eval` IPC drops some return values silently — wrap in `try{…; "X="+result}catch(e){"E:"+e.message}` so the response is a non-empty string.
+- `dev:console` is a *drain* — reading consumes the buffer. If you need to inspect multiple slices, redirect once to a file (`obsidian dev:console vault=… > /tmp/cap.txt`) and grep there.
+- The console ring buffer is small; a noisy handler (e.g. dragover firing 40×) can push out earlier lines. Use distinct prefixes per trace site (`[atpath-trace] dragstart`, `[atpath-trace] drop fired`) so you can `grep -c` each kind and see *which* fired vs went missing.
+- To diagnose CM6 handler-not-firing, instrument *inside* the handler body, not around it. If a sibling handler (e.g. `dragover`) traces but yours (e.g. `drop`) doesn't, another CM6 extension returned `true` first — fix with `Prec.highest(...)` from `@codemirror/state`.
+
 ### Fallbacks (if the CLI is unavailable)
 
 1. **Logstravaganza** community plugin — writes console to a vault file, `tail -F` from agent side.

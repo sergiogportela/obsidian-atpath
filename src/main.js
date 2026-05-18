@@ -199,6 +199,7 @@ const {
   resolveAtPathFromSource: coreResolveAtPathFromSource,
   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
   computeDisplayPath: coreComputeDisplayPath,
+  extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
 } = require("./atpath-core");
 const {
   HTML_APP_SCOPE_SINGLE_FILE,
@@ -1094,99 +1095,7 @@ function buildBufferCountListener(plugin) {
 // ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
 
 function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
-  const app = plugin.app;
-  const out = [];
-  const seen = new Set();
-  const addPath = (rawPath) => {
-    if (!rawPath || typeof rawPath !== "string") return;
-    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
-    if (!path || seen.has(path)) return;
-    const target = app.vault.getAbstractFileByPath(path);
-    if (!target) return;
-    if (sourcePath && target.path === sourcePath) return; // skip self-ref
-    seen.add(path);
-    if (target instanceof TFile) {
-      out.push({ kind: "file", vaultPath: target.path, target });
-    } else if (target instanceof TFolder) {
-      out.push({ kind: "folder", vaultPath: target.path, target });
-    }
-  };
-
-  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
-  // Obsidian doesn't expose a public DataTransfer MIME for internal vault
-  // drags, so we sniff `data-path` attributes ourselves and stash the result
-  // on the plugin until dragend.
-  const captured = plugin._currentDragRefs;
-  if (Array.isArray(captured) && captured.length > 0) {
-    for (const r of captured) addPath(r && r.vaultPath);
-    if (out.length > 0) return out;
-  }
-
-  if (!dataTransfer) return out;
-
-  const tryJsonMime = (mime) => {
-    let raw;
-    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
-    if (!raw) return false;
-    let parsed;
-    try { parsed = JSON.parse(raw); } catch (_) { return false; }
-    if (parsed && Array.isArray(parsed.files)) {
-      for (const f of parsed.files) addPath(f && f.path);
-      return out.length > 0;
-    }
-    if (Array.isArray(parsed)) {
-      for (const f of parsed) addPath(f && (f.path || f));
-      return out.length > 0;
-    }
-    if (parsed && typeof parsed.path === "string") {
-      addPath(parsed.path);
-      return out.length > 0;
-    }
-    return false;
-  };
-
-  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
-  if (tryJsonMime("application/obsidian-files")) return out;
-  if (tryJsonMime("application/obsidian-file")) return out;
-  if (tryJsonMime("application/x-obsidian-files")) return out;
-
-  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
-  let uriList;
-  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
-  if (uriList) {
-    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
-      ? app.vault.adapter.getBasePath()
-      : "";
-    for (const line of uriList.split(/\r?\n/)) {
-      const url = line.trim();
-      if (!url || url.startsWith("#")) continue;
-      if (url.startsWith("obsidian://")) {
-        try {
-          const u = new URL(url);
-          const fileParam = u.searchParams.get("file");
-          if (fileParam) addPath(decodeURIComponent(fileParam));
-        } catch (_) { /* skip malformed */ }
-      } else if (url.startsWith("file://")) {
-        let abs;
-        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
-        if (basePath && abs.startsWith(basePath + "/")) {
-          addPath(abs.substring(basePath.length + 1));
-        }
-      }
-    }
-    if (out.length > 0) return out;
-  }
-
-  // Tier 3: text/plain — bare vault path(s), one per line.
-  let plain;
-  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
-  if (plain) {
-    for (const line of plain.split(/\r?\n/)) {
-      const path = line.trim();
-      if (path) addPath(path);
-    }
-  }
-  return out;
+  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
 }
 
 function captureDragRefsFromExplorerDom(plugin, evt) {

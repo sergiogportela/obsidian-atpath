@@ -8884,6 +8884,105 @@ var require_atpath_core = __commonJS({
         computeDisplayPath: (t, s) => computeDisplayPath(t, s)
       };
     }
+    function extractDraggedVaultPaths2(dataTransfer, app, sourcePath, currentDragRefs) {
+      const out = [];
+      const seen = /* @__PURE__ */ new Set();
+      const addPath = (rawPath) => {
+        if (!rawPath || typeof rawPath !== "string") return;
+        const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+        if (!path || seen.has(path)) return;
+        const target = app.vault.getAbstractFileByPath(path);
+        if (!target) return;
+        if (sourcePath && target.path === sourcePath) return;
+        seen.add(path);
+        if (target instanceof TFile2) {
+          out.push({ kind: "file", vaultPath: target.path, target });
+        } else if (target instanceof TFolder2) {
+          out.push({ kind: "folder", vaultPath: target.path, target });
+        }
+      };
+      if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
+        for (const r of currentDragRefs) addPath(r && r.vaultPath);
+        if (out.length > 0) return out;
+      }
+      if (!dataTransfer) return out;
+      const tryJsonMime = (mime) => {
+        let raw;
+        try {
+          raw = dataTransfer.getData(mime);
+        } catch (_) {
+          return false;
+        }
+        if (!raw) return false;
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (_) {
+          return false;
+        }
+        if (parsed && Array.isArray(parsed.files)) {
+          for (const f of parsed.files) addPath(f && f.path);
+          return out.length > 0;
+        }
+        if (Array.isArray(parsed)) {
+          for (const f of parsed) addPath(f && (f.path || f));
+          return out.length > 0;
+        }
+        if (parsed && typeof parsed.path === "string") {
+          addPath(parsed.path);
+          return out.length > 0;
+        }
+        return false;
+      };
+      if (tryJsonMime("application/obsidian-files")) return out;
+      if (tryJsonMime("application/obsidian-file")) return out;
+      if (tryJsonMime("application/x-obsidian-files")) return out;
+      let uriList;
+      try {
+        uriList = dataTransfer.getData("text/uri-list");
+      } catch (_) {
+        uriList = "";
+      }
+      if (uriList) {
+        const basePath = app.vault.adapter && typeof app.vault.adapter.getBasePath === "function" ? app.vault.adapter.getBasePath() : "";
+        for (const line of uriList.split(/\r?\n/)) {
+          const url = line.trim();
+          if (!url || url.startsWith("#")) continue;
+          if (url.startsWith("obsidian://")) {
+            try {
+              const u = new URL(url);
+              const fileParam = u.searchParams.get("file");
+              if (fileParam) addPath(decodeURIComponent(fileParam));
+            } catch (_) {
+            }
+          } else if (url.startsWith("file://")) {
+            let abs;
+            try {
+              abs = decodeURIComponent(url.replace(/^file:\/\//, ""));
+            } catch (_) {
+              continue;
+            }
+            if (basePath && abs.startsWith(basePath + "/")) {
+              addPath(abs.substring(basePath.length + 1));
+            }
+          }
+        }
+        if (out.length > 0) return out;
+      }
+      let plain;
+      try {
+        plain = dataTransfer.getData("text/plain");
+      } catch (_) {
+        plain = "";
+      }
+      if (plain) {
+        for (const line of plain.split(/\r?\n/)) {
+          const path = line.trim();
+          if (path) addPath(path);
+        }
+      }
+      return out;
+    }
     module2.exports = {
       createAtPathCore: createAtPathCore2,
       REPOS_SEGMENT,
@@ -8892,7 +8991,8 @@ var require_atpath_core = __commonJS({
       discoverRepoRoots: discoverRepoRoots2,
       resolveAtPathFromSource: resolveAtPathFromSource2,
       resolveAtPathFolderFromSource,
-      computeDisplayPath
+      computeDisplayPath,
+      extractDraggedVaultPaths: extractDraggedVaultPaths2
     };
   }
 });
@@ -9369,7 +9469,8 @@ var {
   discoverRepoRoots: coreDiscoverRepoRoots,
   resolveAtPathFromSource: coreResolveAtPathFromSource,
   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
-  computeDisplayPath: coreComputeDisplayPath
+  computeDisplayPath: coreComputeDisplayPath,
+  extractDraggedVaultPaths: coreExtractDraggedVaultPaths
 } = require_atpath_core();
 var {
   HTML_APP_SCOPE_SINGLE_FILE,
@@ -10126,105 +10227,7 @@ function buildBufferCountListener(plugin) {
   });
 }
 function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
-  const app = plugin.app;
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  const addPath = (rawPath) => {
-    if (!rawPath || typeof rawPath !== "string") return;
-    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
-    if (!path || seen.has(path)) return;
-    const target = app.vault.getAbstractFileByPath(path);
-    if (!target) return;
-    if (sourcePath && target.path === sourcePath) return;
-    seen.add(path);
-    if (target instanceof TFile) {
-      out.push({ kind: "file", vaultPath: target.path, target });
-    } else if (target instanceof TFolder) {
-      out.push({ kind: "folder", vaultPath: target.path, target });
-    }
-  };
-  const captured = plugin._currentDragRefs;
-  if (Array.isArray(captured) && captured.length > 0) {
-    for (const r of captured) addPath(r && r.vaultPath);
-    if (out.length > 0) return out;
-  }
-  if (!dataTransfer) return out;
-  const tryJsonMime = (mime) => {
-    let raw;
-    try {
-      raw = dataTransfer.getData(mime);
-    } catch (_) {
-      return false;
-    }
-    if (!raw) return false;
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (_) {
-      return false;
-    }
-    if (parsed && Array.isArray(parsed.files)) {
-      for (const f of parsed.files) addPath(f && f.path);
-      return out.length > 0;
-    }
-    if (Array.isArray(parsed)) {
-      for (const f of parsed) addPath(f && (f.path || f));
-      return out.length > 0;
-    }
-    if (parsed && typeof parsed.path === "string") {
-      addPath(parsed.path);
-      return out.length > 0;
-    }
-    return false;
-  };
-  if (tryJsonMime("application/obsidian-files")) return out;
-  if (tryJsonMime("application/obsidian-file")) return out;
-  if (tryJsonMime("application/x-obsidian-files")) return out;
-  let uriList;
-  try {
-    uriList = dataTransfer.getData("text/uri-list");
-  } catch (_) {
-    uriList = "";
-  }
-  if (uriList) {
-    const basePath = app.vault.adapter && typeof app.vault.adapter.getBasePath === "function" ? app.vault.adapter.getBasePath() : "";
-    for (const line of uriList.split(/\r?\n/)) {
-      const url = line.trim();
-      if (!url || url.startsWith("#")) continue;
-      if (url.startsWith("obsidian://")) {
-        try {
-          const u = new URL(url);
-          const fileParam = u.searchParams.get("file");
-          if (fileParam) addPath(decodeURIComponent(fileParam));
-        } catch (_) {
-        }
-      } else if (url.startsWith("file://")) {
-        let abs;
-        try {
-          abs = decodeURIComponent(url.replace(/^file:\/\//, ""));
-        } catch (_) {
-          continue;
-        }
-        if (basePath && abs.startsWith(basePath + "/")) {
-          addPath(abs.substring(basePath.length + 1));
-        }
-      }
-    }
-    if (out.length > 0) return out;
-  }
-  let plain;
-  try {
-    plain = dataTransfer.getData("text/plain");
-  } catch (_) {
-    plain = "";
-  }
-  if (plain) {
-    for (const line of plain.split(/\r?\n/)) {
-      const path = line.trim();
-      if (path) addPath(path);
-    }
-  }
-  return out;
+  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
 }
 function captureDragRefsFromExplorerDom(plugin, evt) {
   const app = plugin.app;

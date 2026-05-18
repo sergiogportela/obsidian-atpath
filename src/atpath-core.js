@@ -411,6 +411,105 @@ function createAtPathCore(plugin) {
   };
 }
 
+// Resolve raw drag-source paths (captured at dragstart from the
+// file-explorer DOM, plus any DataTransfer MIME fallbacks) into the
+// `{kind, vaultPath, target}` shape the editor insertion helper expects.
+// Pure — takes `app`, `sourcePath`, `currentDragRefs` explicitly so it
+// can be exercised from unit tests without a live Obsidian runtime.
+function extractDraggedVaultPaths(dataTransfer, app, sourcePath, currentDragRefs) {
+  const out = [];
+  const seen = new Set();
+  const addPath = (rawPath) => {
+    if (!rawPath || typeof rawPath !== "string") return;
+    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!path || seen.has(path)) return;
+    const target = app.vault.getAbstractFileByPath(path);
+    if (!target) return;
+    if (sourcePath && target.path === sourcePath) return; // skip self-ref
+    seen.add(path);
+    if (target instanceof TFile) {
+      out.push({ kind: "file", vaultPath: target.path, target });
+    } else if (target instanceof TFolder) {
+      out.push({ kind: "folder", vaultPath: target.path, target });
+    }
+  };
+
+  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
+  // Obsidian doesn't expose a public DataTransfer MIME for internal vault
+  // drags, so the caller sniffs `data-path` attributes itself and passes
+  // the result in via `currentDragRefs`.
+  if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
+    for (const r of currentDragRefs) addPath(r && r.vaultPath);
+    if (out.length > 0) return out;
+  }
+
+  if (!dataTransfer) return out;
+
+  const tryJsonMime = (mime) => {
+    let raw;
+    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
+    if (!raw) return false;
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (_) { return false; }
+    if (parsed && Array.isArray(parsed.files)) {
+      for (const f of parsed.files) addPath(f && f.path);
+      return out.length > 0;
+    }
+    if (Array.isArray(parsed)) {
+      for (const f of parsed) addPath(f && (f.path || f));
+      return out.length > 0;
+    }
+    if (parsed && typeof parsed.path === "string") {
+      addPath(parsed.path);
+      return out.length > 0;
+    }
+    return false;
+  };
+
+  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
+  if (tryJsonMime("application/obsidian-files")) return out;
+  if (tryJsonMime("application/obsidian-file")) return out;
+  if (tryJsonMime("application/x-obsidian-files")) return out;
+
+  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
+  let uriList;
+  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
+  if (uriList) {
+    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
+      ? app.vault.adapter.getBasePath()
+      : "";
+    for (const line of uriList.split(/\r?\n/)) {
+      const url = line.trim();
+      if (!url || url.startsWith("#")) continue;
+      if (url.startsWith("obsidian://")) {
+        try {
+          const u = new URL(url);
+          const fileParam = u.searchParams.get("file");
+          if (fileParam) addPath(decodeURIComponent(fileParam));
+        } catch (_) { /* skip malformed */ }
+      } else if (url.startsWith("file://")) {
+        let abs;
+        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
+        if (basePath && abs.startsWith(basePath + "/")) {
+          addPath(abs.substring(basePath.length + 1));
+        }
+      }
+    }
+    if (out.length > 0) return out;
+  }
+
+  // Tier 3: text/plain — bare vault path(s), one per line.
+  let plain;
+  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
+  if (plain) {
+    for (const line of plain.split(/\r?\n/)) {
+      const path = line.trim();
+      if (path) addPath(path);
+    }
+  }
+  return out;
+}
+
 module.exports = {
   createAtPathCore,
   REPOS_SEGMENT,
@@ -420,4 +519,5 @@ module.exports = {
   resolveAtPathFromSource,
   resolveAtPathFolderFromSource,
   computeDisplayPath,
+  extractDraggedVaultPaths,
 };
