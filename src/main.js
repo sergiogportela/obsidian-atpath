@@ -3,7 +3,7 @@
 
 const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-const { Compartment } = require("@codemirror/state");
+const { Compartment, Prec } = require("@codemirror/state");
 const { encode } = require("gpt-tokenizer/model/gpt-4o");
 
 // ─── ATPATH_PERF — opt-in perf instrumentation, no-op unless enabled ──
@@ -2258,7 +2258,7 @@ class AtPathPlugin extends Plugin {
     this.dragDropCompartment = new Compartment();
     this.registerEditorExtension(
       this.dragDropCompartment.of(
-        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
+        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
       )
     );
 
@@ -2274,9 +2274,6 @@ class AtPathPlugin extends Plugin {
       if (refs.length > 0) this._currentDragRefs = refs;
     }, { capture: true });
     this.registerDomEvent(document, "dragend", () => {
-      this._currentDragRefs = null;
-    }, { capture: true });
-    this.registerDomEvent(document, "drop", () => {
       this._currentDragRefs = null;
     }, { capture: true });
 
@@ -2478,7 +2475,7 @@ class AtPathPlugin extends Plugin {
   reconfigureDragDrop() {
     if (!this.dragDropCompartment) return;
     const ext = this.settings.enableDragDropAtPath !== false
-      ? buildDragDropExtension(this)
+      ? Prec.highest(buildDragDropExtension(this))
       : [];
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       // `leaf.view.editor.cm` is the internal CM6 handle. Wrap in try/catch

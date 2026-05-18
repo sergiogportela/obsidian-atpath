@@ -9140,7 +9140,7 @@ var require_html_app_publish = __commonJS({
 // src/main.js
 var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-var { Compartment } = require("@codemirror/state");
+var { Compartment, Prec } = require("@codemirror/state");
 var { encode } = require_gpt_4o();
 var ATPATH_PERF = (() => {
   let enabled = false;
@@ -11066,7 +11066,7 @@ var AtPathPlugin = class extends Plugin {
     this.dragDropCompartment = new Compartment();
     this.registerEditorExtension(
       this.dragDropCompartment.of(
-        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
+        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
       )
     );
     this._currentDragRefs = null;
@@ -11077,9 +11077,6 @@ var AtPathPlugin = class extends Plugin {
       if (refs.length > 0) this._currentDragRefs = refs;
     }, { capture: true });
     this.registerDomEvent(document, "dragend", () => {
-      this._currentDragRefs = null;
-    }, { capture: true });
-    this.registerDomEvent(document, "drop", () => {
       this._currentDragRefs = null;
     }, { capture: true });
     registerPostProcessor(this);
@@ -11241,7 +11238,7 @@ var AtPathPlugin = class extends Plugin {
   }
   reconfigureDragDrop() {
     if (!this.dragDropCompartment) return;
-    const ext = this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : [];
+    const ext = this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : [];
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
       if (!cm) continue;
