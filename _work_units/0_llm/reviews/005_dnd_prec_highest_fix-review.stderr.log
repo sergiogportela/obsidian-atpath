@@ -1,0 +1,1890 @@
+codex-multi: using account=codex4 (5h=1% wk=1%)
+Reading additional input from stdin...
+OpenAI Codex v0.130.0
+--------
+workdir: /Users/sergio/Documents/code/obsidian_plugin_atpath
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e3cf7-9c53-7c70-947b-5573508bfc97
+--------
+user
+Read @_work_units/0_llm/reviews/005_dnd_prec_highest_fix-review_prompt.md. Return only the review itself.
+exec
+/bin/zsh -lc "sed -n '1,240p' _work_units/0_llm/reviews/005_dnd_prec_highest_fix-review_prompt.md" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+# Review: DnD @path fix (Prec.highest) — commits 72e7424 + 4efed1e on main
+
+## Requirements
+
+- From the originating prompt @_work_units/improvements/prompts/005_verify_plan_a_dnd_diagnosis.md:
+  - "Verify Plan A (002) executed cleanly and diagnose why drag-and-drop @path inserts from the file explorer are broken."
+  - "Prefer the simplest reliable fix (clean break, no backwards-compat shims)."
+  - "Land a regression test for DnD after the fix (in scope)."
+  - "@CLAUDE.md is a symlink — edit only @AGENTS.md."
+- Community plugin compliance rules listed in @COMMUNITY_PLUGINS.md and summarised under "Obsidian Community Plugin compliance" in @AGENTS.md (paraphrase): no `console.log`; no `innerHTML`/`outerHTML`; never hardcode `.obsidian`; all promises awaited/`.catch()`-ed/`void`-ed; no `var`; sentence-case user-facing text; no default hotkeys; manifest naming constraints; semver version strings.
+- Repo conventions: `CLAUDE.md` is a symlink to `AGENTS.md`; build output `main.js` is committed alongside `src/main.js`.
+- Unit-test entry point (paraphrase): `node --test --require ./tests/_setup.js tests/*.test.js`.
+
+## Work product
+
+- Exact artefacts to inspect:
+  - Commit `72e7424` — DnD CM6 extension wrapped in `Prec.highest`, stray `document` `drop` capture listener removed.
+  - Commit `4efed1e` — `extractDraggedVaultPaths` moved into `src/atpath-core.js` as a pure function; new tests in `tests/drag-extract.test.js`; CLI gotchas appended under "Agent diagnosis runbook" in `AGENTS.md`; `STATUS.md` refreshed.
+- Files touched across the two commits: `src/main.js`, `src/atpath-core.js`, `main.js` (built bundle), `tests/drag-extract.test.js`, `AGENTS.md`, `STATUS.md`.
+- Mechanical commands:
+  - Inspect commits: `git show 72e7424`, `git show 4efed1e`.
+  - Build: `npm run build` (esbuild bundle).
+  - Tests: `node --test --require ./tests/_setup.js tests/*.test.js` — currently 48 tests across `tests/*.test.js`.
+
+## Supporting references
+
+- @_work_units/improvements/prompts/005_verify_plan_a_dnd_diagnosis.md
+- @_work_units/improvements/prompts/002_include_drag_and_drop.md
+- @_work_units/improvements/plans/002_plan_statusbar_and_folder_autocomplete.md (DnD landed at §3.5 step 12, commit `534e9e1`)
+- @AGENTS.md (symlinked to `CLAUDE.md`)
+- @COMMUNITY_PLUGINS.md
+- @STATUS.md
+- CodeMirror 6 references: `EditorView.domEventHandlers` (`@codemirror/view`), `Compartment` and `Prec` (`@codemirror/state`).
+- Obsidian CLI runbook: @AGENTS.md "Testing → Agent diagnosis runbook (Obsidian CLI)".
+
+exec
+/bin/zsh -lc 'git show --stat --patch --find-renames --find-copies 72e7424' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+commit 72e7424e79f8b539e582b7217596e27d78057c28
+Author: sergiogportela <sergiogp@bu.edu>
+Date:   Mon May 18 18:01:57 2026 -0300
+
+    Fix DnD @path: wrap CM6 extension in Prec.highest
+    
+    Obsidian's MarkdownView registers its own CM6 drop handler that returns
+    true, which preempted ours in the domEventHandlers chain — drag-and-drop
+    from the file explorer inserted a wikilink instead of an @path. Wrapping
+    buildDragDropExtension in Prec.highest puts ours first.
+    
+    Also drop the stray document-level "drop" capture listener that wiped
+    _currentDragRefs before our handler could read it.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ main.js     | 9 +++------
+ src/main.js | 9 +++------
+ 2 files changed, 6 insertions(+), 12 deletions(-)
+
+diff --git a/main.js b/main.js
+index 127e90f..56a0ffa 100644
+--- a/main.js
++++ b/main.js
+@@ -9140,7 +9140,7 @@ var require_html_app_publish = __commonJS({
+ // src/main.js
+ var { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+ var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
+-var { Compartment } = require("@codemirror/state");
++var { Compartment, Prec } = require("@codemirror/state");
+ var { encode } = require_gpt_4o();
+ var ATPATH_PERF = (() => {
+   let enabled = false;
+@@ -11066,7 +11066,7 @@ var AtPathPlugin = class extends Plugin {
+     this.dragDropCompartment = new Compartment();
+     this.registerEditorExtension(
+       this.dragDropCompartment.of(
+-        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
++        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+       )
+     );
+     this._currentDragRefs = null;
+@@ -11079,9 +11079,6 @@ var AtPathPlugin = class extends Plugin {
+     this.registerDomEvent(document, "dragend", () => {
+       this._currentDragRefs = null;
+     }, { capture: true });
+-    this.registerDomEvent(document, "drop", () => {
+-      this._currentDragRefs = null;
+-    }, { capture: true });
+     registerPostProcessor(this);
+     if (!Platform.isMobile) {
+       this.noteBarEl = this.addStatusBarItem();
+@@ -11241,7 +11238,7 @@ var AtPathPlugin = class extends Plugin {
+   }
+   reconfigureDragDrop() {
+     if (!this.dragDropCompartment) return;
+-    const ext = this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : [];
++    const ext = this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : [];
+     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+       const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
+       if (!cm) continue;
+diff --git a/src/main.js b/src/main.js
+index d02d902..59626f5 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -3,7 +3,7 @@
+ 
+ const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+ const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
+-const { Compartment } = require("@codemirror/state");
++const { Compartment, Prec } = require("@codemirror/state");
+ const { encode } = require("gpt-tokenizer/model/gpt-4o");
+ 
+ // ─── ATPATH_PERF — opt-in perf instrumentation, no-op unless enabled ──
+@@ -2258,7 +2258,7 @@ class AtPathPlugin extends Plugin {
+     this.dragDropCompartment = new Compartment();
+     this.registerEditorExtension(
+       this.dragDropCompartment.of(
+-        this.settings.enableDragDropAtPath !== false ? buildDragDropExtension(this) : []
++        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+       )
+     );
+ 
+@@ -2276,9 +2276,6 @@ class AtPathPlugin extends Plugin {
+     this.registerDomEvent(document, "dragend", () => {
+       this._currentDragRefs = null;
+     }, { capture: true });
+-    this.registerDomEvent(document, "drop", () => {
+-      this._currentDragRefs = null;
+-    }, { capture: true });
+ 
+     registerPostProcessor(this);
+ 
+@@ -2478,7 +2475,7 @@ class AtPathPlugin extends Plugin {
+   reconfigureDragDrop() {
+     if (!this.dragDropCompartment) return;
+     const ext = this.settings.enableDragDropAtPath !== false
+-      ? buildDragDropExtension(this)
++      ? Prec.highest(buildDragDropExtension(this))
+       : [];
+     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+       // `leaf.view.editor.cm` is the internal CM6 handle. Wrap in try/catch
+
+exec
+/bin/zsh -lc 'git show --stat --patch --find-renames --find-copies 4efed1e' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+commit 4efed1e807de69b0c2171c5e90a1e9a9b6227b88
+Author: sergiogportela <sergiogp@bu.edu>
+Date:   Mon May 18 18:04:21 2026 -0300
+
+    Extract DnD path extraction to atpath-core + regression tests
+    
+    - Move extractDraggedVaultPaths into atpath-core.js as a pure function
+      taking (dataTransfer, app, sourcePath, currentDragRefs). src/main.js
+      keeps a thin wrapper so callsites are unchanged.
+    - Add tests/drag-extract.test.js covering Tier 0 happy path, self-drop
+      skip, stale path skip, multi-select dedupe, and text/plain fallback.
+    - Append CLI gotchas to AGENTS.md (eval IPC empty-string suppression,
+      dev:console drain behaviour, ring-buffer eviction, Prec.highest for
+      CM6 handler ordering) so future agents don't re-derive them.
+    - Refresh STATUS.md test count and add DnD-fix entry.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ AGENTS.md                  |   6 ++
+ STATUS.md                  |   5 +-
+ main.js                    | 205 +++++++++++++++++++++++----------------------
+ src/atpath-core.js         | 100 ++++++++++++++++++++++
+ src/main.js                |  95 +--------------------
+ tests/drag-extract.test.js | 103 +++++++++++++++++++++++
+ 6 files changed, 318 insertions(+), 196 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index d985e65..22ba3cc 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -72,6 +72,12 @@ For UI/runtime issues, use the **official Obsidian CLI** (shipped Feb 2026, in 1
+ 
+ **Standard loop** for a reported UI regression: `dev:debug on` → `dev:errors` → `dev:console level=error` → `dev:dom selector='<surface>'` → `eval code='…'` for state probes → after patching, `npm run build && obsidian plugin:reload id=atpath` and re-verify.
+ 
++**CLI gotchas** (learned the hard way):
++- `obsidian eval` IPC drops some return values silently — wrap in `try{…; "X="+result}catch(e){"E:"+e.message}` so the response is a non-empty string.
++- `dev:console` is a *drain* — reading consumes the buffer. If you need to inspect multiple slices, redirect once to a file (`obsidian dev:console vault=… > /tmp/cap.txt`) and grep there.
++- The console ring buffer is small; a noisy handler (e.g. dragover firing 40×) can push out earlier lines. Use distinct prefixes per trace site (`[atpath-trace] dragstart`, `[atpath-trace] drop fired`) so you can `grep -c` each kind and see *which* fired vs went missing.
++- To diagnose CM6 handler-not-firing, instrument *inside* the handler body, not around it. If a sibling handler (e.g. `dragover`) traces but yours (e.g. `drop`) doesn't, another CM6 extension returned `true` first — fix with `Prec.highest(...)` from `@codemirror/state`.
++
+ ### Fallbacks (if the CLI is unavailable)
+ 
+ 1. **Logstravaganza** community plugin — writes console to a vault file, `tail -F` from agent side.
+diff --git a/STATUS.md b/STATUS.md
+index b9a08b8..c1beadd 100644
+--- a/STATUS.md
++++ b/STATUS.md
+@@ -1,8 +1,8 @@
+-Updated at 2026-05-15 12:19
++Updated at 2026-05-18 20:50
+ 
+ # AtPath — Status
+ 
+-Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Built `main.js` committed; 41 unit tests passing via `node --test --require ./tests/_setup.js tests/*.test.js`. Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook").
++Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Built `main.js` committed; 48 unit tests passing via `node --test --require ./tests/_setup.js tests/*.test.js`. Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook"); CLI gotchas appended 2026-05-18 after the DnD diagnosis loop.
+ 
+ ## Shipped plans
+ 
+@@ -14,6 +14,7 @@ Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugin
+ | 004 | Status-bar slowness diagnosis | `f006122` | shipped (diagnosis) |
+ | 005 | Status-bar slowness fix | `aff5d54` | shipped 2026-05-15 (codex-reviewed v3) |
+ | 006 | Linked-@paths popover head-truncation | `e49a454` | shipped 2026-05-15 (codex-reviewed v1) |
++| 005-prompt | DnD @path regression fix (Prec.highest) | `72e7424` | shipped 2026-05-18 |
+ 
+ See [`_work_units/improvements/plans/`](_work_units/improvements/plans/) for plan documents.
+ 
+diff --git a/main.js b/main.js
+index 56a0ffa..32766b7 100644
+--- a/main.js
++++ b/main.js
+@@ -8884,6 +8884,105 @@ var require_atpath_core = __commonJS({
+         computeDisplayPath: (t, s) => computeDisplayPath(t, s)
+       };
+     }
++    function extractDraggedVaultPaths2(dataTransfer, app, sourcePath, currentDragRefs) {
++      const out = [];
++      const seen = /* @__PURE__ */ new Set();
++      const addPath = (rawPath) => {
++        if (!rawPath || typeof rawPath !== "string") return;
++        const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
++        if (!path || seen.has(path)) return;
++        const target = app.vault.getAbstractFileByPath(path);
++        if (!target) return;
++        if (sourcePath && target.path === sourcePath) return;
++        seen.add(path);
++        if (target instanceof TFile2) {
++          out.push({ kind: "file", vaultPath: target.path, target });
++        } else if (target instanceof TFolder2) {
++          out.push({ kind: "folder", vaultPath: target.path, target });
++        }
++      };
++      if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
++        for (const r of currentDragRefs) addPath(r && r.vaultPath);
++        if (out.length > 0) return out;
++      }
++      if (!dataTransfer) return out;
++      const tryJsonMime = (mime) => {
++        let raw;
++        try {
++          raw = dataTransfer.getData(mime);
++        } catch (_) {
++          return false;
++        }
++        if (!raw) return false;
++        let parsed;
++        try {
++          parsed = JSON.parse(raw);
++        } catch (_) {
++          return false;
++        }
++        if (parsed && Array.isArray(parsed.files)) {
++          for (const f of parsed.files) addPath(f && f.path);
++          return out.length > 0;
++        }
++        if (Array.isArray(parsed)) {
++          for (const f of parsed) addPath(f && (f.path || f));
++          return out.length > 0;
++        }
++        if (parsed && typeof parsed.path === "string") {
++          addPath(parsed.path);
++          return out.length > 0;
++        }
++        return false;
++      };
++      if (tryJsonMime("application/obsidian-files")) return out;
++      if (tryJsonMime("application/obsidian-file")) return out;
++      if (tryJsonMime("application/x-obsidian-files")) return out;
++      let uriList;
++      try {
++        uriList = dataTransfer.getData("text/uri-list");
++      } catch (_) {
++        uriList = "";
++      }
++      if (uriList) {
++        const basePath = app.vault.adapter && typeof app.vault.adapter.getBasePath === "function" ? app.vault.adapter.getBasePath() : "";
++        for (const line of uriList.split(/\r?\n/)) {
++          const url = line.trim();
++          if (!url || url.startsWith("#")) continue;
++          if (url.startsWith("obsidian://")) {
++            try {
++              const u = new URL(url);
++              const fileParam = u.searchParams.get("file");
++              if (fileParam) addPath(decodeURIComponent(fileParam));
++            } catch (_) {
++            }
++          } else if (url.startsWith("file://")) {
++            let abs;
++            try {
++              abs = decodeURIComponent(url.replace(/^file:\/\//, ""));
++            } catch (_) {
++              continue;
++            }
++            if (basePath && abs.startsWith(basePath + "/")) {
++              addPath(abs.substring(basePath.length + 1));
++            }
++          }
++        }
++        if (out.length > 0) return out;
++      }
++      let plain;
++      try {
++        plain = dataTransfer.getData("text/plain");
++      } catch (_) {
++        plain = "";
++      }
++      if (plain) {
++        for (const line of plain.split(/\r?\n/)) {
++          const path = line.trim();
++          if (path) addPath(path);
++        }
++      }
++      return out;
++    }
+     module2.exports = {
+       createAtPathCore: createAtPathCore2,
+       REPOS_SEGMENT,
+@@ -8892,7 +8991,8 @@ var require_atpath_core = __commonJS({
+       discoverRepoRoots: discoverRepoRoots2,
+       resolveAtPathFromSource: resolveAtPathFromSource2,
+       resolveAtPathFolderFromSource,
+-      computeDisplayPath
++      computeDisplayPath,
++      extractDraggedVaultPaths: extractDraggedVaultPaths2
+     };
+   }
+ });
+@@ -9369,7 +9469,8 @@ var {
+   discoverRepoRoots: coreDiscoverRepoRoots,
+   resolveAtPathFromSource: coreResolveAtPathFromSource,
+   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
+-  computeDisplayPath: coreComputeDisplayPath
++  computeDisplayPath: coreComputeDisplayPath,
++  extractDraggedVaultPaths: coreExtractDraggedVaultPaths
+ } = require_atpath_core();
+ var {
+   HTML_APP_SCOPE_SINGLE_FILE,
+@@ -10126,105 +10227,7 @@ function buildBufferCountListener(plugin) {
+   });
+ }
+ function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+-  const app = plugin.app;
+-  const out = [];
+-  const seen = /* @__PURE__ */ new Set();
+-  const addPath = (rawPath) => {
+-    if (!rawPath || typeof rawPath !== "string") return;
+-    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+-    if (!path || seen.has(path)) return;
+-    const target = app.vault.getAbstractFileByPath(path);
+-    if (!target) return;
+-    if (sourcePath && target.path === sourcePath) return;
+-    seen.add(path);
+-    if (target instanceof TFile) {
+-      out.push({ kind: "file", vaultPath: target.path, target });
+-    } else if (target instanceof TFolder) {
+-      out.push({ kind: "folder", vaultPath: target.path, target });
+-    }
+-  };
+-  const captured = plugin._currentDragRefs;
+-  if (Array.isArray(captured) && captured.length > 0) {
+-    for (const r of captured) addPath(r && r.vaultPath);
+-    if (out.length > 0) return out;
+-  }
+-  if (!dataTransfer) return out;
+-  const tryJsonMime = (mime) => {
+-    let raw;
+-    try {
+-      raw = dataTransfer.getData(mime);
+-    } catch (_) {
+-      return false;
+-    }
+-    if (!raw) return false;
+-    let parsed;
+-    try {
+-      parsed = JSON.parse(raw);
+-    } catch (_) {
+-      return false;
+-    }
+-    if (parsed && Array.isArray(parsed.files)) {
+-      for (const f of parsed.files) addPath(f && f.path);
+-      return out.length > 0;
+-    }
+-    if (Array.isArray(parsed)) {
+-      for (const f of parsed) addPath(f && (f.path || f));
+-      return out.length > 0;
+-    }
+-    if (parsed && typeof parsed.path === "string") {
+-      addPath(parsed.path);
+-      return out.length > 0;
+-    }
+-    return false;
+-  };
+-  if (tryJsonMime("application/obsidian-files")) return out;
+-  if (tryJsonMime("application/obsidian-file")) return out;
+-  if (tryJsonMime("application/x-obsidian-files")) return out;
+-  let uriList;
+-  try {
+-    uriList = dataTransfer.getData("text/uri-list");
+-  } catch (_) {
+-    uriList = "";
+-  }
+-  if (uriList) {
+-    const basePath = app.vault.adapter && typeof app.vault.adapter.getBasePath === "function" ? app.vault.adapter.getBasePath() : "";
+-    for (const line of uriList.split(/\r?\n/)) {
+-      const url = line.trim();
+-      if (!url || url.startsWith("#")) continue;
+-      if (url.startsWith("obsidian://")) {
+-        try {
+-          const u = new URL(url);
+-          const fileParam = u.searchParams.get("file");
+-          if (fileParam) addPath(decodeURIComponent(fileParam));
+-        } catch (_) {
+-        }
+-      } else if (url.startsWith("file://")) {
+-        let abs;
+-        try {
+-          abs = decodeURIComponent(url.replace(/^file:\/\//, ""));
+-        } catch (_) {
+-          continue;
+-        }
+-        if (basePath && abs.startsWith(basePath + "/")) {
+-          addPath(abs.substring(basePath.length + 1));
+-        }
+-      }
+-    }
+-    if (out.length > 0) return out;
+-  }
+-  let plain;
+-  try {
+-    plain = dataTransfer.getData("text/plain");
+-  } catch (_) {
+-    plain = "";
+-  }
+-  if (plain) {
+-    for (const line of plain.split(/\r?\n/)) {
+-      const path = line.trim();
+-      if (path) addPath(path);
+-    }
+-  }
+-  return out;
++  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+ }
+ function captureDragRefsFromExplorerDom(plugin, evt) {
+   const app = plugin.app;
+diff --git a/src/atpath-core.js b/src/atpath-core.js
+index 86fc64f..353503e 100644
+--- a/src/atpath-core.js
++++ b/src/atpath-core.js
+@@ -411,6 +411,105 @@ function createAtPathCore(plugin) {
+   };
+ }
+ 
++// Resolve raw drag-source paths (captured at dragstart from the
++// file-explorer DOM, plus any DataTransfer MIME fallbacks) into the
++// `{kind, vaultPath, target}` shape the editor insertion helper expects.
++// Pure — takes `app`, `sourcePath`, `currentDragRefs` explicitly so it
++// can be exercised from unit tests without a live Obsidian runtime.
++function extractDraggedVaultPaths(dataTransfer, app, sourcePath, currentDragRefs) {
++  const out = [];
++  const seen = new Set();
++  const addPath = (rawPath) => {
++    if (!rawPath || typeof rawPath !== "string") return;
++    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
++    if (!path || seen.has(path)) return;
++    const target = app.vault.getAbstractFileByPath(path);
++    if (!target) return;
++    if (sourcePath && target.path === sourcePath) return; // skip self-ref
++    seen.add(path);
++    if (target instanceof TFile) {
++      out.push({ kind: "file", vaultPath: target.path, target });
++    } else if (target instanceof TFolder) {
++      out.push({ kind: "folder", vaultPath: target.path, target });
++    }
++  };
++
++  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
++  // Obsidian doesn't expose a public DataTransfer MIME for internal vault
++  // drags, so the caller sniffs `data-path` attributes itself and passes
++  // the result in via `currentDragRefs`.
++  if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
++    for (const r of currentDragRefs) addPath(r && r.vaultPath);
++    if (out.length > 0) return out;
++  }
++
++  if (!dataTransfer) return out;
++
++  const tryJsonMime = (mime) => {
++    let raw;
++    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
++    if (!raw) return false;
++    let parsed;
++    try { parsed = JSON.parse(raw); } catch (_) { return false; }
++    if (parsed && Array.isArray(parsed.files)) {
++      for (const f of parsed.files) addPath(f && f.path);
++      return out.length > 0;
++    }
++    if (Array.isArray(parsed)) {
++      for (const f of parsed) addPath(f && (f.path || f));
++      return out.length > 0;
++    }
++    if (parsed && typeof parsed.path === "string") {
++      addPath(parsed.path);
++      return out.length > 0;
++    }
++    return false;
++  };
++
++  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
++  if (tryJsonMime("application/obsidian-files")) return out;
++  if (tryJsonMime("application/obsidian-file")) return out;
++  if (tryJsonMime("application/x-obsidian-files")) return out;
++
++  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
++  let uriList;
++  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
++  if (uriList) {
++    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
++      ? app.vault.adapter.getBasePath()
++      : "";
++    for (const line of uriList.split(/\r?\n/)) {
++      const url = line.trim();
++      if (!url || url.startsWith("#")) continue;
++      if (url.startsWith("obsidian://")) {
++        try {
++          const u = new URL(url);
++          const fileParam = u.searchParams.get("file");
++          if (fileParam) addPath(decodeURIComponent(fileParam));
++        } catch (_) { /* skip malformed */ }
++      } else if (url.startsWith("file://")) {
++        let abs;
++        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
++        if (basePath && abs.startsWith(basePath + "/")) {
++          addPath(abs.substring(basePath.length + 1));
++        }
++      }
++    }
++    if (out.length > 0) return out;
++  }
++
++  // Tier 3: text/plain — bare vault path(s), one per line.
++  let plain;
++  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
++  if (plain) {
++    for (const line of plain.split(/\r?\n/)) {
++      const path = line.trim();
++      if (path) addPath(path);
++    }
++  }
++  return out;
++}
++
+ module.exports = {
+   createAtPathCore,
+   REPOS_SEGMENT,
+@@ -420,4 +519,5 @@ module.exports = {
+   resolveAtPathFromSource,
+   resolveAtPathFolderFromSource,
+   computeDisplayPath,
++  extractDraggedVaultPaths,
+ };
+diff --git a/src/main.js b/src/main.js
+index 59626f5..5cba94d 100644
+--- a/src/main.js
++++ b/src/main.js
+@@ -199,6 +199,7 @@ const {
+   resolveAtPathFromSource: coreResolveAtPathFromSource,
+   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
+   computeDisplayPath: coreComputeDisplayPath,
++  extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
+ } = require("./atpath-core");
+ const {
+   HTML_APP_SCOPE_SINGLE_FILE,
+@@ -1094,99 +1095,7 @@ function buildBufferCountListener(plugin) {
+ // ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
+ 
+ function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+-  const app = plugin.app;
+-  const out = [];
+-  const seen = new Set();
+-  const addPath = (rawPath) => {
+-    if (!rawPath || typeof rawPath !== "string") return;
+-    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+-    if (!path || seen.has(path)) return;
+-    const target = app.vault.getAbstractFileByPath(path);
+-    if (!target) return;
+-    if (sourcePath && target.path === sourcePath) return; // skip self-ref
+-    seen.add(path);
+-    if (target instanceof TFile) {
+-      out.push({ kind: "file", vaultPath: target.path, target });
+-    } else if (target instanceof TFolder) {
+-      out.push({ kind: "folder", vaultPath: target.path, target });
+-    }
+-  };
+-
+-  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
+-  // Obsidian doesn't expose a public DataTransfer MIME for internal vault
+-  // drags, so we sniff `data-path` attributes ourselves and stash the result
+-  // on the plugin until dragend.
+-  const captured = plugin._currentDragRefs;
+-  if (Array.isArray(captured) && captured.length > 0) {
+-    for (const r of captured) addPath(r && r.vaultPath);
+-    if (out.length > 0) return out;
+-  }
+-
+-  if (!dataTransfer) return out;
+-
+-  const tryJsonMime = (mime) => {
+-    let raw;
+-    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
+-    if (!raw) return false;
+-    let parsed;
+-    try { parsed = JSON.parse(raw); } catch (_) { return false; }
+-    if (parsed && Array.isArray(parsed.files)) {
+-      for (const f of parsed.files) addPath(f && f.path);
+-      return out.length > 0;
+-    }
+-    if (Array.isArray(parsed)) {
+-      for (const f of parsed) addPath(f && (f.path || f));
+-      return out.length > 0;
+-    }
+-    if (parsed && typeof parsed.path === "string") {
+-      addPath(parsed.path);
+-      return out.length > 0;
+-    }
+-    return false;
+-  };
+-
+-  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
+-  if (tryJsonMime("application/obsidian-files")) return out;
+-  if (tryJsonMime("application/obsidian-file")) return out;
+-  if (tryJsonMime("application/x-obsidian-files")) return out;
+-
+-  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
+-  let uriList;
+-  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
+-  if (uriList) {
+-    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
+-      ? app.vault.adapter.getBasePath()
+-      : "";
+-    for (const line of uriList.split(/\r?\n/)) {
+-      const url = line.trim();
+-      if (!url || url.startsWith("#")) continue;
+-      if (url.startsWith("obsidian://")) {
+-        try {
+-          const u = new URL(url);
+-          const fileParam = u.searchParams.get("file");
+-          if (fileParam) addPath(decodeURIComponent(fileParam));
+-        } catch (_) { /* skip malformed */ }
+-      } else if (url.startsWith("file://")) {
+-        let abs;
+-        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
+-        if (basePath && abs.startsWith(basePath + "/")) {
+-          addPath(abs.substring(basePath.length + 1));
+-        }
+-      }
+-    }
+-    if (out.length > 0) return out;
+-  }
+-
+-  // Tier 3: text/plain — bare vault path(s), one per line.
+-  let plain;
+-  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
+-  if (plain) {
+-    for (const line of plain.split(/\r?\n/)) {
+-      const path = line.trim();
+-      if (path) addPath(path);
+-    }
+-  }
+-  return out;
++  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+ }
+ 
+ function captureDragRefsFromExplorerDom(plugin, evt) {
+diff --git a/tests/drag-extract.test.js b/tests/drag-extract.test.js
+new file mode 100644
+index 0000000..32e8015
+--- /dev/null
++++ b/tests/drag-extract.test.js
+@@ -0,0 +1,103 @@
++"use strict";
++
++// Regression: drag-and-drop @path insertion from the file-explorer.
++//
++// The runtime bug (fixed by wrapping the CM6 extension in Prec.highest)
++// was that Obsidian's MarkdownView drop handler preempted ours, so a
++// wikilink got inserted instead of an @path. We can't unit-test CM6
++// handler ordering, but we CAN pin down the extraction layer that turns
++// raw dragged paths into the {kind, vaultPath, target} shape the editor
++// insertion expects — the Tier 0 path that reads from currentDragRefs
++// is what the rest of the chain depends on.
++
++const test = require("node:test");
++const assert = require("node:assert/strict");
++
++const { TFile, TFolder } = require("obsidian");
++const { extractDraggedVaultPaths } = require("../src/atpath-core.js");
++
++function buildApp() {
++  const indexMd = new TFile("notes/index.md", { size: 100 });
++  const v1 = new TFile("notes/api/v1.md", { size: 200 });
++  const apiFolder = new TFolder("notes/api", [v1]);
++  const notesFolder = new TFolder("notes", [indexMd, apiFolder]);
++  const root = new TFolder("", [notesFolder]);
++
++  const byPath = new Map();
++  function index(node) {
++    byPath.set(node.path, node);
++    if (node instanceof TFolder) for (const c of node.children) index(c);
++  }
++  index(notesFolder);
++
++  return {
++    app: {
++      vault: {
++        getAbstractFileByPath: (p) => byPath.get(p) || null,
++      },
++    },
++    indexMd, v1, apiFolder, notesFolder,
++  };
++}
++
++test("extractDraggedVaultPaths: Tier 0 happy path — captured file ref returns file out", () => {
++  const { app, indexMd } = buildApp();
++  const captured = [{ kind: "file", vaultPath: "notes/index.md", target: indexMd }];
++  const out = extractDraggedVaultPaths(null, app, "", captured);
++  assert.equal(out.length, 1);
++  assert.equal(out[0].kind, "file");
++  assert.equal(out[0].vaultPath, "notes/index.md");
++  assert.equal(out[0].target, indexMd);
++});
++
++test("extractDraggedVaultPaths: Tier 0 folder ref returns folder out", () => {
++  const { app, apiFolder } = buildApp();
++  const captured = [{ kind: "folder", vaultPath: "notes/api", target: apiFolder }];
++  const out = extractDraggedVaultPaths(null, app, "", captured);
++  assert.equal(out.length, 1);
++  assert.equal(out[0].kind, "folder");
++  assert.equal(out[0].target, apiFolder);
++});
++
++test("extractDraggedVaultPaths: self-drop into the source file is skipped", () => {
++  const { app, indexMd } = buildApp();
++  const captured = [{ kind: "file", vaultPath: "notes/index.md", target: indexMd }];
++  const out = extractDraggedVaultPaths(null, app, "notes/index.md", captured);
++  assert.equal(out.length, 0);
++});
++
++test("extractDraggedVaultPaths: stale captured path that no longer exists is dropped", () => {
++  const { app } = buildApp();
++  const captured = [{ kind: "file", vaultPath: "notes/gone.md", target: null }];
++  const out = extractDraggedVaultPaths(null, app, "", captured);
++  assert.equal(out.length, 0);
++});
++
++test("extractDraggedVaultPaths: multi-select preserves order, dedupes repeats", () => {
++  const { app, indexMd, v1 } = buildApp();
++  const captured = [
++    { kind: "file", vaultPath: "notes/index.md", target: indexMd },
++    { kind: "file", vaultPath: "notes/api/v1.md", target: v1 },
++    { kind: "file", vaultPath: "notes/index.md", target: indexMd }, // duplicate
++  ];
++  const out = extractDraggedVaultPaths(null, app, "", captured);
++  assert.equal(out.length, 2);
++  assert.equal(out[0].vaultPath, "notes/index.md");
++  assert.equal(out[1].vaultPath, "notes/api/v1.md");
++});
++
++test("extractDraggedVaultPaths: empty currentDragRefs with no DataTransfer returns []", () => {
++  const { app } = buildApp();
++  const out = extractDraggedVaultPaths(null, app, "", []);
++  assert.equal(out.length, 0);
++});
++
++test("extractDraggedVaultPaths: text/plain fallback resolves bare vault paths", () => {
++  const { app, indexMd } = buildApp();
++  const dataTransfer = {
++    getData: (mime) => (mime === "text/plain" ? "notes/index.md" : ""),
++  };
++  const out = extractDraggedVaultPaths(dataTransfer, app, "", null);
++  assert.equal(out.length, 1);
++  assert.equal(out[0].target, indexMd);
++});
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+?? _work_units/0_llm/reviews/005_dnd_prec_highest_fix-review.stderr.log
+?? _work_units/0_llm/reviews/005_dnd_prec_highest_fix-review_prompt.md
+
+exec
+/bin/zsh -lc 'rg -n "function buildDragDropExtension|function captureDragRefsFromExplorerDom|function extractDraggedVaultPaths|dragDropCompartment|_currentDragRefs|data-path|enableDragDropAtPath|insertAtPathsAtPos" src/main.js' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+exec
+/bin/zsh -lc 'rg -n "class TFile|class TFolder|function TFile|function TFolder" tests src node_modules/obsidian' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+225:  enableDragDropAtPath: true,
+1097:function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+1098:  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+1101:function captureDragRefsFromExplorerDom(plugin, evt) {
+1107:  const item = target.closest("[data-path]");
+1119:    const selected = explorer.querySelectorAll(".is-selected[data-path]");
+1126:    const path = el.getAttribute("data-path");
+1157:function buildDragDropExtension(plugin) {
+1182:      plugin._currentDragRefs = null;
+1502:          .setValue(this.plugin.settings.enableDragDropAtPath !== false)
+1504:            this.plugin.settings.enableDragDropAtPath = value;
+2166:    // `enableDragDropAtPath` toggle can reconfigure live without reload.
+2167:    this.dragDropCompartment = new Compartment();
+2169:      this.dragDropCompartment.of(
+2170:        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+2177:    this._currentDragRefs = null;
+2180:      this._currentDragRefs = null;
+2181:      if (this.settings.enableDragDropAtPath === false) return;
+2183:      if (refs.length > 0) this._currentDragRefs = refs;
+2186:      this._currentDragRefs = null;
+2385:    if (!this.dragDropCompartment) return;
+2386:    const ext = this.settings.enableDragDropAtPath !== false
+2396:        cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+
+ exited 2 in 0ms:
+rg: node_modules/obsidian: No such file or directory (os error 2)
+tests/_fakes/obsidian.js:16:class TFile extends TAbstractFile {
+tests/_fakes/obsidian.js:30:class TFolder extends TAbstractFile {
+
+exec
+/bin/zsh -lc "sed -n '1,180p' package.json" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+exec
+/bin/zsh -lc "sed -n '1,180p' tests/_setup.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+{
+  "name": "obsidian-atpath",
+  "version": "1.8.3",
+  "description": "Autocomplete and navigate @path/to/file references in Obsidian",
+  "author": "sergio",
+  "license": "MIT",
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "autocomplete",
+    "path",
+    "claude"
+  ],
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "node --test --require ./tests/_setup.js tests/*.test.js"
+  },
+  "dependencies": {
+    "gpt-tokenizer": "^2.8.1",
+    "markdown-it": "^14.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "playwright": "^1.58.2"
+  }
+}
+
+ succeeded in 0ms:
+"use strict";
+
+// Redirects `require("obsidian")` to the test fake, since the real
+// `obsidian` package is not installed (it is marked external in the
+// esbuild config and is only present at runtime inside the Obsidian app).
+
+const Module = require("node:module");
+const path = require("node:path");
+
+const FAKE = path.resolve(__dirname, "_fakes/obsidian.js");
+
+const originalResolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, ...rest) {
+  if (request === "obsidian") return FAKE;
+  return originalResolve.call(this, request, parent, ...rest);
+};
+
+exec
+/bin/zsh -lc "sed -n '1080,1205p' src/main.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+    ATPATH_PERF.inc("buffer.updateListener.calls");
+    if (update.docChanged) {
+      ATPATH_PERF.inc("buffer.updateListener.docChanged");
+      if (lastDoc !== update.state.doc) {
+        lastDoc = update.state.doc;
+        scheduleDocRetoken(update.view);
+      }
+    }
+    if (update.selectionSet) {
+      ATPATH_PERF.inc("buffer.updateListener.selectionSet");
+      recomputeSelection(update.state);
+    }
+  });
+}
+
+// ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
+
+function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+}
+
+function captureDragRefsFromExplorerDom(plugin, evt) {
+  const app = plugin.app;
+  const out = [];
+  const seen = new Set();
+  const target = evt.target instanceof Element ? evt.target : null;
+  if (!target) return out;
+  const item = target.closest("[data-path]");
+  if (!item) return out;
+
+  // Multi-select drag: pick all `.is-selected` items in the same file-explorer
+  // leaf when the dragged item is one of them. `.is-active` is the currently
+  // open note marker and is NOT part of a selection set, so it must not pull
+  // siblings in — treat it as single-item only.
+  const explorer = item.closest(".workspace-leaf-content[data-type='file-explorer']") ||
+                   item.closest(".nav-files-container") ||
+                   null;
+  let candidates;
+  if (explorer && item.classList.contains("is-selected")) {
+    const selected = explorer.querySelectorAll(".is-selected[data-path]");
+    candidates = selected.length > 0 ? Array.from(selected) : [item];
+  } else {
+    candidates = [item];
+  }
+
+  for (const el of candidates) {
+    const path = el.getAttribute("data-path");
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    const af = app.vault.getAbstractFileByPath(path);
+    if (!af) continue;
+    if (af instanceof TFile) {
+      out.push({ kind: "file", vaultPath: af.path, target: af });
+    } else if (af instanceof TFolder) {
+      out.push({ kind: "folder", vaultPath: af.path, target: af });
+    }
+  }
+  return out;
+}
+
+function insertAtPathRefs(view, pos, refs, plugin) {
+  const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+  const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
+  const parts = [];
+  for (const r of refs) {
+    if (!r || !r.target) continue;
+    parts.push(plugin.core.formatAtPathInsertion(r.target, sourcePath, mode));
+  }
+  if (parts.length === 0) return;
+  const text = parts.join(" ") + " ";
+  view.dispatch({
+    changes: { from: pos, to: pos, insert: text },
+    selection: { anchor: pos + text.length },
+    userEvent: "input.drop",
+  });
+}
+
+function buildDragDropExtension(plugin) {
+  return EditorView.domEventHandlers({
+    dragover(evt, _view) {
+      const refs = extractDraggedVaultPaths(
+        evt.dataTransfer,
+        plugin,
+        plugin.app.workspace.getActiveFile()?.path || ""
+      );
+      if (!refs.length) return false;
+      evt.preventDefault();
+      if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
+      return true;
+    },
+    drop(evt, view) {
+      const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
+      if (!refs.length) return false;
+      if (refs.length > 50) {
+        new Notice("Drop limited to 50 paths");
+        refs = refs.slice(0, 50);
+      }
+      evt.preventDefault();
+      evt.stopPropagation();
+      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+      plugin._currentDragRefs = null;
+      return true;
+    },
+  });
+}
+
+// ─── D) markdownPostProcessor — Clickable links in Reading mode ──────
+
+function registerPostProcessor(plugin) {
+  plugin.registerMarkdownPostProcessor((el, ctx) => {
+    // ── Wikilink @path references (rendered as a.internal-link by Obsidian) ──
+    const internalLinks = el.querySelectorAll("a.internal-link");
+    for (const link of internalLinks) {
+      if (!link.textContent.startsWith("@")) continue;
+      link.classList.add("atpath-link");
+      const rawHref = link.dataset.href || link.getAttribute("href") || "";
+      const vaultPath = resolveWikilinkHref(plugin, rawHref, ctx.sourcePath);
+      link.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showAtPathMenu(plugin, e, vaultPath);
+      });
+      // Token count
+      if (plugin.settings.showTokenCounts) {
+        const tokenSpan = document.createElement("span");
+
+exec
+/bin/zsh -lc "sed -n '2140,2195p' src/main.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+    this.contentEl.empty();
+  }
+}
+
+// ─── G) Plugin lifecycle ─────────────────────────────────────────────
+
+class AtPathPlugin extends Plugin {
+  async onload() {
+    await this.loadSettings();
+    this.tokenCache = new Map();
+    this.tokenCacheDirty = false;
+    this._inFlightTokenFetches = new Set();
+    this._inFlightFolderTokenFetches = new Set();
+    this._refreshTimer = null;
+    this._lastEditorView = null;
+    this._statusBarGen = 0;
+    this.core = createAtPathCore(this);
+
+    this.registerEditorSuggest(new AtPathSuggest(this));
+    this.registerEditorExtension(buildAtPathViewPlugin(this));
+    this.registerEditorExtension(buildWikilinkViewPlugin(this));
+    if (!Platform.isMobile) {
+      this.registerEditorExtension(buildBufferCountListener(this));
+    }
+
+    // Drag-and-drop — registered behind a CM6 Compartment so the
+    // `enableDragDropAtPath` toggle can reconfigure live without reload.
+    this.dragDropCompartment = new Compartment();
+    this.registerEditorExtension(
+      this.dragDropCompartment.of(
+        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+      )
+    );
+
+    // Capture file-explorer drag sources from the DOM, since Obsidian does not
+    // expose a stable DataTransfer MIME for internal vault drags. Listeners run
+    // in the capture phase so we see the event before any handler can stop it.
+    this._currentDragRefs = null;
+    this.registerDomEvent(document, "dragstart", (evt) => {
+      // Always clear first so a missed dragend can't leave stale refs in place.
+      this._currentDragRefs = null;
+      if (this.settings.enableDragDropAtPath === false) return;
+      const refs = captureDragRefsFromExplorerDom(this, evt);
+      if (refs.length > 0) this._currentDragRefs = refs;
+    }, { capture: true });
+    this.registerDomEvent(document, "dragend", () => {
+      this._currentDragRefs = null;
+    }, { capture: true });
+
+    registerPostProcessor(this);
+
+    // Status bar (desktop only — Obsidian's status bar is desktop-scoped)
+    if (!Platform.isMobile) {
+      this.noteBarEl = this.addStatusBarItem();
+      this.noteBarEl.addClass("mod-clickable", "atpath-status-note");
+      this.registerDomEvent(this.noteBarEl, "click", () => this.copyNoteWithAtPaths());
+
+exec
+/bin/zsh -lc "sed -n '1,80p' tests/_fakes/obsidian.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+"use strict";
+
+// Minimal fake of the `obsidian` module surface that `src/atpath-core.js`
+// touches. Only what tests need — TFile, TFolder, plus a few no-op classes
+// that other parts of the plugin import (kept here so this fake stays
+// drop-in if more imports show up later).
+
+class TAbstractFile {
+  constructor(path) {
+    this.path = path || "";
+    this.name = this.path.split("/").pop() || "";
+    this.parent = null;
+  }
+}
+
+class TFile extends TAbstractFile {
+  constructor(path, opts = {}) {
+    super(path);
+    const dot = this.name.lastIndexOf(".");
+    this.extension = dot >= 0 ? this.name.substring(dot + 1) : "";
+    this.basename = dot >= 0 ? this.name.substring(0, dot) : this.name;
+    this.stat = {
+      size: opts.size != null ? opts.size : 0,
+      mtime: opts.mtime != null ? opts.mtime : 0,
+      ctime: opts.ctime != null ? opts.ctime : 0,
+    };
+  }
+}
+
+class TFolder extends TAbstractFile {
+  constructor(path, children = []) {
+    super(path);
+    this.children = children;
+    for (const c of children) c.parent = this;
+  }
+  isRoot() {
+    return this.path === "" || this.path === "/";
+  }
+}
+
+// The following are imported elsewhere in the plugin. Stubbed so that any
+// future test file that incidentally requires `obsidian` doesn't blow up.
+class Plugin {}
+class PluginSettingTab {}
+class Modal {}
+class Notice {
+  constructor(msg) { this.msg = msg; }
+}
+class Setting {
+  constructor() { return this; }
+  setName() { return this; }
+  setDesc() { return this; }
+  addText() { return this; }
+  addToggle() { return this; }
+  addDropdown() { return this; }
+  addButton() { return this; }
+  addSlider() { return this; }
+}
+class MarkdownView {}
+class EditorSuggest {}
+class FuzzySuggestModal {}
+
+function normalizePath(p) {
+  return (p || "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+const requestUrl = async () => ({ status: 200, text: "", json: {}, arrayBuffer: new ArrayBuffer(0) });
+
+module.exports = {
+  TAbstractFile,
+  TFile,
+  TFolder,
+  Plugin,
+  PluginSettingTab,
+  Modal,
+  Notice,
+  Setting,
+  MarkdownView,
+  EditorSuggest,
+  FuzzySuggestModal,
+
+exec
+/bin/zsh -lc "sed -n '2370,2405p' src/main.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+          this.app.setting.openTabById(this.manifest.id);
+        })
+    );
+    menu.showAtMouseEvent(event);
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  reconfigureDragDrop() {
+    if (!this.dragDropCompartment) return;
+    const ext = this.settings.enableDragDropAtPath !== false
+      ? Prec.highest(buildDragDropExtension(this))
+      : [];
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      // `leaf.view.editor.cm` is the internal CM6 handle. Wrap in try/catch
+      // so an Obsidian API rename doesn't crash the settings toggle —
+      // a missed live-reconfigure is recoverable by reload, a crash isn't.
+      const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
+      if (!cm) continue;
+      try {
+        cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+      } catch (err) {
+        console.warn("[atpath] drag-drop reconfigure failed for one leaf", err);
+      }
+    }
+  }
+
+  async getTokenCount(vaultPath) {
+    ATPATH_PERF.inc("getTokenCount.calls");
+    const file = this.app.vault.getAbstractFileByPath(vaultPath);
+
+exec
+/bin/zsh -lc "sed -n '1,70p' src/atpath-core.js" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+"use strict";
+
+const { TFile, TFolder } = require("obsidian");
+
+const REPOS_SEGMENT = "_repos/";
+
+function getRepoRoot(filePath) {
+  if (!filePath) return "";
+  const idx = filePath.indexOf(REPOS_SEGMENT);
+  if (idx === -1) return "";
+  const afterRepos = filePath.substring(idx + REPOS_SEGMENT.length);
+  const slash = afterRepos.indexOf("/");
+  if (slash === -1) return "";
+  return filePath.substring(0, idx + REPOS_SEGMENT.length + slash);
+}
+
+function toRepoRelative(filePath, repoRoot) {
+  if (!repoRoot) return filePath;
+  return filePath.substring(repoRoot.length + 1);
+}
+
+function discoverRepoRoots(plugin) {
+  const now = Date.now();
+  if (plugin._repoRootsCache && now - plugin._repoRootsCacheTime < 5000) {
+    return plugin._repoRootsCache;
+  }
+  const roots = new Map();
+  for (const file of plugin.app.vault.getFiles()) {
+    const idx = file.path.indexOf(REPOS_SEGMENT);
+    if (idx === -1) continue;
+    const afterRepos = file.path.substring(idx + REPOS_SEGMENT.length);
+    const slash = afterRepos.indexOf("/");
+    if (slash === -1) continue;
+    const repoName = afterRepos.substring(0, slash);
+    if (!roots.has(repoName)) {
+      roots.set(repoName, file.path.substring(0, idx + REPOS_SEGMENT.length + slash));
+    }
+  }
+  plugin._repoRootsCache = roots;
+  plugin._repoRootsCacheTime = now;
+  return roots;
+}
+
+function resolveAtPathFromSource(relPath, sourceFilePath, plugin) {
+  const sourceRepoRoot = getRepoRoot(sourceFilePath);
+  if (sourceRepoRoot) {
+    const candidate = sourceRepoRoot + "/" + relPath;
+    if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+  }
+  const slashIdx = relPath.indexOf("/");
+  if (slashIdx !== -1) {
+    const firstSegment = relPath.substring(0, slashIdx);
+    const rest = relPath.substring(slashIdx + 1);
+    const repoRoots = discoverRepoRoots(plugin);
+    const repoRoot = repoRoots.get(firstSegment);
+    if (repoRoot) {
+      const candidate = repoRoot + "/" + rest;
+      if (plugin.app.vault.getAbstractFileByPath(candidate)) return candidate;
+    }
+  }
+  if (plugin.app.vault.getAbstractFileByPath(relPath)) return relPath;
+  return sourceRepoRoot ? sourceRepoRoot + "/" + relPath : relPath;
+}
+
+function resolveAtPathFolderFromSource(relPath, sourceFilePath, plugin) {
+  const trimmed = relPath.replace(/\/+$/, "");
+  const sourceRepoRoot = getRepoRoot(sourceFilePath);
+  if (sourceRepoRoot) {
+    const candidate = sourceRepoRoot + "/" + trimmed;
+    const f = plugin.app.vault.getAbstractFileByPath(candidate);
+
+exec
+/bin/zsh -lc 'npm run build' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+exec
+/bin/zsh -lc 'npm test' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 281ms:
+
+> obsidian-atpath@1.8.3 build
+> node esbuild.config.mjs
+
+
+ succeeded in 330ms:
+
+> obsidian-atpath@1.8.3 test
+> node --test --require ./tests/_setup.js tests/*.test.js
+
+✔ resolveAtPathTarget: folder ref → kind 'folder' (1.355792ms)
+✔ resolveAtPathTarget: folder ref with trailing slash in displayPath resolves (0.1655ms)
+✔ resolveAtPathTarget: missing folder → kind 'missing' (0.102417ms)
+✔ resolveAtPathTarget: file ref → kind 'file' (0.300083ms)
+✔ resolveAtPathTarget: missing file → kind 'missing' (0.342167ms)
+✔ resolveAtPathTarget: empty ref → kind 'missing' (0.170708ms)
+✔ enumerateFolderCandidates: 'notes/' (resolved folder) → immediate children only (9.472666ms)
+✔ enumerateFolderCandidates: 'ghost/' (unresolved prefix) → prefix match list (0.227ms)
+✔ enumerateFolderCandidates: 'notes/ap/' (unresolved prefix) → prefix match list with folder + files (0.161166ms)
+✔ enumerateFolderCandidates: 'zzz/' (no prefix hits) → empty list (0.149208ms)
+✔ enumerateFolderCandidates: non-slash query 'api' → mixed results with 1.3x folder bias (0.239667ms)
+✔ enumerateFolderCandidates: empty query returns full mixed list (no filter) (0.075208ms)
+✔ formatAtPathInsertion: file in legacy mode → '@<path>' (0.086125ms)
+✔ formatAtPathInsertion: file in wikilink mode → delegates to fileManager.generateMarkdownLink (0.12725ms)
+✔ formatAtPathInsertion: folder in legacy mode → '@<path>/' (0.055833ms)
+✔ formatAtPathInsertion: folder in wikilink mode → '@<path>/' (no generateMarkdownLink call) (0.064667ms)
+✔ extractDraggedVaultPaths: Tier 0 happy path — captured file ref returns file out (0.956167ms)
+✔ extractDraggedVaultPaths: Tier 0 folder ref returns folder out (0.1075ms)
+✔ extractDraggedVaultPaths: self-drop into the source file is skipped (0.07475ms)
+✔ extractDraggedVaultPaths: stale captured path that no longer exists is dropped (0.064167ms)
+✔ extractDraggedVaultPaths: multi-select preserves order, dedupes repeats (0.085458ms)
+✔ extractDraggedVaultPaths: empty currentDragRefs with no DataTransfer returns [] (0.054667ms)
+✔ extractDraggedVaultPaths: text/plain fallback resolves bare vault paths (0.1065ms)
+✔ getFolderTokens: numeric sum when files <= cap (6.002917ms)
+✔ getFolderTokens: sentinel when files > cap; walk short-circuits (0.422167ms)
+✔ getFolderTokens: in-flight dedupe — two concurrent calls share one promise (20.478292ms)
+✔ getFolderTokens: epoch invalidation — clearFolderTokenMemo mid-walk prevents memoization (25.714833ms)
+✔ clearFolderTokenMemo: wipes both numeric and sentinel entries (1.61875ms)
+✔ getFolderTokens: yields between batches (macrotask boundary) (2.6705ms)
+✔ getFolderTokens: respects maxFileSizeMB — large files skipped, not counted toward cap (1.473167ms)
+✔ computeDisplayPath: target in same repo as source → bare relpath (0.758834ms)
+✔ computeDisplayPath: target in different repo from source → <repo>/<rest> (0.070125ms)
+✔ computeDisplayPath: target outside _repos/ → passthrough (0.060166ms)
+✔ computeDisplayPath: empty source + target in repo → <repo>/<rest> (0.0525ms)
+✔ matches plain @foo/ at start of string (2.155334ms)
+✔ matches nested @foo/bar/ (0.067666ms)
+✔ matches @90_archive/ (leading digit + underscore) (0.058625ms)
+✔ matches @folder/ inside a sentence (0.054375ms)
+✔ matches @folder/ after open-paren (0.054417ms)
+✔ rejects @foo (no trailing slash, no extension) (0.04775ms)
+✔ rejects @foo.md (file ref, no trailing slash) (0.049625ms)
+✔ rejects @foo/bar (no trailing slash) (0.054042ms)
+✔ rejects bare @ alone (0.059833ms)
+✔ rejects mid-word @ (no boundary) (0.096292ms)
+✔ trailing-slash bounded by space accepts @foo/ word (0.067042ms)
+✔ trailing-slash bounded by comma accepts @foo/, (0.054042ms)
+✔ rejects @foo/. (period not in trailing lookahead set) (0.048042ms)
+✔ matches multiple folder refs in one line (0.043708ms)
+ℹ tests 48
+ℹ suites 0
+ℹ pass 48
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 144.474709
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+?? _work_units/0_llm/reviews/005_dnd_prec_highest_fix-review.stderr.log
+?? _work_units/0_llm/reviews/005_dnd_prec_highest_fix-review_prompt.md
+
+exec
+/bin/zsh -lc "nl -ba src/main.js | sed -n '1088,1190p'" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+  1088	    if (update.selectionSet) {
+  1089	      ATPATH_PERF.inc("buffer.updateListener.selectionSet");
+  1090	      recomputeSelection(update.state);
+  1091	    }
+  1092	  });
+  1093	}
+  1094	
+  1095	// ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
+  1096	
+  1097	function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+  1098	  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+  1099	}
+  1100	
+  1101	function captureDragRefsFromExplorerDom(plugin, evt) {
+  1102	  const app = plugin.app;
+  1103	  const out = [];
+  1104	  const seen = new Set();
+  1105	  const target = evt.target instanceof Element ? evt.target : null;
+  1106	  if (!target) return out;
+  1107	  const item = target.closest("[data-path]");
+  1108	  if (!item) return out;
+  1109	
+  1110	  // Multi-select drag: pick all `.is-selected` items in the same file-explorer
+  1111	  // leaf when the dragged item is one of them. `.is-active` is the currently
+  1112	  // open note marker and is NOT part of a selection set, so it must not pull
+  1113	  // siblings in — treat it as single-item only.
+  1114	  const explorer = item.closest(".workspace-leaf-content[data-type='file-explorer']") ||
+  1115	                   item.closest(".nav-files-container") ||
+  1116	                   null;
+  1117	  let candidates;
+  1118	  if (explorer && item.classList.contains("is-selected")) {
+  1119	    const selected = explorer.querySelectorAll(".is-selected[data-path]");
+  1120	    candidates = selected.length > 0 ? Array.from(selected) : [item];
+  1121	  } else {
+  1122	    candidates = [item];
+  1123	  }
+  1124	
+  1125	  for (const el of candidates) {
+  1126	    const path = el.getAttribute("data-path");
+  1127	    if (!path || seen.has(path)) continue;
+  1128	    seen.add(path);
+  1129	    const af = app.vault.getAbstractFileByPath(path);
+  1130	    if (!af) continue;
+  1131	    if (af instanceof TFile) {
+  1132	      out.push({ kind: "file", vaultPath: af.path, target: af });
+  1133	    } else if (af instanceof TFolder) {
+  1134	      out.push({ kind: "folder", vaultPath: af.path, target: af });
+  1135	    }
+  1136	  }
+  1137	  return out;
+  1138	}
+  1139	
+  1140	function insertAtPathRefs(view, pos, refs, plugin) {
+  1141	  const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+  1142	  const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
+  1143	  const parts = [];
+  1144	  for (const r of refs) {
+  1145	    if (!r || !r.target) continue;
+  1146	    parts.push(plugin.core.formatAtPathInsertion(r.target, sourcePath, mode));
+  1147	  }
+  1148	  if (parts.length === 0) return;
+  1149	  const text = parts.join(" ") + " ";
+  1150	  view.dispatch({
+  1151	    changes: { from: pos, to: pos, insert: text },
+  1152	    selection: { anchor: pos + text.length },
+  1153	    userEvent: "input.drop",
+  1154	  });
+  1155	}
+  1156	
+  1157	function buildDragDropExtension(plugin) {
+  1158	  return EditorView.domEventHandlers({
+  1159	    dragover(evt, _view) {
+  1160	      const refs = extractDraggedVaultPaths(
+  1161	        evt.dataTransfer,
+  1162	        plugin,
+  1163	        plugin.app.workspace.getActiveFile()?.path || ""
+  1164	      );
+  1165	      if (!refs.length) return false;
+  1166	      evt.preventDefault();
+  1167	      if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
+  1168	      return true;
+  1169	    },
+  1170	    drop(evt, view) {
+  1171	      const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+  1172	      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
+  1173	      if (!refs.length) return false;
+  1174	      if (refs.length > 50) {
+  1175	        new Notice("Drop limited to 50 paths");
+  1176	        refs = refs.slice(0, 50);
+  1177	      }
+  1178	      evt.preventDefault();
+  1179	      evt.stopPropagation();
+  1180	      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+  1181	      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+  1182	      plugin._currentDragRefs = null;
+  1183	      return true;
+  1184	    },
+  1185	  });
+  1186	}
+  1187	
+  1188	// ─── D) markdownPostProcessor — Clickable links in Reading mode ──────
+  1189	
+  1190	function registerPostProcessor(plugin) {
+
+exec
+/bin/zsh -lc "nl -ba src/atpath-core.js | sed -n '405,525p'" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+exec
+/bin/zsh -lc "nl -ba src/main.js | sed -n '2160,2190p'" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+  2160	    this.registerEditorExtension(buildWikilinkViewPlugin(this));
+  2161	    if (!Platform.isMobile) {
+  2162	      this.registerEditorExtension(buildBufferCountListener(this));
+  2163	    }
+  2164	
+  2165	    // Drag-and-drop — registered behind a CM6 Compartment so the
+  2166	    // `enableDragDropAtPath` toggle can reconfigure live without reload.
+  2167	    this.dragDropCompartment = new Compartment();
+  2168	    this.registerEditorExtension(
+  2169	      this.dragDropCompartment.of(
+  2170	        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+  2171	      )
+  2172	    );
+  2173	
+  2174	    // Capture file-explorer drag sources from the DOM, since Obsidian does not
+  2175	    // expose a stable DataTransfer MIME for internal vault drags. Listeners run
+  2176	    // in the capture phase so we see the event before any handler can stop it.
+  2177	    this._currentDragRefs = null;
+  2178	    this.registerDomEvent(document, "dragstart", (evt) => {
+  2179	      // Always clear first so a missed dragend can't leave stale refs in place.
+  2180	      this._currentDragRefs = null;
+  2181	      if (this.settings.enableDragDropAtPath === false) return;
+  2182	      const refs = captureDragRefsFromExplorerDom(this, evt);
+  2183	      if (refs.length > 0) this._currentDragRefs = refs;
+  2184	    }, { capture: true });
+  2185	    this.registerDomEvent(document, "dragend", () => {
+  2186	      this._currentDragRefs = null;
+  2187	    }, { capture: true });
+  2188	
+  2189	    registerPostProcessor(this);
+  2190	
+
+ succeeded in 0ms:
+   405	    formatAtPathInsertion,
+   406	    getCachedFolderTokens,
+   407	    clearFolderTokenMemo,
+   408	    clearFoldersCache,
+   409	    listAllFolders,
+   410	    computeDisplayPath: (t, s) => computeDisplayPath(t, s),
+   411	  };
+   412	}
+   413	
+   414	// Resolve raw drag-source paths (captured at dragstart from the
+   415	// file-explorer DOM, plus any DataTransfer MIME fallbacks) into the
+   416	// `{kind, vaultPath, target}` shape the editor insertion helper expects.
+   417	// Pure — takes `app`, `sourcePath`, `currentDragRefs` explicitly so it
+   418	// can be exercised from unit tests without a live Obsidian runtime.
+   419	function extractDraggedVaultPaths(dataTransfer, app, sourcePath, currentDragRefs) {
+   420	  const out = [];
+   421	  const seen = new Set();
+   422	  const addPath = (rawPath) => {
+   423	    if (!rawPath || typeof rawPath !== "string") return;
+   424	    const path = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+   425	    if (!path || seen.has(path)) return;
+   426	    const target = app.vault.getAbstractFileByPath(path);
+   427	    if (!target) return;
+   428	    if (sourcePath && target.path === sourcePath) return; // skip self-ref
+   429	    seen.add(path);
+   430	    if (target instanceof TFile) {
+   431	      out.push({ kind: "file", vaultPath: target.path, target });
+   432	    } else if (target instanceof TFolder) {
+   433	      out.push({ kind: "folder", vaultPath: target.path, target });
+   434	    }
+   435	  };
+   436	
+   437	  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
+   438	  // Obsidian doesn't expose a public DataTransfer MIME for internal vault
+   439	  // drags, so the caller sniffs `data-path` attributes itself and passes
+   440	  // the result in via `currentDragRefs`.
+   441	  if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
+   442	    for (const r of currentDragRefs) addPath(r && r.vaultPath);
+   443	    if (out.length > 0) return out;
+   444	  }
+   445	
+   446	  if (!dataTransfer) return out;
+   447	
+   448	  const tryJsonMime = (mime) => {
+   449	    let raw;
+   450	    try { raw = dataTransfer.getData(mime); } catch (_) { return false; }
+   451	    if (!raw) return false;
+   452	    let parsed;
+   453	    try { parsed = JSON.parse(raw); } catch (_) { return false; }
+   454	    if (parsed && Array.isArray(parsed.files)) {
+   455	      for (const f of parsed.files) addPath(f && f.path);
+   456	      return out.length > 0;
+   457	    }
+   458	    if (Array.isArray(parsed)) {
+   459	      for (const f of parsed) addPath(f && (f.path || f));
+   460	      return out.length > 0;
+   461	    }
+   462	    if (parsed && typeof parsed.path === "string") {
+   463	      addPath(parsed.path);
+   464	      return out.length > 0;
+   465	    }
+   466	    return false;
+   467	  };
+   468	
+   469	  // Tier 1: Obsidian's internal MIMEs (probe defensively — exact name has shifted).
+   470	  if (tryJsonMime("application/obsidian-files")) return out;
+   471	  if (tryJsonMime("application/obsidian-file")) return out;
+   472	  if (tryJsonMime("application/x-obsidian-files")) return out;
+   473	
+   474	  // Tier 2: text/uri-list (obsidian:// or file:// URLs).
+   475	  let uriList;
+   476	  try { uriList = dataTransfer.getData("text/uri-list"); } catch (_) { uriList = ""; }
+   477	  if (uriList) {
+   478	    const basePath = (app.vault.adapter && typeof app.vault.adapter.getBasePath === "function")
+   479	      ? app.vault.adapter.getBasePath()
+   480	      : "";
+   481	    for (const line of uriList.split(/\r?\n/)) {
+   482	      const url = line.trim();
+   483	      if (!url || url.startsWith("#")) continue;
+   484	      if (url.startsWith("obsidian://")) {
+   485	        try {
+   486	          const u = new URL(url);
+   487	          const fileParam = u.searchParams.get("file");
+   488	          if (fileParam) addPath(decodeURIComponent(fileParam));
+   489	        } catch (_) { /* skip malformed */ }
+   490	      } else if (url.startsWith("file://")) {
+   491	        let abs;
+   492	        try { abs = decodeURIComponent(url.replace(/^file:\/\//, "")); } catch (_) { continue; }
+   493	        if (basePath && abs.startsWith(basePath + "/")) {
+   494	          addPath(abs.substring(basePath.length + 1));
+   495	        }
+   496	      }
+   497	    }
+   498	    if (out.length > 0) return out;
+   499	  }
+   500	
+   501	  // Tier 3: text/plain — bare vault path(s), one per line.
+   502	  let plain;
+   503	  try { plain = dataTransfer.getData("text/plain"); } catch (_) { plain = ""; }
+   504	  if (plain) {
+   505	    for (const line of plain.split(/\r?\n/)) {
+   506	      const path = line.trim();
+   507	      if (path) addPath(path);
+   508	    }
+   509	  }
+   510	  return out;
+   511	}
+   512	
+   513	module.exports = {
+   514	  createAtPathCore,
+   515	  REPOS_SEGMENT,
+   516	  getRepoRoot,
+   517	  toRepoRelative,
+   518	  discoverRepoRoots,
+   519	  resolveAtPathFromSource,
+   520	  resolveAtPathFolderFromSource,
+   521	  computeDisplayPath,
+   522	  extractDraggedVaultPaths,
+   523	};
+
+exec
+/bin/zsh -lc "nl -ba tests/drag-extract.test.js | sed -n '1,120p'" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+     1	"use strict";
+     2	
+     3	// Regression: drag-and-drop @path insertion from the file-explorer.
+     4	//
+     5	// The runtime bug (fixed by wrapping the CM6 extension in Prec.highest)
+     6	// was that Obsidian's MarkdownView drop handler preempted ours, so a
+     7	// wikilink got inserted instead of an @path. We can't unit-test CM6
+     8	// handler ordering, but we CAN pin down the extraction layer that turns
+     9	// raw dragged paths into the {kind, vaultPath, target} shape the editor
+    10	// insertion expects — the Tier 0 path that reads from currentDragRefs
+    11	// is what the rest of the chain depends on.
+    12	
+    13	const test = require("node:test");
+    14	const assert = require("node:assert/strict");
+    15	
+    16	const { TFile, TFolder } = require("obsidian");
+    17	const { extractDraggedVaultPaths } = require("../src/atpath-core.js");
+    18	
+    19	function buildApp() {
+    20	  const indexMd = new TFile("notes/index.md", { size: 100 });
+    21	  const v1 = new TFile("notes/api/v1.md", { size: 200 });
+    22	  const apiFolder = new TFolder("notes/api", [v1]);
+    23	  const notesFolder = new TFolder("notes", [indexMd, apiFolder]);
+    24	  const root = new TFolder("", [notesFolder]);
+    25	
+    26	  const byPath = new Map();
+    27	  function index(node) {
+    28	    byPath.set(node.path, node);
+    29	    if (node instanceof TFolder) for (const c of node.children) index(c);
+    30	  }
+    31	  index(notesFolder);
+    32	
+    33	  return {
+    34	    app: {
+    35	      vault: {
+    36	        getAbstractFileByPath: (p) => byPath.get(p) || null,
+    37	      },
+    38	    },
+    39	    indexMd, v1, apiFolder, notesFolder,
+    40	  };
+    41	}
+    42	
+    43	test("extractDraggedVaultPaths: Tier 0 happy path — captured file ref returns file out", () => {
+    44	  const { app, indexMd } = buildApp();
+    45	  const captured = [{ kind: "file", vaultPath: "notes/index.md", target: indexMd }];
+    46	  const out = extractDraggedVaultPaths(null, app, "", captured);
+    47	  assert.equal(out.length, 1);
+    48	  assert.equal(out[0].kind, "file");
+    49	  assert.equal(out[0].vaultPath, "notes/index.md");
+    50	  assert.equal(out[0].target, indexMd);
+    51	});
+    52	
+    53	test("extractDraggedVaultPaths: Tier 0 folder ref returns folder out", () => {
+    54	  const { app, apiFolder } = buildApp();
+    55	  const captured = [{ kind: "folder", vaultPath: "notes/api", target: apiFolder }];
+    56	  const out = extractDraggedVaultPaths(null, app, "", captured);
+    57	  assert.equal(out.length, 1);
+    58	  assert.equal(out[0].kind, "folder");
+    59	  assert.equal(out[0].target, apiFolder);
+    60	});
+    61	
+    62	test("extractDraggedVaultPaths: self-drop into the source file is skipped", () => {
+    63	  const { app, indexMd } = buildApp();
+    64	  const captured = [{ kind: "file", vaultPath: "notes/index.md", target: indexMd }];
+    65	  const out = extractDraggedVaultPaths(null, app, "notes/index.md", captured);
+    66	  assert.equal(out.length, 0);
+    67	});
+    68	
+    69	test("extractDraggedVaultPaths: stale captured path that no longer exists is dropped", () => {
+    70	  const { app } = buildApp();
+    71	  const captured = [{ kind: "file", vaultPath: "notes/gone.md", target: null }];
+    72	  const out = extractDraggedVaultPaths(null, app, "", captured);
+    73	  assert.equal(out.length, 0);
+    74	});
+    75	
+    76	test("extractDraggedVaultPaths: multi-select preserves order, dedupes repeats", () => {
+    77	  const { app, indexMd, v1 } = buildApp();
+    78	  const captured = [
+    79	    { kind: "file", vaultPath: "notes/index.md", target: indexMd },
+    80	    { kind: "file", vaultPath: "notes/api/v1.md", target: v1 },
+    81	    { kind: "file", vaultPath: "notes/index.md", target: indexMd }, // duplicate
+    82	  ];
+    83	  const out = extractDraggedVaultPaths(null, app, "", captured);
+    84	  assert.equal(out.length, 2);
+    85	  assert.equal(out[0].vaultPath, "notes/index.md");
+    86	  assert.equal(out[1].vaultPath, "notes/api/v1.md");
+    87	});
+    88	
+    89	test("extractDraggedVaultPaths: empty currentDragRefs with no DataTransfer returns []", () => {
+    90	  const { app } = buildApp();
+    91	  const out = extractDraggedVaultPaths(null, app, "", []);
+    92	  assert.equal(out.length, 0);
+    93	});
+    94	
+    95	test("extractDraggedVaultPaths: text/plain fallback resolves bare vault paths", () => {
+    96	  const { app, indexMd } = buildApp();
+    97	  const dataTransfer = {
+    98	    getData: (mime) => (mime === "text/plain" ? "notes/index.md" : ""),
+    99	  };
+   100	  const out = extractDraggedVaultPaths(dataTransfer, app, "", null);
+   101	  assert.equal(out.length, 1);
+   102	  assert.equal(out[0].target, indexMd);
+   103	});
+
+exec
+/bin/zsh -lc "rg -n \"console\\.log|innerHTML|outerHTML|\\.obsidian|\\bvar\\b|defaultHotkeys|fetch\\(\" src/main.js src/atpath-core.js tests/drag-extract.test.js AGENTS.md STATUS.md manifest.json package.json versions.json" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+AGENTS.md:68:| `obsidian dev:dom selector='.atpath-status-linked'` | Rendered DOM (`outerHTML` default; also `text`/`inner`/`all`/`attr`) |
+AGENTS.md:84:2. **DIY in-plugin logger** — dev-build-flag gated, derive paths from `this.app.vault.configDir` (never hardcode `.obsidian`), don't ship console monkey-patching to reviewers.
+AGENTS.md:117:- **No `console.log`** — only `console.warn`, `console.error`, `console.debug`
+AGENTS.md:118:- **No `innerHTML` / `outerHTML`** — use DOM API methods (XSS risk)
+AGENTS.md:119:- **No hardcoded `.obsidian`** — use `this.app.vault.configDir`
+AGENTS.md:121:- **No `var`** — use `const` / `let`
+AGENTS.md:126:- **Use `requestUrl()`** instead of `fetch()` for HTTP requests
+
+exec
+/bin/zsh -lc 'rg -n "Drag|drag|drop|Prec|domEventHandlers|ViewPlugin|EditorView" tests src/main.js src/atpath-core.js' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+src/atpath-core.js:414:// Resolve raw drag-source paths (captured at dragstart from the
+src/atpath-core.js:417:// Pure — takes `app`, `sourcePath`, `currentDragRefs` explicitly so it
+src/atpath-core.js:419:function extractDraggedVaultPaths(dataTransfer, app, sourcePath, currentDragRefs) {
+src/atpath-core.js:437:  // Tier 0: drag source captured at dragstart from the file-explorer DOM.
+src/atpath-core.js:439:  // drags, so the caller sniffs `data-path` attributes itself and passes
+src/atpath-core.js:440:  // the result in via `currentDragRefs`.
+src/atpath-core.js:441:  if (Array.isArray(currentDragRefs) && currentDragRefs.length > 0) {
+src/atpath-core.js:442:    for (const r of currentDragRefs) addPath(r && r.vaultPath);
+src/atpath-core.js:522:  extractDraggedVaultPaths,
+src/main.js:5:const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
+src/main.js:6:const { Compartment, Prec } = require("@codemirror/state");
+src/main.js:202:  extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
+src/main.js:225:  enableDragDropAtPath: true,
+src/main.js:629:// ─── C) CM6 ViewPlugin — Clickable links in Live Preview ─────────────
+src/main.js:756:function buildAtPathViewPlugin(plugin) {
+src/main.js:865:  return ViewPlugin.define(
+src/main.js:945:// ─── C2) CM6 ViewPlugin — Wikilink @path decoration in Live Preview ──
+src/main.js:957:function buildWikilinkViewPlugin(plugin) {
+src/main.js:990:  return ViewPlugin.define(
+src/main.js:1079:  return EditorView.updateListener.of((update) => {
+src/main.js:1095:// ─── C3) CM6 drag-and-drop — insert @path refs on file-explorer drop ─
+src/main.js:1097:function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
+src/main.js:1098:  return coreExtractDraggedVaultPaths(dataTransfer, plugin.app, sourcePath, plugin._currentDragRefs);
+src/main.js:1101:function captureDragRefsFromExplorerDom(plugin, evt) {
+src/main.js:1110:  // Multi-select drag: pick all `.is-selected` items in the same file-explorer
+src/main.js:1111:  // leaf when the dragged item is one of them. `.is-active` is the currently
+src/main.js:1153:    userEvent: "input.drop",
+src/main.js:1157:function buildDragDropExtension(plugin) {
+src/main.js:1158:  return EditorView.domEventHandlers({
+src/main.js:1159:    dragover(evt, _view) {
+src/main.js:1160:      const refs = extractDraggedVaultPaths(
+src/main.js:1167:      if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
+src/main.js:1170:    drop(evt, view) {
+src/main.js:1172:      let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
+src/main.js:1180:      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
+src/main.js:1181:      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+src/main.js:1182:      plugin._currentDragRefs = null;
+src/main.js:1405:      .addDropdown((dropdown) =>
+src/main.js:1406:        dropdown
+src/main.js:1498:      .setName("Drag-and-drop @path inserts")
+src/main.js:1499:      .setDesc("Dragging a file or folder from the file explorer into the editor inserts an `@path` ref at the drop point. Disable to restore Obsidian's default drag behavior (image embed, link-on-drop, etc.).")
+src/main.js:1502:          .setValue(this.plugin.settings.enableDragDropAtPath !== false)
+src/main.js:1504:            this.plugin.settings.enableDragDropAtPath = value;
+src/main.js:1506:            this.plugin.reconfigureDragDrop();
+src/main.js:2154:    this._lastEditorView = null;
+src/main.js:2159:    this.registerEditorExtension(buildAtPathViewPlugin(this));
+src/main.js:2160:    this.registerEditorExtension(buildWikilinkViewPlugin(this));
+src/main.js:2165:    // Drag-and-drop — registered behind a CM6 Compartment so the
+src/main.js:2166:    // `enableDragDropAtPath` toggle can reconfigure live without reload.
+src/main.js:2167:    this.dragDropCompartment = new Compartment();
+src/main.js:2169:      this.dragDropCompartment.of(
+src/main.js:2170:        this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
+src/main.js:2174:    // Capture file-explorer drag sources from the DOM, since Obsidian does not
+src/main.js:2175:    // expose a stable DataTransfer MIME for internal vault drags. Listeners run
+src/main.js:2177:    this._currentDragRefs = null;
+src/main.js:2178:    this.registerDomEvent(document, "dragstart", (evt) => {
+src/main.js:2179:      // Always clear first so a missed dragend can't leave stale refs in place.
+src/main.js:2180:      this._currentDragRefs = null;
+src/main.js:2181:      if (this.settings.enableDragDropAtPath === false) return;
+src/main.js:2182:      const refs = captureDragRefsFromExplorerDom(this, evt);
+src/main.js:2183:      if (refs.length > 0) this._currentDragRefs = refs;
+src/main.js:2185:    this.registerDomEvent(document, "dragend", () => {
+src/main.js:2186:      this._currentDragRefs = null;
+src/main.js:2384:  reconfigureDragDrop() {
+src/main.js:2385:    if (!this.dragDropCompartment) return;
+src/main.js:2386:    const ext = this.settings.enableDragDropAtPath !== false
+src/main.js:2387:      ? Prec.highest(buildDragDropExtension(this))
+src/main.js:2396:        cm.dispatch({ effects: this.dragDropCompartment.reconfigure(ext) });
+src/main.js:2398:        console.warn("[atpath] drag-drop reconfigure failed for one leaf", err);
+src/main.js:2434:    this._lastEditorView = view;
+src/main.js:2453:    // Always refresh _lastEditorView when a live view is provided, even on
+src/main.js:2456:    if (view) this._lastEditorView = view;
+src/main.js:2486:      if (this._lastEditorView) {
+src/main.js:2488:          ATPATH_PERF.time("scheduleRefresh.dispatch", () => this._lastEditorView.dispatch());
+src/main.js:2558:          const cm = mdView.editor && mdView.editor.cm ? mdView.editor.cm : this._lastEditorView;
+tests/_fakes/obsidian.js:6:// drop-in if more imports show up later).
+tests/drag-extract.test.js:3:// Regression: drag-and-drop @path insertion from the file-explorer.
+tests/drag-extract.test.js:5:// The runtime bug (fixed by wrapping the CM6 extension in Prec.highest)
+tests/drag-extract.test.js:6:// was that Obsidian's MarkdownView drop handler preempted ours, so a
+tests/drag-extract.test.js:9:// raw dragged paths into the {kind, vaultPath, target} shape the editor
+tests/drag-extract.test.js:10:// insertion expects — the Tier 0 path that reads from currentDragRefs
+tests/drag-extract.test.js:17:const { extractDraggedVaultPaths } = require("../src/atpath-core.js");
+tests/drag-extract.test.js:43:test("extractDraggedVaultPaths: Tier 0 happy path — captured file ref returns file out", () => {
+tests/drag-extract.test.js:46:  const out = extractDraggedVaultPaths(null, app, "", captured);
+tests/drag-extract.test.js:53:test("extractDraggedVaultPaths: Tier 0 folder ref returns folder out", () => {
+tests/drag-extract.test.js:56:  const out = extractDraggedVaultPaths(null, app, "", captured);
+tests/drag-extract.test.js:62:test("extractDraggedVaultPaths: self-drop into the source file is skipped", () => {
+tests/drag-extract.test.js:65:  const out = extractDraggedVaultPaths(null, app, "notes/index.md", captured);
+tests/drag-extract.test.js:69:test("extractDraggedVaultPaths: stale captured path that no longer exists is dropped", () => {
+tests/drag-extract.test.js:72:  const out = extractDraggedVaultPaths(null, app, "", captured);
+tests/drag-extract.test.js:76:test("extractDraggedVaultPaths: multi-select preserves order, dedupes repeats", () => {
+tests/drag-extract.test.js:83:  const out = extractDraggedVaultPaths(null, app, "", captured);
+tests/drag-extract.test.js:89:test("extractDraggedVaultPaths: empty currentDragRefs with no DataTransfer returns []", () => {
+tests/drag-extract.test.js:91:  const out = extractDraggedVaultPaths(null, app, "", []);
+tests/drag-extract.test.js:95:test("extractDraggedVaultPaths: text/plain fallback resolves bare vault paths", () => {
+tests/drag-extract.test.js:100:  const out = extractDraggedVaultPaths(dataTransfer, app, "", null);
+
+exec
+/bin/zsh -lc "sed -n '1,220p' esbuild.config.mjs" in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+import esbuild from "esbuild";
+
+await esbuild.build({
+  entryPoints: ["src/main.js"],
+  bundle: true,
+  external: ["obsidian", "@codemirror/view", "@codemirror/state", "electron"],
+  format: "cjs",
+  outfile: "main.js",
+  platform: "node",
+  minify: false,
+});
+
+exec
+/bin/zsh -lc 'git log --oneline -6' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ succeeded in 0ms:
+4efed1e Extract DnD path extraction to atpath-core + regression tests
+72e7424 Fix DnD @path: wrap CM6 extension in Prec.highest
+245fa8d Prompt 005: add Explore-first working style + /codex-review tail
+555b0b8 Add prompt 005: verify Plan A + diagnose broken DnD via Obsidian CLI
+af4fd28 Apply codex fixes: registry listing, settings defaults, STATUS head
+7ddd818 Move STATUS.md to repo root, slim under new contract, refresh README
+
+exec
+/bin/zsh -lc 'ls node_modules/@codemirror 2>/dev/null' in /Users/sergio/Documents/code/obsidian_plugin_atpath
+ exited 1 in 0ms:
+codex
+**Finding**
+
+- P2 [tests/drag-extract.test.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/tests/drag-extract.test.js:5): The added “regression” tests do not cover the actual regression fixed by commit `72e7424`. The bug was CM6 drop-handler ordering, fixed by wrapping the drag-drop extension in `Prec.highest` at [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2170), but the tests only exercise `extractDraggedVaultPaths`. If `Prec.highest(...)` is removed from initial registration or reconfiguration, all 48 tests still pass. Add a small guard for extension precedence/registration, or a CLI-backed DnD verification, so the original file-explorer drop regression fails in tests.
+
+**Verification**
+
+`npm test` passed: 48 tests.  
+`npm run build` passed.
+tokens used
+66,336
+**Finding**
+
+- P2 [tests/drag-extract.test.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/tests/drag-extract.test.js:5): The added “regression” tests do not cover the actual regression fixed by commit `72e7424`. The bug was CM6 drop-handler ordering, fixed by wrapping the drag-drop extension in `Prec.highest` at [src/main.js](/Users/sergio/Documents/code/obsidian_plugin_atpath/src/main.js:2170), but the tests only exercise `extractDraggedVaultPaths`. If `Prec.highest(...)` is removed from initial registration or reconfiguration, all 48 tests still pass. Add a small guard for extension precedence/registration, or a CLI-backed DnD verification, so the original file-explorer drop regression fails in tests.
+
+**Verification**
+
+`npm test` passed: 48 tests.  
+`npm run build` passed.
