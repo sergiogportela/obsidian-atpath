@@ -8604,6 +8604,17 @@ var require_atpath_core = __commonJS({
       }
       return targetPath;
     }
+    function isSubsequenceCI2(query, text) {
+      if (!query) return true;
+      if (!text) return false;
+      const q = query.toLowerCase();
+      const t = text.toLowerCase();
+      let qi = 0;
+      for (let i = 0; i < t.length && qi < q.length; i++) {
+        if (t[i] === q[qi]) qi++;
+      }
+      return qi === q.length;
+    }
     function fuzzyScore(query, candidate) {
       if (!query) return 1;
       const q = query.toLowerCase();
@@ -8992,6 +9003,7 @@ var require_atpath_core = __commonJS({
       resolveAtPathFromSource: resolveAtPathFromSource2,
       resolveAtPathFolderFromSource,
       computeDisplayPath,
+      isSubsequenceCI: isSubsequenceCI2,
       extractDraggedVaultPaths: extractDraggedVaultPaths2
     };
   }
@@ -9470,6 +9482,7 @@ var {
   resolveAtPathFromSource: coreResolveAtPathFromSource,
   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
   computeDisplayPath: coreComputeDisplayPath,
+  isSubsequenceCI,
   extractDraggedVaultPaths: coreExtractDraggedVaultPaths
 } = require_atpath_core();
 var {
@@ -9733,6 +9746,15 @@ var AtPathSuggest = class extends EditorSuggest {
     };
   }
   getSuggestions(context) {
+    if (this._suggestDebounceTimer) clearTimeout(this._suggestDebounceTimer);
+    return new Promise((resolve) => {
+      this._suggestDebounceTimer = setTimeout(() => {
+        this._suggestDebounceTimer = null;
+        resolve(this._computeSuggestions(context));
+      }, 100);
+    });
+  }
+  _computeSuggestions(context) {
     const file = context.file;
     if (!file) return [];
     const sourcePath = file.path;
@@ -9740,6 +9762,7 @@ var AtPathSuggest = class extends EditorSuggest {
     const showFolders = this.plugin.settings.suggestFolders !== false;
     const core = this.plugin.core;
     if (showFolders && query.endsWith("/")) {
+      this._suggestCache = null;
       const items = core.enumerateFolderCandidates(query, sourcePath);
       return items.map((item) => ({
         kind: item.kind,
@@ -9748,49 +9771,39 @@ var AtPathSuggest = class extends EditorSuggest {
         fuzzyResult: null
       }));
     }
-    const fuzzy = query ? prepareFuzzySearch(query) : null;
     const sourceRepoRoot = getRepoRoot(sourcePath);
     const tierOf = (path) => {
       if (sourceRepoRoot && path.startsWith(sourceRepoRoot + "/")) return 0;
       if (getRepoRoot(path)) return 1;
       return 2;
     };
+    const vaultGen = this.plugin._suggestVaultGen || 0;
+    const cache = this._suggestCache;
+    let base;
+    if (cache && cache.sourcePath === sourcePath && cache.showFolders === showFolders && cache.vaultGen === vaultGen && query.startsWith(cache.query)) {
+      base = cache.items;
+    } else {
+      base = this._buildSuggestCandidates(sourcePath, showFolders, tierOf);
+    }
+    const survivors = query ? base.filter((c) => isSubsequenceCI(query, c.display)) : base;
+    this._suggestCache = { sourcePath, showFolders, vaultGen, query, items: survivors };
+    const fuzzy = query ? prepareFuzzySearch(query) : null;
     const tiers = [[], [], []];
-    for (const f of this.app.vault.getFiles()) {
-      const display = core.computeDisplayPath(f.path, sourcePath);
+    for (const c of survivors) {
       let fuzzyResult = null;
-      let score = 1;
+      let score = c.kind === "folder" ? 1.3 : 1;
       if (fuzzy) {
-        fuzzyResult = fuzzy(display);
+        fuzzyResult = fuzzy(c.display);
         if (!fuzzyResult) continue;
-        score = fuzzyResult.score;
+        score = c.kind === "folder" ? fuzzyResult.score * 1.3 : fuzzyResult.score;
       }
-      tiers[tierOf(f.path)].push({
-        kind: "file",
-        target: f,
-        display,
+      tiers[c.tier].push({
+        kind: c.kind,
+        target: c.target,
+        display: c.display,
         fuzzyResult,
         score
       });
-    }
-    if (showFolders) {
-      for (const folder of core.listAllFolders()) {
-        const display = core.computeDisplayPath(folder.path, sourcePath) + "/";
-        let fuzzyResult = null;
-        let score = 1.3;
-        if (fuzzy) {
-          fuzzyResult = fuzzy(display);
-          if (!fuzzyResult) continue;
-          score = fuzzyResult.score * 1.3;
-        }
-        tiers[tierOf(folder.path)].push({
-          kind: "folder",
-          target: folder,
-          display,
-          fuzzyResult,
-          score
-        });
-      }
     }
     if (fuzzy) {
       for (const t of tiers) t.sort((a, b) => b.score - a.score);
@@ -9803,6 +9816,33 @@ var AtPathSuggest = class extends EditorSuggest {
       }
     }
     return [...tiers[0], ...tiers[1], ...tiers[2]].slice(0, 50);
+  }
+  // Build the full {kind, target, display, tier} candidate list for a source
+  // file: every vault file plus (optionally) every folder, display strings
+  // precomputed once. Feeds the narrowing cache in getSuggestions so the
+  // per-keystroke work is just subsequence filtering + scoring the survivors.
+  _buildSuggestCandidates(sourcePath, showFolders, tierOf) {
+    const core = this.plugin.core;
+    const out = [];
+    for (const f of this.app.vault.getFiles()) {
+      out.push({
+        kind: "file",
+        target: f,
+        display: core.computeDisplayPath(f.path, sourcePath),
+        tier: tierOf(f.path)
+      });
+    }
+    if (showFolders) {
+      for (const folder of core.listAllFolders()) {
+        out.push({
+          kind: "folder",
+          target: folder,
+          display: core.computeDisplayPath(folder.path, sourcePath) + "/",
+          tier: tierOf(folder.path)
+        });
+      }
+    }
+    return out;
   }
   renderSuggestion(value, el) {
     const row = el.createDiv({ cls: "atpath-suggest-row" });
@@ -11120,6 +11160,7 @@ var AtPathPlugin = class extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
           this.core.clearFolderTokenMemo();
@@ -11128,6 +11169,7 @@ var AtPathPlugin = class extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         if (file instanceof TFile) this.tokenCache.delete(file.path);
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
@@ -11138,6 +11180,7 @@ var AtPathPlugin = class extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         this.tokenCache.delete(oldPath);
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();

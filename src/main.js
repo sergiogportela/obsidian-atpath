@@ -199,6 +199,7 @@ const {
   resolveAtPathFromSource: coreResolveAtPathFromSource,
   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
   computeDisplayPath: coreComputeDisplayPath,
+  isSubsequenceCI,
   extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
 } = require("./atpath-core");
 const {
@@ -527,6 +528,22 @@ class AtPathSuggest extends EditorSuggest {
   }
 
   getSuggestions(context) {
+    // Debounce. At large vault sizes a single scan can cost 100–250ms; running
+    // it on every intermediate keystroke of a fast burst is the autocomplete
+    // lag the user feels. EditorSuggest accepts a Promise, so we coalesce a
+    // typing burst into one compute that fires ~100ms after the user pauses.
+    // Superseded calls are left unresolved (Obsidian uses only the latest),
+    // which avoids the empty-list flicker that resolving them early causes.
+    if (this._suggestDebounceTimer) clearTimeout(this._suggestDebounceTimer);
+    return new Promise((resolve) => {
+      this._suggestDebounceTimer = setTimeout(() => {
+        this._suggestDebounceTimer = null;
+        resolve(this._computeSuggestions(context));
+      }, 100);
+    });
+  }
+
+  _computeSuggestions(context) {
     const file = context.file;
     if (!file) return [];
     const sourcePath = file.path;
@@ -537,6 +554,9 @@ class AtPathSuggest extends EditorSuggest {
     // Source-aware slash-trigger: @prefix/ → enumerate immediate children
     // of that folder (same-repo → vault-abs → prefix-match), per §3.4.6.
     if (showFolders && query.endsWith("/")) {
+      // Slash results bypass narrowing — drop the cache so the next plain
+      // query rebuilds from scratch rather than narrowing a stale base.
+      this._suggestCache = null;
       const items = core.enumerateFolderCandidates(query, sourcePath);
       return items.map((item) => ({
         kind: item.kind,
@@ -546,43 +566,59 @@ class AtPathSuggest extends EditorSuggest {
       }));
     }
 
-    const fuzzy = query ? prepareFuzzySearch(query) : null;
     const sourceRepoRoot = getRepoRoot(sourcePath);
     const tierOf = (path) => {
       if (sourceRepoRoot && path.startsWith(sourceRepoRoot + "/")) return 0;
       if (getRepoRoot(path)) return 1;
       return 2;
     };
-    const tiers = [[], [], []];
 
-    for (const f of this.app.vault.getFiles()) {
-      const display = core.computeDisplayPath(f.path, sourcePath);
-      let fuzzyResult = null;
-      let score = 1;
-      if (fuzzy) {
-        fuzzyResult = fuzzy(display);
-        if (!fuzzyResult) continue;
-        score = fuzzyResult.score;
-      }
-      tiers[tierOf(f.path)].push({
-        kind: "file", target: f, display, fuzzyResult, score,
-      });
+    // ── Incremental candidate narrowing (autocomplete hot path) ────────
+    // Building a display string + running Obsidian's fuzzy scorer for every
+    // vault file on every keystroke costs ~300ms at ~59k files. Two
+    // optimizations keep this cheap:
+    //   1. A cheap `isSubsequenceCI` prefilter so the expensive fuzzy
+    //      scorer only ever runs on strings that can actually match.
+    //   2. Reuse the previous keystroke's surviving candidates when the
+    //      query only grew. Fuzzy matching is monotonic — a longer query's
+    //      matches are always a subset of the shorter query's matches — so
+    //      we narrow the prior survivor set instead of rescanning the vault.
+    // `_suggestVaultGen` (bumped on create/delete/rename) invalidates the
+    // cache when the file set or any path changes.
+    const vaultGen = this.plugin._suggestVaultGen || 0;
+    const cache = this._suggestCache;
+    let base;
+    if (
+      cache &&
+      cache.sourcePath === sourcePath &&
+      cache.showFolders === showFolders &&
+      cache.vaultGen === vaultGen &&
+      query.startsWith(cache.query)
+    ) {
+      base = cache.items;
+    } else {
+      base = this._buildSuggestCandidates(sourcePath, showFolders, tierOf);
     }
 
-    if (showFolders) {
-      for (const folder of core.listAllFolders()) {
-        const display = core.computeDisplayPath(folder.path, sourcePath) + "/";
-        let fuzzyResult = null;
-        let score = 1.3;
-        if (fuzzy) {
-          fuzzyResult = fuzzy(display);
-          if (!fuzzyResult) continue;
-          score = fuzzyResult.score * 1.3; // folder bias so they're not buried
-        }
-        tiers[tierOf(folder.path)].push({
-          kind: "folder", target: folder, display, fuzzyResult, score,
-        });
+    const survivors = query
+      ? base.filter((c) => isSubsequenceCI(query, c.display))
+      : base;
+    this._suggestCache = { sourcePath, showFolders, vaultGen, query, items: survivors };
+
+    const fuzzy = query ? prepareFuzzySearch(query) : null;
+    const tiers = [[], [], []];
+    for (const c of survivors) {
+      let fuzzyResult = null;
+      let score = c.kind === "folder" ? 1.3 : 1;
+      if (fuzzy) {
+        fuzzyResult = fuzzy(c.display);
+        if (!fuzzyResult) continue;
+        // Folder bias so they're not buried below same-score files.
+        score = c.kind === "folder" ? fuzzyResult.score * 1.3 : fuzzyResult.score;
       }
+      tiers[c.tier].push({
+        kind: c.kind, target: c.target, display: c.display, fuzzyResult, score,
+      });
     }
 
     if (fuzzy) {
@@ -598,6 +634,34 @@ class AtPathSuggest extends EditorSuggest {
     }
 
     return [...tiers[0], ...tiers[1], ...tiers[2]].slice(0, 50);
+  }
+
+  // Build the full {kind, target, display, tier} candidate list for a source
+  // file: every vault file plus (optionally) every folder, display strings
+  // precomputed once. Feeds the narrowing cache in getSuggestions so the
+  // per-keystroke work is just subsequence filtering + scoring the survivors.
+  _buildSuggestCandidates(sourcePath, showFolders, tierOf) {
+    const core = this.plugin.core;
+    const out = [];
+    for (const f of this.app.vault.getFiles()) {
+      out.push({
+        kind: "file",
+        target: f,
+        display: core.computeDisplayPath(f.path, sourcePath),
+        tier: tierOf(f.path),
+      });
+    }
+    if (showFolders) {
+      for (const folder of core.listAllFolders()) {
+        out.push({
+          kind: "folder",
+          target: folder,
+          display: core.computeDisplayPath(folder.path, sourcePath) + "/",
+          tier: tierOf(folder.path),
+        });
+      }
+    }
+    return out;
   }
 
   renderSuggestion(value, el) {
@@ -2239,6 +2303,7 @@ class AtPathPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
           this.core.clearFolderTokenMemo();
@@ -2247,6 +2312,7 @@ class AtPathPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         if (file instanceof TFile) this.tokenCache.delete(file.path);
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
@@ -2257,6 +2323,7 @@ class AtPathPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
+        this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         this.tokenCache.delete(oldPath);
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();

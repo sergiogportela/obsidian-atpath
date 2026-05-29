@@ -100,6 +100,25 @@ function computeDisplayPath(targetPath, sourcePath) {
   return targetPath;
 }
 
+// Cheap case-insensitive subsequence test: do all chars of `query` appear in
+// `text` in order? This is the same matching predicate Obsidian's
+// `prepareFuzzySearch` uses to decide *whether* a string matches, but without
+// the expensive scoring DP. Used as a prefilter in the autocomplete hot path
+// so the costly fuzzy scorer only runs on strings that can actually match.
+// It is intentionally a *superset* of fuzzy's matcher (ASCII-lowercase, no
+// diacritic folding) so it never drops a candidate the scorer would keep.
+function isSubsequenceCI(query, text) {
+  if (!query) return true;
+  if (!text) return false;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  let qi = 0;
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) qi++;
+  }
+  return qi === q.length;
+}
+
 function fuzzyScore(query, candidate) {
   if (!query) return 1;
   const q = query.toLowerCase();
@@ -519,5 +538,6 @@ module.exports = {
   resolveAtPathFromSource,
   resolveAtPathFolderFromSource,
   computeDisplayPath,
+  isSubsequenceCI,
   extractDraggedVaultPaths,
 };
