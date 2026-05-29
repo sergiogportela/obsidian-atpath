@@ -9641,11 +9641,17 @@ function addSiteIconPicker(setting, plugin, baseDescription, opts = {}) {
   };
 }
 function openInDefaultApp(plugin, vaultPath) {
-  const basePath = plugin.app.vault.adapter.getBasePath();
+  const adapter = plugin.app.vault.adapter;
+  if (!adapter || typeof adapter.getBasePath !== "function") {
+    new Notice("Opening in the default app is only available on desktop.");
+    return;
+  }
+  const basePath = adapter.getBasePath();
   const absolutePath = require("path").join(basePath, vaultPath);
   require("electron").shell.openPath(absolutePath);
 }
 function showAtPathMenu(plugin, event, vaultPath) {
+  if (Platform.isMobile) return;
   const menu = new Menu();
   menu.addItem(
     (item) => item.setTitle("Open in default app").setIcon("arrow-up-right").onClick(() => openInDefaultApp(plugin, vaultPath))
@@ -9679,9 +9685,11 @@ function showAtPathFolderMenu(plugin, event, folder) {
   menu.addItem(
     (item) => item.setTitle("Reveal in file explorer").setIcon("folder").onClick(() => revealFolderInExplorer(plugin.app, folder))
   );
-  menu.addItem(
-    (item) => item.setTitle("Open folder in default app").setIcon("arrow-up-right").onClick(() => openInDefaultApp(plugin, folder.path))
-  );
+  if (!Platform.isMobile) {
+    menu.addItem(
+      (item) => item.setTitle("Open folder in default app").setIcon("arrow-up-right").onClick(() => openInDefaultApp(plugin, folder.path))
+    );
+  }
   menu.showAtMouseEvent(event);
 }
 async function openFileByViewState(plugin, resolved) {

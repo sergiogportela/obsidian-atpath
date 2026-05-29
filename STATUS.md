@@ -1,4 +1,4 @@
-Updated at 2026-05-29 19:20
+Updated at 2026-05-29 20:05
 
 # AtPath — Status
 
@@ -31,7 +31,7 @@ See [`_work_units/improvements/plans/`](_work_units/improvements/plans/) for pla
 - [ ] (Optional, Plan 007 residual) Cap expensive fuzzy evaluations per query to cut the single ~150–250ms compute on generic 2–3 char queries. Deferred: alters ranking for huge match sets, needs sign-off.
 - [ ] Plan 003 (File explorer token counts) is **unimplemented** — only spec + core stubs (`isIgnored` returns `false`, `getFolderTokens` Plan A version) exist. Repo is ready to start it; no blocking debt.
 - [ ] Refresh Obsidian installer (download fresh DMG from https://obsidian.md/download) to unlock `dev:screenshot`/`dev:css`/`dev:cdp`/`vaults`. Note: the registered CLI symlink at `/usr/local/bin/obsidian` is gone; the binary still works directly at `/Applications/Obsidian.app/Contents/MacOS/obsidian` (re-register via Settings → CLI to restore the symlink).
-- [ ] Fix latent mobile bug at `src/main.js:383` — `plugin.app.vault.adapter.getBasePath()` is called without the `typeof === "function"` guard used at line 1158. `manifest.json` has `isDesktopOnly: false`, so this throws on mobile.
+- [x] Fixed latent mobile bug in `openInDefaultApp` — `getBasePath()` was called without the `typeof === "function"` guard. Now guarded (mobile shows a Notice instead of throwing) and the desktop-only menu items are gated behind `Platform.isMobile`.
 
 ## Latest research
 
