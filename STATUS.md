@@ -1,4 +1,4 @@
-Updated at 2026-05-29 20:05
+Updated at 2026-05-29 20:40
 
 # AtPath — Status
 
@@ -15,7 +15,7 @@ Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugin
 | 005 | Status-bar slowness fix | `aff5d54` | shipped 2026-05-15 (codex-reviewed v3) |
 | 006 | Linked-@paths popover head-truncation | `e49a454` | shipped 2026-05-15 (codex-reviewed v1) |
 | 005-prompt | DnD @path regression fix (Prec.highest) | `72e7424` | shipped 2026-05-18 |
-| 007 | @path autocomplete slowness fix (debounce + prefilter + narrowing) | working tree | implemented + tested, not yet committed |
+| 007 | @path autocomplete slowness fix (debounce + prefilter + narrowing) | `2d23bd1` | shipped 2026-05-29 (codex-reviewed) |
 
 See [`_work_units/improvements/plans/`](_work_units/improvements/plans/) for plan documents.
 
@@ -27,7 +27,7 @@ See [`_work_units/improvements/plans/`](_work_units/improvements/plans/) for pla
 
 ## Open follow-ups
 
-- [ ] Commit Plan 007 (autocomplete slowness fix: `src/main.js`, `src/atpath-core.js`, built `main.js`, `tests/suggest-prefilter.test.js`).
+- [ ] (Plan 007 codex P2) Debounce timer in `AtPathSuggest.getSuggestions` (`src/main.js:547`) is only cleared by the next trigger; a dismissed trigger (e.g. typing a space) still runs one full-vault `_computeSuggestions` after the suggest UI closes. Cancel the timer on suggest close.
 - [ ] (Optional, Plan 007 residual) Cap expensive fuzzy evaluations per query to cut the single ~150–250ms compute on generic 2–3 char queries. Deferred: alters ranking for huge match sets, needs sign-off.
 - [ ] Plan 003 (File explorer token counts) is **unimplemented** — only spec + core stubs (`isIgnored` returns `false`, `getFolderTokens` Plan A version) exist. Repo is ready to start it; no blocking debt.
 - [ ] Refresh Obsidian installer (download fresh DMG from https://obsidian.md/download) to unlock `dev:screenshot`/`dev:css`/`dev:cdp`/`vaults`. Note: the registered CLI symlink at `/usr/local/bin/obsidian` is gone; the binary still works directly at `/Applications/Obsidian.app/Contents/MacOS/obsidian` (re-register via Settings → CLI to restore the symlink).
