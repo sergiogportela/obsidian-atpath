@@ -271,11 +271,19 @@ assert HEICs are skipped via the completed denylist — note which in the findin
    `binary-sniff.test.js`). (Measured: 80/80 tests green — 23 in `binary-sniff.test.js`, incl. the exact
    4095/4096 sample boundary, the `c < 32` upper-window edge, and a source-text structural guard.)
 2. ✅ DONE — `npm run build` — regenerate committed `main.js`.
-3. ⏳ pending — `obsidian plugin:reload id=atpath` (per WU runbook; CLI installer out of date — only
-   eval/dev:errors/dev:console work). (Needs a running app.)
-4. ⏳ pending — Re-type the original deep path `@_work_units/ai_dev/agent_orchestrator/findings/…` in the
-   colm-as-kedro vault — confirm it resolves **instantly**, no CPU pin, and the binary refs show
-   **no** token badge (never a `"null"` badge). (Needs a running app.)
+3. ✅ DONE (2026-06-04) — `obsidian plugin:reload id=atpath` re-read the on-disk build into the running
+   app; confirmed the loaded `getTokenCount` now contains the `looksBinary`/`sniffedBinary` sniff.
+   (The "Documents" vault dev-loads this repo via symlink `plugins/atpath → obsidian-atpath → repo`, so
+   the committed build is exactly what runs — no copy step.)
+4. ✅ DONE (2026-06-04) — Live in-app verification through the **loaded plugin code** over the **real
+   vault files** (CLI `eval`, not the editor keystroke). Worst-case
+   `…/ai_dev/agent_orchestrator/findings/fotos_mesa/…/IMG_1487.heic` → `getTokenCount` = `null` in
+   **0 ms** (was ~9 s of `encode()`); markdown control still counts (`475` tokens, 2 ms) — real-text
+   behavior preserved. Full walk over the `ai_dev/` subtree (235 indexed files: 206 md / 13 heic /
+   5 jpg / 5 py / 5 txt / 1 zip) = **316 ms total**, 19 binaries returned `null` (no badge), 216 text
+   files counted; `dev:errors` clean. Confirms the ~78 s freeze is gone on the actual running plugin.
+   (Literal in-editor re-type left as an optional human spot-check; the programmatic path exercises the
+   identical `getTokenCount` choke point.)
 5. ✅ DONE — Re-run `measure_folder_encode.js` — confirm the ~200× drop; update findings/002 with the
    post-fix number. (Measured: `_work_units/ai_dev` BEFORE=78741ms → AFTER=374ms, ~211× drop.
    Per-target: `_work_units/ai_dev` 78741→374ms; `_work_units/ai_dev/agent_orchestrator`
