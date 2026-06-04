@@ -1,3 +1,7 @@
 node_modules/
 data.json
 test-results/
+
+# codex-multi review stderr logs (transient tooling noise; the *-review.md and
+# *_prompt.md artifacts beside them are kept)
+_work_units/0_llm/reviews/*.stderr.log

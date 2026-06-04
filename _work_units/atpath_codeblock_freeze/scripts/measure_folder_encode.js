@@ -31,6 +31,21 @@ const BINARY_EXTENSIONS = new Set([
   "sqlite", "db",
 ]);
 
+// The Plan 002 fix: denylist gains heic/heif/tiff/tif, plus a content sniff.
+const BINARY_EXTENSIONS_FIXED = new Set([...BINARY_EXTENSIONS, "heic", "heif", "tiff", "tif"]);
+
+function looksBinary(content) {
+  const sample = content.slice(0, 4096);
+  let suspicious = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c === 0) return true;                            // NUL -> binary (git rule)
+    if (c === 0xFFFD) suspicious++;                      // U+FFFD: failed UTF-8 decode
+    else if (c < 9 || (c > 13 && c < 32)) suspicious++;  // control chars (allow \t \n \r)
+  }
+  return sample.length > 0 && suspicious / sample.length > 0.1;
+}
+
 const VAULT_REPO =
   "/Users/sergio/Library/Mobile Documents/iCloud~md~obsidian/Documents/arbi_shared/_repos/colm-as-kedro";
 const TARGETS = [
@@ -114,6 +129,8 @@ function measure(folderAbs, label) {
   let curPluginMs = 0; // ACTUAL plugin: all files NOT in BINARY_EXTENSIONS
   let curPluginMaxMs = 0;
   let curPluginMaxName = "";
+  let fixedPluginMs = 0, fixedPluginMaxMs = 0, fixedPluginMaxName = "";
+  const sniffCaught = [];
   const perFileMs = [];
   const byExt = new Map(); // ext -> {ms, bytes, n}
   const t0 = process.hrtime.bigint();
@@ -137,6 +154,13 @@ function measure(folderAbs, label) {
       curPluginMs += ms;
       if (ms > curPluginMaxMs) { curPluginMaxMs = ms; curPluginMaxName = path.basename(underCap[i]); }
     }
+    const deniedFixed = BINARY_EXTENSIONS_FIXED.has(ext);
+    const sniffed = !deniedFixed && looksBinary(c);
+    if (!deniedFixed && !sniffed) {
+      fixedPluginMs += ms;
+      if (ms > fixedPluginMaxMs) { fixedPluginMaxMs = ms; fixedPluginMaxName = path.basename(underCap[i]); }
+    }
+    if (sniffed) sniffCaught.push(path.basename(underCap[i]) + " (." + ext + ")");
     if (ms > maxFileMs) {
       maxFileMs = ms;
       maxFileName = path.basename(underCap[i]);
@@ -161,6 +185,8 @@ function measure(folderAbs, label) {
   if (overCap) return;
   console.log(`  naive all-files:      ${totalMs.toFixed(0)} ms, ${totalTokens.toLocaleString()} tok (includes denylisted types — NOT what the plugin does)`);
   console.log(`  >> ACTUAL plugin now: ${curPluginMs.toFixed(0)} ms  (encodes everything NOT in BINARY_EXTENSIONS; heic is NOT denylisted) <<`);
+  console.log(`  >> FIXED plugin (denylist+sniff): ${fixedPluginMs.toFixed(0)} ms  (was ${curPluginMs.toFixed(0)} ms = ${(curPluginMs / Math.max(fixedPluginMs, 0.01)).toFixed(0)}x faster) <<`);
+  console.log(`     sniff caught beyond denylist: ${sniffCaught.length ? sniffCaught.join(", ") : "none (denylist covered all binaries)"}`);
   console.log(`     worst file (now):  ${curPluginMaxName} (${curPluginMaxMs.toFixed(1)} ms synchronous block)`);
   console.log(`  per-file p50/p95/max: ${pct(0.5).toFixed(1)} / ${pct(0.95).toFixed(1)} / ${maxFileMs.toFixed(1)} ms`);
   console.log(`  --- TEXT-ONLY (proposed fix: encode only text extensions) ---`);

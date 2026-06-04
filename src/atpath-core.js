@@ -119,6 +119,31 @@ function isSubsequenceCI(query, text) {
   return qi === q.length;
 }
 
+// Heuristic: does this decoded string look like binary data rather than text?
+// Mirrors git / grep -I / file(1): a NUL byte is a hard binary signal; a high
+// ratio of U+FFFD (failed UTF-8 decode) or non-whitespace control chars over a
+// leading 4096-char sample means binary. Genuine UTF-8 text/code/data scores ~0
+// and is never skipped, so token counts for real text stay byte-identical. Two
+// edge cases are false positives that degrade safely to "no count" (UTF-16/32
+// text, tiny control-heavy files); a binary whose first 4096 chars are clean
+// ASCII (a >4096-char preamble) is instead a bounded false negative — it passes
+// the sniff and reaches encode(), capped by maxFileSizeMB. See plan 002
+// "Sniff limitations".
+// Precondition: `content` is a UTF-8-decoded string (as returned by
+// vault.cachedRead); the U+FFFD branch only registers failed decodes under
+// UTF-8, so the heuristic assumes that decoding.
+function looksBinary(content) {
+  const sample = content.slice(0, 4096);
+  let suspicious = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c === 0) return true;                            // NUL -> binary (git rule)
+    if (c === 0xFFFD) suspicious++;                      // U+FFFD: failed UTF-8 decode
+    else if (c < 9 || (c > 13 && c < 32)) suspicious++;  // control chars (allow \t \n \v \f \r = codes 9..13)
+  }
+  return sample.length > 0 && suspicious / sample.length > 0.1;
+}
+
 function fuzzyScore(query, candidate) {
   if (!query) return 1;
   const q = query.toLowerCase();
@@ -540,4 +565,5 @@ module.exports = {
   computeDisplayPath,
   isSubsequenceCI,
   extractDraggedVaultPaths,
+  looksBinary,
 };

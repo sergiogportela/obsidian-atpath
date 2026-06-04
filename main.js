@@ -8615,6 +8615,17 @@ var require_atpath_core = __commonJS({
       }
       return qi === q.length;
     }
+    function looksBinary2(content) {
+      const sample = content.slice(0, 4096);
+      let suspicious = 0;
+      for (let i = 0; i < sample.length; i++) {
+        const c = sample.charCodeAt(i);
+        if (c === 0) return true;
+        if (c === 65533) suspicious++;
+        else if (c < 9 || c > 13 && c < 32) suspicious++;
+      }
+      return sample.length > 0 && suspicious / sample.length > 0.1;
+    }
     function fuzzyScore(query, candidate) {
       if (!query) return 1;
       const q = query.toLowerCase();
@@ -9004,7 +9015,8 @@ var require_atpath_core = __commonJS({
       resolveAtPathFolderFromSource,
       computeDisplayPath,
       isSubsequenceCI: isSubsequenceCI2,
-      extractDraggedVaultPaths: extractDraggedVaultPaths2
+      extractDraggedVaultPaths: extractDraggedVaultPaths2,
+      looksBinary: looksBinary2
     };
   }
 });
@@ -9397,6 +9409,10 @@ var BINARY_EXTENSIONS = /* @__PURE__ */ new Set([
   "ico",
   "webp",
   "avif",
+  "heic",
+  "heif",
+  "tiff",
+  "tif",
   "pdf",
   "doc",
   "docx",
@@ -9483,7 +9499,8 @@ var {
   resolveAtPathFolderFromSource: coreResolveAtPathFolderFromSource,
   computeDisplayPath: coreComputeDisplayPath,
   isSubsequenceCI,
-  extractDraggedVaultPaths: coreExtractDraggedVaultPaths
+  extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
+  looksBinary
 } = require_atpath_core();
 var {
   HTML_APP_SCOPE_SINGLE_FILE,
@@ -11317,6 +11334,10 @@ var AtPathPlugin = class extends Plugin {
     }
     ATPATH_PERF.inc("getTokenCount.cacheMiss");
     const content = await ATPATH_PERF.timeAsync("getTokenCount.cachedRead", () => this.app.vault.cachedRead(file));
+    if (looksBinary(content)) {
+      ATPATH_PERF.inc("getTokenCount.sniffedBinary");
+      return null;
+    }
     const kb = content.length / 1024;
     const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
     ATPATH_PERF.inc("getTokenCount.encodeSize." + bucket);

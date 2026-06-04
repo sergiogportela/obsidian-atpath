@@ -139,6 +139,7 @@ class AtFolderWidget extends WidgetType {
 
 const BINARY_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "bmp", "svg", "ico", "webp", "avif",
+  "heic", "heif", "tiff", "tif",
   "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
   "zip", "gz", "tar", "rar", "7z", "bz2",
   "mp3", "wav", "ogg", "flac", "aac", "m4a",
@@ -201,6 +202,7 @@ const {
   computeDisplayPath: coreComputeDisplayPath,
   isSubsequenceCI,
   extractDraggedVaultPaths: coreExtractDraggedVaultPaths,
+  looksBinary,
 } = require("./atpath-core");
 const {
   HTML_APP_SCOPE_SINGLE_FILE,
@@ -2491,6 +2493,10 @@ class AtPathPlugin extends Plugin {
     }
     ATPATH_PERF.inc("getTokenCount.cacheMiss");
     const content = await ATPATH_PERF.timeAsync("getTokenCount.cachedRead", () => this.app.vault.cachedRead(file));
+    if (looksBinary(content)) {
+      ATPATH_PERF.inc("getTokenCount.sniffedBinary");
+      return null;  // NOT cached: keeps tokenCache numeric-only, so the four render-time readers never paint a badge for a sniffed binary
+    }
     const kb = content.length / 1024;
     const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
     ATPATH_PERF.inc("getTokenCount.encodeSize." + bucket);

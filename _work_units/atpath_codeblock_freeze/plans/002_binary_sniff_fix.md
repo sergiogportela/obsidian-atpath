@@ -267,20 +267,33 @@ assert HEICs are skipped via the completed denylist — note which in the findin
 
 ## Verification & rollout
 
-1. `node --test --require ./tests/_setup.js tests/*.test.js` — all green (existing suite + new
-   `binary-sniff.test.js`).
-2. `npm run build` — regenerate committed `main.js`.
-3. `obsidian plugin:reload id=atpath` (per WU runbook; CLI installer out of date — only
-   eval/dev:errors/dev:console work).
-4. Re-type the original deep path `@_work_units/ai_dev/agent_orchestrator/findings/…` in the
+1. ✅ DONE — `node --test --require ./tests/_setup.js tests/*.test.js` — all green (existing suite + new
+   `binary-sniff.test.js`). (Measured: 80/80 tests green — 23 in `binary-sniff.test.js`, incl. the exact
+   4095/4096 sample boundary, the `c < 32` upper-window edge, and a source-text structural guard.)
+2. ✅ DONE — `npm run build` — regenerate committed `main.js`.
+3. ⏳ pending — `obsidian plugin:reload id=atpath` (per WU runbook; CLI installer out of date — only
+   eval/dev:errors/dev:console work). (Needs a running app.)
+4. ⏳ pending — Re-type the original deep path `@_work_units/ai_dev/agent_orchestrator/findings/…` in the
    colm-as-kedro vault — confirm it resolves **instantly**, no CPU pin, and the binary refs show
-   **no** token badge (never a `"null"` badge).
-5. Re-run `measure_folder_encode.js` — confirm the ~200× drop; update findings/002 with the
-   post-fix number.
-6. `/review-codex` on the **final patch diff** (the second codex checkpoint; the first was the
-   findings/001 root-cause review, and *this plan* was the plan-level checkpoint).
-7. Update WU STATUS.md + PRD pointer; fold durable WHY/WHAT into the `looksBinary`/`getTokenCount`
-   docstrings.
+   **no** token badge (never a `"null"` badge). (Needs a running app.)
+5. ✅ DONE — Re-run `measure_folder_encode.js` — confirm the ~200× drop; update findings/002 with the
+   post-fix number. (Measured: `_work_units/ai_dev` BEFORE=78741ms → AFTER=374ms, ~211× drop.
+   Per-target: `_work_units/ai_dev` 78741→374ms; `_work_units/ai_dev/agent_orchestrator`
+   82204→196ms; `_work_units/ai_dev/agent_orchestrator/findings` 81348→141ms. The content sniff
+   caught binaries **beyond** the denylist: `.DS_Store` extensionless macOS metadata files —
+   10 in `_work_units/ai_dev`, 4 in `agent_orchestrator`, 3 in `findings`. These have ext "(none)"
+   so they are in neither the old nor the new (`heic`/`heif`/`tiff`/`tif`) denylist; only the
+   `looksBinary` content sniff (NUL-byte rule) skips them. The `.heic`/`.jpg` files, by contrast,
+   were caught by the denylist extension match, not the sniff.)
+6. ✅ DONE — `/review-codex` on the **final patch diff** (the second codex checkpoint; the first was the
+   findings/001 root-cause review, and *this plan* was the plan-level checkpoint). (Codex #1 on the
+   impl came back clean — 1 P3 fixed; codex #2 on the final diff also came back clean — no blocking
+   issues, Part A confirmed conformant (sniff at `getTokenCount` before `encode()` and before the cache
+   write, sniffed binaries uncached, denylist limited to `heic/heif/tiff/tif`, regexes untouched), with
+   1 P3 — this rollout line's then-stale `76/76` count, now fixed in step 1. →
+   @_work_units/0_llm/reviews/002-binary-sniff-final-review.md.)
+7. ✅ DONE — Update WU STATUS.md + PRD pointer; fold durable WHY/WHAT into the `looksBinary`/`getTokenCount`
+   docstrings. (Done for the `looksBinary`/`getTokenCount` docstrings and the STATUS files.)
 
 ## Resolved by review (was "Open questions")
 - **null-cache** → **dropped.** Keeps `tokenCache` numeric-only; no `"null"` badge possible; no

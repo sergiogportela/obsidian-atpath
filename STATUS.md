@@ -1,8 +1,12 @@
-Updated at 2026-05-29 21:20
+Updated at 2026-06-04 16:53
 
 # AtPath — Status
 
 Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Plan 003 (file-explorer token counts) is **SHELVED in a git stash** (`stash@{0}`) — implemented + codex-reviewed + 101 tests green, but the manual smoke test on a real vault showed it is **not usable**: exact `gpt-tokenizer` BPE over the whole vault pins the renderer's single JS thread at ~100% of one core on first display (folder badges force tokenizing every descendant), and nothing is persisted so the cost is re-paid on every launch. Working tree reverted to pre-plan HEAD `4ff4c32` (built `main.js` restored); resuming requires an approximate/cheaper token estimate + a persisted cache (see follow-ups). Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook"); CLI gotchas appended 2026-05-18 after the DnD diagnosis loop.
+
+## In flight (working tree, uncommitted)
+
+- **atpath_codeblock_freeze — Plan 002 binary-sniff freeze fix** (NOT shipped, NOT released, not committed). Adds a `looksBinary` content sniff (NUL-byte rule) at `getTokenCount` plus `heic`/`heif`/`tiff`/`tif` denylist additions. Fixes the ~78s freeze when an @path targets an image-heavy folder. Measured drop (`_work_units/ai_dev`): **78741ms → 374ms (211x)**; per-target `agent_orchestrator` 82204→196ms, `agent_orchestrator/findings` 81348→141ms. The sniff also caught extensionless `.DS_Store` macOS metadata binaries (ext `(none)`, in neither old nor new denylist — only the NUL-byte sniff skips them): 10 in `_work_units/ai_dev`, 4 in `agent_orchestrator`, 3 in `findings`. The `.heic`/`.jpg` files were caught by denylist extension match, not the sniff. State: 80/80 tests green, build done, codex reviews #1 and #2 (final patch diff) both clean — no blocking issues, Part A confirmed conformant; **pending** manual Obsidian reload verification + commit. See [`_work_units/atpath_codeblock_freeze/plans/002_binary_sniff_fix.md`](_work_units/atpath_codeblock_freeze/plans/002_binary_sniff_fix.md).
 
 ## Shipped plans
 
