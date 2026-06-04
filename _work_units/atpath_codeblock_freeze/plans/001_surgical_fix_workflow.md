@@ -1,5 +1,32 @@
 # Plan 001 — Surgical fix workflow for the @path-in-codeblock freeze
 
+> **REVISED 2026-06-04 after measurement (findings/002).** The original plan below (Phase 0 + F1-F5) was built on the structural map (findings/001) and centered on a **fence guard**. Direct measurement reproduced the freeze and showed the fence is **incidental**: the freeze is `.heic` photos missing from `BINARY_EXTENSIONS`, tokenized as text (~78s for `ai_dev`). The fence guard would fix only the in-fence case and leave the same freeze in prose. **The revised approach below supersedes the F1-centric plan.** The old plan is retained after the divider for the structural context (tests, helper extraction, fence guard) that is still useful as secondary work.
+
+## Revised approach (primary — measured)
+
+Evidence: @_work_units/atpath_codeblock_freeze/findings/002_measured_binary_encode.md.
+Guiding constraint: **most minimal, most surgical** change that makes the freeze impossible — stop feeding non-text bytes to `gpt-tokenizer`.
+
+**R1 — Don't tokenize non-text content (THE fix).** Single decision point: `getTokenCount` (@src/main.js:2484), which both the folder walk (`getFolderTokens` → `getFileTokens` → `getTokenCount`) and single-file `@`-refs flow through. Pick one (decision pending with user):
+- (a) **Complete the denylist** — add `heic, heif, tiff, tif, jxl, psd, dng, cr2, nef, arw, raw, …` to `BINARY_EXTENSIONS`. Smallest diff (~1 line); brittle (next format slips through).
+- (b) **Allowlist** known text/code/data extensions — only encode those. Reliable; risks excluding an exotic text extension from token counts.
+- (c) **Binary sniff** — `cachedRead` already returns the string; skip if the first ~1KB contains a NUL byte / high non-printable ratio. Format-agnostic, keeps all real text, catches unknown binaries. Most reliable; tiny extra cost.
+- Recommended: (c) sniff, optionally backed by (a) as a cheap fast-path. Measured effect (any): ai_dev ~78,000ms → ~400ms.
+
+**R2 — Defense-in-depth (recommended, not strictly required for the freeze).**
+- Add a **total-folder-bytes budget** to `getFolderTokens` (the `maxFolderFiles=500` cap is the wrong dimension — 13 HEICs were ~58MB at <500 files). Beyond the budget, return an over-cap sentinel (the shape already exists, line 217).
+- Optionally lower the effective per-file cap for the folder-sum path so no single file blocks the thread >~100ms even if it is text.
+
+**R3 — Fence guard (secondary, was the whole plan).** Make code-block content inert for AtPath (no linkification, no token fetch). Now a correctness/UX improvement, not the freeze fix. Implement per the F1/F4/F5 detail below if/when we want it; can ship separately.
+
+**Tests (R1-focused):** `getFolderTokens`/`getTokenCount` skip a synthetic binary file (NUL bytes) → 0 tokens, `encode` not called; allowlist/sniff keeps `.md`; total-bytes budget trips the sentinel. These are unit-testable today via @src/atpath-core.js (`getFolderTokens` is exported there); the single-file guard needs the same extraction as F5 if we want it under `node --test`.
+
+**Codex review** of the final R1(+R2) diff before ship (the second codex checkpoint; first was the findings/001 root-cause review).
+
+---
+
+## Original plan (superseded — retained for the secondary fence-guard work + test/extraction detail)
+
 Evidence: @_work_units/atpath_codeblock_freeze/findings/001_freeze_root_cause_map.md.
 Guiding constraint: **most minimal, most surgical** change that makes the freeze impossible — addressing the real invariant ("code-block content is inert for AtPath") rather than patching one symptom.
 

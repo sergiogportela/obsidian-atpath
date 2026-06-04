@@ -3,14 +3,17 @@
 WU-specific rules. Repo-wide rules: @AGENTS.md (root, symlinked as CLAUDE.md). CLAUDE.md here is a symlink to this file.
 
 ## Scope
-Fix the @path-in-codeblock 100% CPU freeze with the most minimal surgical change. Source of truth: PRD.md, STATUS.md, findings/001, plans/001.
+Fix the @path-in-codeblock 100% CPU freeze with the most minimal surgical change. Source of truth: PRD.md, STATUS.md, **findings/002 (measured root cause)**, findings/001 (structural map), plans/001 (revised).
+
+## Measured root cause (findings/002 — read first)
+The freeze is **`.heic` photos missing from `BINARY_EXTENSIONS`** (@src/main.js:140-149), tokenized as text by `getTokenCount` (@src/main.js:2484) → `encode()`. ~78s for `ai_dev`. The **code block is incidental** — the same freeze fires in prose. The fence guard is demoted to secondary UX.
 
 ## Hard rules for this WU
+- **The freeze fix is at `getTokenCount` (main.js:2484)** — the single point both the folder walk and single-file `@`-refs flow through. Fix the non-text gap here (denylist-completion / allowlist / binary sniff — decision pending). Don't reach for the fence guard as the freeze fix.
 - **No regex changes.** ReDoS is empirically disproven (findings/001); editing `AT_PATH_RE`/`AT_PATH_FOLDER_RE` is wasted effort and risks match semantics.
-- The fix must keep prose behavior byte-for-byte identical — only matches inside fence/inline-code/frontmatter change.
-- Reuse the existing `buildExcludedRanges`/`isInExcludedRange` helpers; fix the P3 ordering bug before reusing them in a hot path.
-- Guard with the **absolute** offset (`absStart = from + m.index`), never the slice-relative `m.index`.
-- Memoize excluded ranges by doc identity — do not recompute the full-doc scan on every cursor/selection change.
+- Keep token-count behavior for **real text files byte-identical** — only non-text/over-budget files change (to "no count").
+- If/when doing the secondary **fence guard**: reuse `buildExcludedRanges`/`isInExcludedRange`, fix the P3 ordering bug first, guard with the **absolute** offset (`absStart = from + m.index`), and memoize ranges by doc identity.
+- Re-measure with @_work_units/atpath_codeblock_freeze/scripts/measure_folder_encode.js after the fix to prove the dominant cost dropped.
 
 ## Commands
 - Tests: `node --test --require ./tests/_setup.js tests/*.test.js`
