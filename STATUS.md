@@ -1,12 +1,8 @@
-Updated at 2026-06-04 20:10
+Updated at 2026-06-04 20:14
 
 # AtPath — Status
 
-Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Plan 003 (file-explorer token counts) is **SHELVED in a git stash** (`stash@{0}`) — implemented + codex-reviewed + 101 tests green, but the manual smoke test on a real vault showed it is **not usable**: exact `gpt-tokenizer` BPE over the whole vault pins the renderer's single JS thread at ~100% of one core on first display (folder badges force tokenizing every descendant), and nothing is persisted so the cost is re-paid on every launch. Working tree reverted to pre-plan HEAD `4ff4c32` (built `main.js` restored); resuming requires an approximate/cheaper token estimate + a persisted cache (see follow-ups). Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook"); CLI gotchas appended 2026-05-18 after the DnD diagnosis loop.
-
-## Committed, not yet released
-
-- **atpath_codeblock_freeze — Plan 002 binary-sniff freeze fix** — committed `88e71ec` on `main` (pushed); **not released** (still v1.8.3, no tag). Adds a `looksBinary` content sniff (NUL-byte rule) at `getTokenCount` plus `heic`/`heif`/`tiff`/`tif` denylist additions. Fixes the ~78s freeze when an @path targets an image-heavy folder. Harness re-measure (`_work_units/ai_dev`): **78741ms → 374ms (211x)**. **Live-verified 2026-06-04** in the running app (vault "Documents" dev-loads this repo via symlink) over real vault files: `IMG_1487.heic` → `getTokenCount`=`null` in 0ms (was ~9s); the `ai_dev/` subtree walk (235 files) = **316ms** with 19 binaries skipped, 216 text files counted, `dev:errors` clean; markdown control still counts (475 tok, 2ms). The sniff also catches extensionless `.DS_Store` binaries that no denylist enumerates. State: 80/80 tests green, codex reviews #1 and #2 both clean. **Next (user-driven):** version bump → tag → release. See [`_work_units/atpath_codeblock_freeze/plans/002_binary_sniff_fix.md`](_work_units/atpath_codeblock_freeze/plans/002_binary_sniff_fix.md).
+Plugin at **v1.8.4** on `main`, listed in the official Obsidian Community Plugins registry (`id: atpath`). Plan 003 (file-explorer token counts) is **SHELVED in a git stash** (`stash@{0}`) — implemented + codex-reviewed + 101 tests green, but the manual smoke test on a real vault showed it is **not usable**: exact `gpt-tokenizer` BPE over the whole vault pins the renderer's single JS thread at ~100% of one core on first display (folder badges force tokenizing every descendant), and nothing is persisted so the cost is re-paid on every launch. Working tree reverted to pre-plan HEAD `4ff4c32` (built `main.js` restored); resuming requires an approximate/cheaper token estimate + a persisted cache (see follow-ups). Agent diagnosis runbook landed in `AGENTS.md` on 2026-05-15 (CLI-based, see "Testing" → "Agent diagnosis runbook"); CLI gotchas appended 2026-05-18 after the DnD diagnosis loop.
 
 ## Shipped plans
 
@@ -20,6 +16,7 @@ Plugin at **v1.8.3** on `main`, listed in the official Obsidian Community Plugin
 | 006 | Linked-@paths popover head-truncation | `e49a454` | shipped 2026-05-15 (codex-reviewed v1) |
 | 005-prompt | DnD @path regression fix (Prec.highest) | `72e7424` | shipped 2026-05-18 |
 | 007 | @path autocomplete slowness fix (debounce + prefilter + narrowing) | `2d23bd1` | shipped 2026-05-29 (codex-reviewed) |
+| 002 (codeblock_freeze) | Binary-sniff freeze fix — `looksBinary` sniff at `getTokenCount` + `heic`/`heif`/`tiff`/`tif` denylist | `40a39ec` | **released v1.8.4** 2026-06-04 (codex ×2 clean; live-verified ~78s→316ms over `ai_dev/`). See [`plan`](_work_units/atpath_codeblock_freeze/plans/002_binary_sniff_fix.md) |
 
 See [`_work_units/improvements/plans/`](_work_units/improvements/plans/) for plan documents.
 

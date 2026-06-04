@@ -1,6 +1,6 @@
-Updated at 2026-06-04 20:10
+Updated at 2026-06-04 20:14
 
-Open WU. Root cause **measured, fixed, committed (`88e71ec` on main), and live-verified** in the running app (not yet released — still v1.8.3). The freeze is **~79 seconds** of synchronous `gpt-tokenizer encode()` over binary files that `BINARY_EXTENSIONS` forgot to denylist (`.heic` photos), triggered when an `@path` crosses a folder that contains them (`@_work_units/ai_dev/`). The code block is **incidental** — the same freeze fires in prose. Fence guard deferred to UX. **Part A of plans/002 is implemented**: a content sniff (`looksBinary`) at `getTokenCount` returning `null` **without caching** (keeps `tokenCache` numeric-only) + denylist additions (`heic/heif/tiff/tif`). Folder byte-budget (R2) and fence guard (R3) **deferred**.
+WU complete. Root cause **measured, fixed, committed, live-verified, and released as v1.8.4** (`40a39ec` on main; GitHub release with assets). Plan 002 Part A shipped; Part B (folder byte-budget) and R3 (fence guard) remain deferred. The freeze is **~79 seconds** of synchronous `gpt-tokenizer encode()` over binary files that `BINARY_EXTENSIONS` forgot to denylist (`.heic` photos), triggered when an `@path` crosses a folder that contains them (`@_work_units/ai_dev/`). The code block is **incidental** — the same freeze fires in prose. Fence guard deferred to UX. **Part A of plans/002 is implemented**: a content sniff (`looksBinary`) at `getTokenCount` returning `null` **without caching** (keeps `tokenCache` numeric-only) + denylist additions (`heic/heif/tiff/tif`). Folder byte-budget (R2) and fence guard (R3) **deferred**.
 
 ## Done
 - Mapping workflow + codex review → findings/001 (structural map; ReDoS disproven).
@@ -19,6 +19,6 @@ Open WU. Root cause **measured, fixed, committed (`88e71ec` on main), and live-v
 - Plugin reloaded; loaded `getTokenCount` confirmed to carry the sniff. Vault dev-loads this repo via symlink (`plugins/atpath → obsidian-atpath → repo`), so the committed build is what runs.
 - Through the **real loaded plugin code** over **real vault files**: `IMG_1487.heic` → `getTokenCount`=`null` in **0 ms** (was ~9 s); markdown control still counts (475 tok, 2 ms). Full `ai_dev/` walk (235 files) = **316 ms**, 19 binaries `null`, 216 text counted; `dev:errors` clean. The ~78 s freeze is gone on the live plugin.
 
-## Still pending
-- **Committed** at `88e71ec` on `main` (pushed). **Version bump / release is a separate user step** — not yet done (still v1.8.3).
+## Released
+- **v1.8.4** shipped 2026-06-04 — commit `40a39ec` on `main`, tag `1.8.4`, GitHub release with `main.js`/`manifest.json`/`styles.css`/`atpath-1.8.4.zip` (release workflow run `26976813176`, success). minAppVersion unchanged (`0.15.0`). Obsidian's updater serves 1.8.4 to listed users automatically.
 - **Deferred:** Part B (folder byte-budget) — prerequisites recorded in plan (distinct sentinel, `maxFolderBytes` memo invalidation mirroring @src/main.js:1521, default tuning). R3 fence guard.
