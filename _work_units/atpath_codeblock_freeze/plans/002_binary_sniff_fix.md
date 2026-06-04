@@ -5,6 +5,11 @@
 > @_work_units/atpath_codeblock_freeze/findings/002_measured_binary_encode.md.
 > Guiding constraint (unchanged): **most minimal, most surgical** change that makes the freeze
 > impossible — stop feeding non-text bytes to `gpt-tokenizer`.
+>
+> **Revised after plan-level codex review** (@_work_units/0_llm/reviews/002-binary-sniff-fix-plan-review.md).
+> Net changes from the first draft: null-caching **dropped** (kept `tokenCache` numeric-only);
+> denylist additions **trimmed** to unambiguous formats; Part B (folder byte-budget) **deferred**;
+> sniff guarantee **narrowed** with explicit edge cases. See §"Resolved by review" at the bottom.
 
 ## Decision
 
@@ -14,14 +19,16 @@ The denylist already missed `heic` and will miss the next format. We therefore f
 **deciding on what the file actually is, not on its filename**:
 
 - **(c) content sniff — the correctness layer.** After `cachedRead` returns the string (which
-  already happens, *before* `encode`), check whether it looks like binary; if so, skip `encode`.
-  Catches `heic` and every present/future binary format, keeps every real-text count.
+  already happens, *before* `encode`), check whether it looks like binary; if so, skip `encode`
+  and return `null`. Catches `heic` and every present/future binary format, keeps every real-text
+  count. The verdict is **not cached** — see A2 for why (keeps `tokenCache` numeric-only).
 - **(a) completed denylist — a free fast-path.** Keep `BINARY_EXTENSIONS` and add the missing
-  image/RAW formats, so known binaries skip even the read. After this change the denylist is a
-  *performance* shortcut only — no longer load-bearing for correctness (the sniff is the backstop).
-- **null-caching** the sniff verdict so single-file binary `@`-refs don't re-read every keystroke.
-- **(Part B / R2) folder byte-budget** as defense-in-depth for the many-large-**text**-files case
-  the sniff does not address.
+  **unambiguous** raster formats, so known binaries skip even the read. After this change the
+  denylist is a *performance* shortcut only — no longer load-bearing for correctness (the sniff is
+  the backstop). Additions are restricted to formats with no plausible real-text use (see A3).
+- **(Part B / R2) folder byte-budget — deferred.** Defense-in-depth for the many-large-**text**-files
+  case the sniff does not address; the review found it is not required for the measured freeze and
+  has unresolved UI/invalidation/default questions. Moved to "Deferred" with its prerequisites.
 - **(R3) fence guard — deferred** to its own change (correctness/UX, not the freeze fix).
 
 Rationale for picking (c) over (a)-alone or (b)-allowlist:
@@ -29,16 +36,16 @@ Rationale for picking (c) over (a)-alone or (b)-allowlist:
 - (b) allowlist fails *safe* against the freeze but silently drops legit token counts for any
   exotic-but-real text extension — a behavior regression for real text, which the WU hard rules
   forbid ("keep real-text counts byte-identical").
-- (c) is the only approach robust to unknown/future formats **and** byte-identical for real text.
-  It mirrors how `git`, `grep -I`, and `file(1)` classify content (NUL byte / non-printable ratio).
-  The read already happens before `encode`; the read is cheap, the `encode` is the killer — so the
-  sniff costs ~nothing relative to what it prevents.
+- (c) is the only approach robust to unknown/future formats **and** byte-identical for real UTF-8
+  text. It mirrors how `git`, `grep -I`, and `file(1)` classify content (NUL byte / non-printable
+  ratio). The read already happens before `encode`; the read is cheap, the `encode` is the killer —
+  so the sniff costs ~nothing relative to what it prevents.
 
 Measured target (findings/002): `ai_dev` folder ~78,000 ms → ~400 ms (~200×).
 
 ---
 
-## Part A — The freeze fix (ships first)
+## Part A — The freeze fix (ships first; the whole plan now)
 
 ### A1. `looksBinary(content)` — new pure export in @src/atpath-core.js
 
@@ -50,8 +57,10 @@ Obsidian deps → directly unit-testable under `node --test`.
 // Heuristic: does this decoded string look like binary data rather than text?
 // Mirrors git / grep -I / file(1): a NUL byte is a hard binary signal; a high
 // ratio of U+FFFD (failed UTF-8 decode) or non-whitespace control chars over a
-// leading sample means binary. Real text/code/data files score ~0 and are never
-// skipped, so token counts for genuine text stay byte-identical.
+// leading sample means binary. Genuine UTF-8 text/code/data scores ~0 and is
+// never skipped, so token counts for real text stay byte-identical. Known edge
+// cases (UTF-16/32, tiny control-heavy files, long ASCII preambles) are
+// documented under "Sniff limitations"; all degrade safely to "no count".
 function looksBinary(content) {
   const sample = content.slice(0, 4096);
   let suspicious = 0;
@@ -68,14 +77,17 @@ function looksBinary(content) {
 Why this shape:
 - Obsidian `cachedRead` decodes file bytes as UTF-8. A HEIC's bytes contain NUL (`0x00` is valid
   UTF-8 → survives as `charCode 0`) → the `c === 0` early-return catches HEIC inside the first
-  4096 chars. Verified live: `cachedRead(IMG_1487.heic)` returns a 1,990,119-char string.
+  4096 chars. Verified live: `cachedRead(IMG_1487.heic)` returns a 1,990,119-char string with NUL.
 - Files with no early NUL but high entropy decode to many `U+FFFD` + control chars → the 10% ratio
   catches them.
 - Multibyte real text (CJK, emoji) decodes to valid non-control chars → `suspicious` stays 0 →
   never flagged. Markdown/JS/JSON/CSV/YAML score 0.
-- `slice(0, 4096)` bounds the scan to ~4k iterations (<1 ms); independent of file size.
+- `slice(0, 4096)` bounds the scan to ~4k iterations (<1 ms); independent of file size. (`git`
+  samples ~8000 bytes; 4096 is sufficient for the measured HEIC and every common binary header,
+  which carry NUL/control bytes in their first few hundred bytes. See "Sniff limitations" for the
+  long-preamble false-negative this trades away.)
 
-### A2. Integrate the sniff + null-cache at `getTokenCount` (@src/main.js:2480-2500)
+### A2. Integrate the sniff at `getTokenCount` (@src/main.js:2480-2500) — **do not cache the skip**
 
 Single choke point — both the folder walk (`getFolderTokens → getFileTokens → getTokenCount`) and
 single-file `@`-refs flow through here, so one edit covers both (findings/002 §"Single-file @refs").
@@ -95,13 +107,13 @@ this.tokenCache.set(vaultPath, { mtime: file.stat.mtime, tokens });
 return tokens;
 ```
 
-Change — insert the sniff between `cachedRead` and `encode`, and cache the skip verdict:
+Change — insert the sniff between `cachedRead` and `encode`, returning `null` **without writing to
+the cache**:
 ```js
 const content = await ATPATH_PERF.timeAsync("getTokenCount.cachedRead", () => this.app.vault.cachedRead(file));
 if (looksBinary(content)) {
   ATPATH_PERF.inc("getTokenCount.sniffedBinary");
-  this.tokenCache.set(vaultPath, { mtime: file.stat.mtime, tokens: null }); // cache the skip → no re-read next keystroke
-  return null;
+  return null;  // NOT cached — see "Why not cache the skip" below
 }
 /* …perf bucket… */
 const tokens = ATPATH_PERF.time("getTokenCount.encode", () => encode(content).length);
@@ -109,15 +121,25 @@ this.tokenCache.set(vaultPath, { mtime: file.stat.mtime, tokens });
 return tokens;
 ```
 
-Cache-safety check (verified against the call sites):
-- The existing hit check `if (cached && cached.mtime === file.stat.mtime) return cached.tokens;`
-  works unchanged when `tokens` is `null` — it returns `null` and short-circuits the re-read.
-- `scheduleTokenFetch` (@src/main.js:2512-2518) only refreshes when `tokens != null`, so a cached
-  `null` correctly means "no count, don't repaint."
-- The folder walk sums with `total += n || 0` (@src/atpath-core.js:242), so `null` contributes 0.
-- No code distinguishes "absent from cache" from "cached as null" in a way that breaks (`.get()`
-  returns `undefined` when absent; both fail the `cached &&` guard the same way). If `tokenCache`
-  is persisted, `{mtime, tokens: null}` serializes fine.
+**Why not cache the skip (the review's P1, addressed by NOT introducing the problem).**
+The first draft cached `{ mtime, tokens: null }`. The review found that four render-time cache
+readers do `if (cached) … formatTokens(cached.tokens)` — @src/main.js:911, :1050, :1281, :1440 —
+and `formatTokens(null)` returns the literal string `"null"` (since `null < 1000` → `String(null)`),
+so a sniffed binary would paint a `"null"` token badge. Rather than teach all four readers (and any
+future reader) a three-state `cached.tokens == null` dance, we keep the simpler, more reliable
+invariant: **`tokenCache` only ever holds numeric token counts.** Consequences:
+- A binary file is never stored → always a cache-miss → `getTokenCount` re-reads + re-sniffs and
+  returns `null` each time. The repeated cost is one **already-Obsidian-cached** `cachedRead` (a
+  cached-string return, not a disk read) + a <1 ms 4096-char scan. The `encode` — the only
+  expensive step — is never run. The folder path is additionally protected by `folderTokenMemo`
+  (permanent per-folder sum memo, @src/atpath-core.js:183), so a binary inside a walked folder is
+  read+sniffed once per walk, then the whole sum is memoized.
+- **No reader changes are needed** (911/1050/1281/1440 keep working): they only ever see a numeric
+  `cached.tokens` or an absent entry. This is strictly more surgical than the four-reader patch.
+
+The existing cache-hit/miss machinery is otherwise untouched: `scheduleTokenFetch`
+(@src/main.js:2502-2525) already no-ops its refresh when `tokens == null`, and the folder walk sums
+with `total += n || 0` (@src/atpath-core.js:242), so `null` contributes 0.
 
 Import `looksBinary` into main.js's existing core destructure (@src/main.js:193-204):
 ```js
@@ -130,54 +152,85 @@ const {
 } = require("./atpath-core");
 ```
 
-### A3. Complete the denylist (@src/main.js:140-149) — fast-path only
+### A3. Complete the denylist (@src/main.js:140-149) — unambiguous fast-path only
 
-Add the missing raster/RAW/exotic image formats so known binaries skip the read entirely (the
-sniff still backstops anything not listed):
+Add **only** the common, unambiguously-binary raster image formats that the existing list
+(png/jpg/jpeg/gif/bmp/svg/ico/webp/avif/…) happens to omit:
 ```
-heic, heif, tiff, tif, jxl, psd, dng, cr2, nef, arw, raw, orf, rw2, raf, heics
+heic, heif, tiff, tif
 ```
-After this, the denylist is purely a `cachedRead`-avoidance optimization; correctness no longer
-depends on its completeness.
+**Deliberately NOT added** (the review's P1): `raw`, `jxl`, `psd`, `dng`, `cr2`, `nef`, `arw`,
+`orf`, `rw2`, `raf`, `heics`. The denylist runs *before* the sniff, so every entry is an
+**unconditional** skip with no content check — adding generic `raw` would zero out a genuine text
+`*.raw` file, violating "real text byte-identical." These exotic/RAW/ambiguous formats are instead
+left to fall through to the sniff (A1), which classifies them correctly by content; the 5 MB
+`maxFileSizeMB` cap (@src/main.js:2486, runs before `cachedRead`) caps the read cost for the large
+ones. So correctness for them does not depend on listing them, and we take zero ambiguity risk.
+
+After this, the denylist is purely a `cachedRead`-avoidance optimization for the four common
+formats; correctness no longer depends on its completeness.
 
 ### Part A behavior contract
-- Real text/code/data files: **byte-identical** token counts (sniff returns false → same `encode`).
-- `.heic`/`.heif` and any other binary: **no count** (was: ~9s synchronous freeze each).
+- Real **UTF-8** text/code/data files: **byte-identical** token counts (sniff returns false → same
+  `encode`). This is the WU's "real text byte-identical" guarantee, scoped to UTF-8 (what Obsidian
+  reads and what real notes are). Non-UTF-8 edge cases are enumerated next.
+- `.heic`/`.heif`/`.tiff`/`.tif` and any other content the sniff flags as binary: **no count** (was:
+  ~9s synchronous freeze each).
 - Folder walk and single-file refs: both covered by the one `getTokenCount` edit.
+
+### Sniff limitations (the review's P2 — narrowed claim, accepted as safe degradation)
+`looksBinary` is a heuristic. Its known mis-classifications all degrade *safely* (to "no count" — no
+freeze, no crash) and none affect the measured HEIC fix:
+- **False-positive on UTF-16/UTF-32 text.** These encodings interleave NUL bytes, so a UTF-16 `.md`
+  would be sniffed as binary → "no count." Accepted: Obsidian stores notes as UTF-8; a UTF-16 file
+  is an edge case, and "no count" is a safe degradation, not a regression of the freeze guarantee.
+- **False-positive on tiny control-heavy files.** A very small file (e.g. <~20 chars) with ≥2
+  non-whitespace control chars can exceed the 10% ratio. Genuine tiny text essentially never
+  contains non-whitespace control bytes, and the failure mode is "no count." **Decision: no
+  min-length floor** — adding one would only convert these safe "no count"s back into encodes for
+  no real-text benefit, against the minimalism constraint.
+- **False-negative on a binary with a >4096-char ASCII preamble.** Such a file passes the sniff and
+  reaches `encode`. This requires an unusual format (common binaries carry NUL/control bytes in
+  their first few hundred bytes); the `maxFileSizeMB` cap bounds the worst-case `encode` cost. If a
+  real such format ever appears, widen the sample (git uses ~8000) or sample multiple windows.
 
 ---
 
-## Part B — Folder byte-budget (R2, defense-in-depth; separable commit)
+## Deferred — Part B (folder byte-budget, R2) and R3 fence guard
 
+### Part B — folder byte-budget (R2), deferred per review
 The sniff fully fixes the *measured* freeze (binary photos). It does **not** bound a folder of many
 large **real-text** files (e.g. 100 × 2 MB markdown = 200 MB of legit text → slow but un-skippable
 encode). `maxFolderFiles = 500` caps the wrong dimension (the 13 HEICs were ~58 MB at <500 files).
-R2 adds a total-**bytes-actually-encoded** budget to `getFolderTokens` (@src/atpath-core.js:178-254).
+The review's recommendation: **defer** — it is not required for the measured HEIC freeze, and it has
+three unresolved prerequisites that must be settled before it ships:
 
-Design (budget on bytes we actually tokenize, so binaries skipped by the sniff don't count):
-- New setting `maxFolderBytes` (proposed default **16 MB** — ~2.4 s worst-case of pure text encode;
-  tunable, see Open questions). Register in `DEFAULT_SETTINGS` (@src/main.js:218-223) and the
-  settings tab (@src/main.js near 1505-1540, beside `maxFileSizeMB`/`maxFolderFiles`).
-- In the encode loop (@src/atpath-core.js:222-246): keep a running `encodedBytes`. After each file
-  resolves, add that file's `stat.size` **only when its count came back non-null** (i.e. it was a
-  real text file that got encoded — binaries return null and contribute nothing). When
-  `encodedBytes > maxFolderBytes`, stop and return the over-cap sentinel.
-- **Reuse the existing sentinel shape** `{ overCap: true, fileCount }` (@src/atpath-core.js:217),
-  with `fileCount` = files processed before the trip. `formatLinkedTargetCount` (@src/main.js:181-184)
-  already renders it as `"> N files"`; all sentinel call sites (main.js:864, 1424, 1432, 2641, 2808,
-  2865, 2899, 2925, 2933) keep working unchanged.
+1. **Distinct sentinel, not the over-cap reuse.** A byte-budget trip is *not* a max-files trip, but
+   the current UI titles say "Skipped: over the configured max-files limit" (@src/main.js:2865,
+   :2925) and the count renderer shows `> N files` (`formatLinkedTargetCount`, @src/main.js:181-184).
+   Part B must add a reason field / distinct sentinel shape and update the renderer + both title
+   copy sites, or it mislabels the cause to the user.
+2. **`maxFolderBytes` memo invalidation.** A new `maxFolderBytes` setting changes `getFolderTokens`
+   results, so its settings handler must `clearFolderTokenMemo()` + set `tokenCacheDirty` +
+   `_scheduleRefresh()` — exactly mirroring the `maxFolderFiles` handler at @src/main.js:1521-1531.
+   The first draft only said "register the setting"; without this, the change silently doesn't take
+   effect until reload.
+3. **Default value.** Proposed 16 MB (~2.4 s worst-case pure-text encode) — needs validating against
+   real folders so it neither janks nor cuts off legitimately-countable folders; consider deriving
+   from `maxFileSizeMB`.
 
-This is explicitly sanctioned by the WU hard rule: "only non-text/**over-budget** files change (to
-'no count')." It does change behavior for very-large real-text folders (count → "> N files"), which
-is the intended, safe degradation.
+Design sketch when picked up (budget on bytes we actually tokenize, so sniff-skipped binaries don't
+count): register `maxFolderBytes` in `DEFAULT_SETTINGS` (@src/main.js:218-223) + the settings tab
+(beside `maxFileSizeMB`/`maxFolderFiles`, with the invalidation wiring from #2); in the encode loop
+(@src/atpath-core.js:222-246) keep a running `encodedBytes`, adding each file's `stat.size` **only
+when its count came back non-null**, and stop + return the (new, distinct) over-budget sentinel when
+`encodedBytes > maxFolderBytes`. This is sanctioned by the WU rule "only non-text/**over-budget**
+files change (to 'no count')."
 
----
-
-## Deferred — R3 fence guard
-
-Make code-block content inert for AtPath (no linkification, no token fetch). Now a correctness/UX
-item, **not** the freeze fix (the same freeze fires in prose). Implement per the F1/F4/F5 detail in
-plans/001 §"Original plan" if/when wanted; ships separately. Not in this plan's scope.
+### R3 — fence guard, deferred
+Make code-block content inert for AtPath (no linkification, no token fetch). A correctness/UX item,
+**not** the freeze fix (the same freeze fires in prose). Implement per the F1/F4/F5 detail in
+plans/001 §"Original plan" if/when wanted; ships separately.
 
 ---
 
@@ -192,16 +245,18 @@ Land in the existing `node --test --require ./tests/_setup.js tests/*.test.js` h
   and text containing only `\t`/`\n`/`\r` whitespace.
 - Text with a *few* control chars **under** the 10% threshold → `false` (locks the ratio gate).
 - Empty string → `false` (guarded by `sample.length > 0`).
+- NUL only **after** char 4096 (clean preamble) → `false` (documents the long-preamble
+  false-negative limitation as intended behavior, so a future widening of the sample is a conscious
+  choice, not an accidental regression).
 
-### `tests/folder-tokens.test.js` (extend) — Part B byte-budget
-Following the existing `buildPlugin`/`makeFolder` fakes:
-- Files whose summed `stat.size` exceeds a low `maxFolderBytes` → result is the
-  `{ overCap: true }` sentinel; memoized as the sentinel (mirrors the existing cap test at
-  lines 58-74).
-- Files under budget → numeric sum unchanged (regression guard: byte-budget never trips for
-  small folders → existing tests at lines 47-56 stay green).
-- A file whose synthetic `getTokenCount` returns `null` (binary) does **not** add to
-  `encodedBytes` (budget counts only encoded text).
+### Token-cache invariant (extend `tests/folder-tokens.test.js` if the fakes allow)
+- Using the existing `buildPlugin` fakes, a file whose synthetic content reads as binary →
+  `getTokenCount` returns `null` **and** leaves `tokenCache` with no entry for it (locks the
+  "numeric-only cache" invariant that makes the four readers safe without changes). If the current
+  fakes can't drive `getTokenCount`'s `cachedRead`, note it and cover the invariant via the manual
+  reload check in rollout step 4 instead.
+
+(Part B byte-budget tests are deferred with Part B.)
 
 ### Re-measure (manual, not in `node --test`)
 Re-run @_work_units/atpath_codeblock_freeze/scripts/measure_folder_encode.js after Part A to prove
@@ -212,28 +267,34 @@ assert HEICs are skipped via the completed denylist — note which in the findin
 
 ## Verification & rollout
 
-1. `node --test --require ./tests/_setup.js tests/*.test.js` — all green (existing 41 + new).
+1. `node --test --require ./tests/_setup.js tests/*.test.js` — all green (existing suite + new
+   `binary-sniff.test.js`).
 2. `npm run build` — regenerate committed `main.js`.
 3. `obsidian plugin:reload id=atpath` (per WU runbook; CLI installer out of date — only
    eval/dev:errors/dev:console work).
 4. Re-type the original deep path `@_work_units/ai_dev/agent_orchestrator/findings/…` in the
-   colm-as-kedro vault — confirm it resolves **instantly**, no CPU pin.
+   colm-as-kedro vault — confirm it resolves **instantly**, no CPU pin, and the binary refs show
+   **no** token badge (never a `"null"` badge).
 5. Re-run `measure_folder_encode.js` — confirm the ~200× drop; update findings/002 with the
    post-fix number.
 6. `/review-codex` on the **final patch diff** (the second codex checkpoint; the first was the
-   findings/001 root-cause review, and *this plan* is reviewed before implementation).
+   findings/001 root-cause review, and *this plan* was the plan-level checkpoint).
 7. Update WU STATUS.md + PRD pointer; fold durable WHY/WHAT into the `looksBinary`/`getTokenCount`
    docstrings.
 
-## Open questions (for the plan review)
-- `maxFolderBytes` default: 16 MB proposed. Too high (>2 s of text still janks) / too low (cuts off
-  legitimately countable folders)? Or derive from `maxFileSizeMB`?
-- Is Part B worth the surface-area now, or defer it too (sniff alone fixes the reported bug)?
-- `looksBinary` 4096-char sample + 10% ratio: any real-text file class (BOM/UTF-16, unusual
-  encodings Obsidian still decodes) that could false-positive? Small files (<~50 chars) are more
-  ratio-sensitive — acceptable (safe degradation to "no count"), or guard with a min-length floor?
-- Should the size-cap branch (`stat.size > maxFileSizeMB`, main.js:2486) also cache `null` for
-  symmetry, or leave that pre-existing behavior untouched to stay surgical?
+## Resolved by review (was "Open questions")
+- **null-cache** → **dropped.** Keeps `tokenCache` numeric-only; no `"null"` badge possible; no
+  reader changes (A2).
+- **denylist additions** → **trimmed** to `heic/heif/tiff/tif`; ambiguous/exotic formats fall to the
+  sniff (A3).
+- **Part B** → **deferred**; not required for the measured freeze; prerequisites recorded above.
+- **small-file ratio floor** → **no floor**; safe degradation to "no count" (Sniff limitations).
+- **`maxFolderBytes` default** → moot until Part B is picked up (recorded as prerequisite #3).
+
+### Still open (only if/when Part B is revived)
+- Final `maxFolderBytes` default + whether to derive it from `maxFileSizeMB`.
+- Whether the size-cap branch (`stat.size > maxFileSizeMB`, @src/main.js:2486) should also be
+  surfaced with the same distinct "over-budget" sentinel for symmetry.
 
 ## Out of scope
 - Regex rewrite / `{1,256}` bound (ReDoS disproven, findings/001).
