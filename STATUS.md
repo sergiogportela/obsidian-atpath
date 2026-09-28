@@ -1,4 +1,11 @@
-Updated at 2026-06-04 20:14
+Updated at 2026-09-28 17:18
+
+Dependency maintenance: markdown-it 14.3.2 and linkify-it 5.0.2 installed and locked;
+npm audit reports zero vulnerabilities, all 80 unit tests pass, and main.js was
+rebuilt. No version tag, release or installation into an Obsidian vault was made.
+The README edit already present before maintenance was preserved.
+
+The following record is historical (2026-06-04), including its app/version observations.
 
 # AtPath — Status
 
