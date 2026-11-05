@@ -8331,19 +8331,7 @@ function formatLinkedTargetCount(t) {
 function f_formatFolderTokenCount(value) {
   return value?.overCap ? formatLinkedTargetCount({ overCap: value }) : formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped });
 }
-function f_bindReadingFolderCount(plugin, context, badge, path) {
-  const paint = () => {
-    const count = plugin.f_folderTokenCount(path);
-    const text = " (" + f_formatFolderTokenCount(count) + ")";
-    if (badge.textContent !== text) badge.textContent = text;
-    if (count?.skipped) badge.title = count.skipped + " files skipped. Token estimate from readable text.";
-  };
-  paint();
-  if (typeof context.addChild !== "function" || typeof MarkdownRenderChild !== "function") return;
-  const child = new MarkdownRenderChild(badge);
-  child.register(plugin._tokenIndex.subscribe(paint));
-  context.addChild(child);
-}
+var READING_TOKEN_TOOLTIP = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count.";
 function f_uniqueLinkedTokenTotal(targets) {
   const folders = targets.filter((target) => target.kind === "folder" && !target.overCap);
   return targets.reduce((total, target) => {
@@ -8701,12 +8689,19 @@ var AtPathSuggest = class extends EditorSuggest {
     }
   }
   selectSuggestion(value) {
-    const { editor, start, end, file } = this.context;
+    const context = this.context;
+    this.close();
+    if (!context) return;
+    const { editor, start, end, file } = context;
     try {
       const insertion = this.plugin.f_formatLinkedTarget(value.target, file.path);
       const tail = editor.getLine(end.line).slice(end.ch);
       const replaceEnd = tail.startsWith("]]") ? { ...end, ch: end.ch + 2 } : end;
-      editor.replaceRange(insertion + " ", start, replaceEnd);
+      const text = insertion + " ";
+      editor.transaction({
+        changes: [{ from: start, to: replaceEnd, text }],
+        selection: { from: { line: start.line, ch: start.ch + text.length } }
+      }, "input.autocomplete");
     } catch (error) {
       new Notice(error.message);
     }
@@ -9146,8 +9141,7 @@ function captureDragRefsFromExplorerDom(plugin, evt) {
   }
   return out;
 }
-function insertAtPathRefs(view, pos, refs, plugin) {
-  const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+function insertAtPathRefs(view, pos, refs, plugin, sourcePath) {
   const parts = [];
   for (const ref of refs) {
     if (!ref?.target) continue;
@@ -9167,19 +9161,18 @@ function insertAtPathRefs(view, pos, refs, plugin) {
 }
 function buildDragDropExtension(plugin) {
   return EditorView.domEventHandlers({
-    dragover(evt, _view) {
-      const refs = extractDraggedVaultPaths(
-        evt.dataTransfer,
-        plugin,
-        plugin.app.workspace.getActiveFile()?.path || ""
-      );
+    dragover(evt, view) {
+      const sourcePath = f_editorSourcePath(view, plugin);
+      if (!sourcePath) return false;
+      const refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
       if (!refs.length) return false;
       evt.preventDefault();
       if (evt.dataTransfer) evt.dataTransfer.dropEffect = "link";
       return true;
     },
     drop(evt, view) {
-      const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
+      const sourcePath = f_editorSourcePath(view, plugin);
+      if (!sourcePath) return false;
       let refs = extractDraggedVaultPaths(evt.dataTransfer, plugin, sourcePath);
       if (!refs.length) return false;
       if (refs.length > 50) {
@@ -9189,7 +9182,7 @@ function buildDragDropExtension(plugin) {
       evt.preventDefault();
       evt.stopPropagation();
       const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
-      insertAtPathRefs(view, dropPos != null ? dropPos : view.state.selection.main.head, refs, plugin);
+      insertAtPathRefs(view, dropPos ?? view.state.selection.main.head, refs, plugin, sourcePath);
       plugin._currentDragRefs = null;
       return true;
     }
@@ -9315,22 +9308,17 @@ function registerPostProcessor(plugin) {
       if (!f_managesRepositoryNavigation(destination, result) && !(result.kind === "ignored" && result.repository)) continue;
       link.addEventListener("click", (event) => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       link.addEventListener("contextmenu", (event) => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
-      if (result.kind === "ignored") continue;
-      link.classList.add("atpath-link");
-      link.title = result.reason || result.normalizedPath;
-      if (!plugin.settings.showTokenCounts) continue;
+      const nativeTitle = link.title;
       const badge = link.createSpan({ cls: "atpath-token-count" });
-      badge.title = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count.";
-      if (result.kind === "folder") f_bindReadingFolderCount(plugin, ctx, badge, result.normalizedPath);
-      else {
-        if (result.kind === "missing") badge.textContent = " (unavailable)";
-        void plugin.f_resolveLinkTargetAsync({ destination }, ctx.sourcePath).then(async (resolved) => {
-          if (resolved.kind !== "file") return;
-          const count = await plugin.getTokenCount(resolved.normalizedPath);
-          badge.textContent = count == null ? "" : " (" + formatTokens(count) + ")";
-          link.title = resolved.normalizedPath;
-        }).catch((error) => console.warn("AtPath could not count linked target", destination, error));
-      }
+      plugin.f_bindReadingTokenBadge(ctx, badge, result, {
+        resolve: () => plugin.f_resolveLinkTarget({ destination }, ctx.sourcePath),
+        probe: (target) => plugin.f_probeUnindexedTarget(target.vaultPath, target.repository),
+        onTarget: (target) => {
+          const managed = f_managesRepositoryNavigation(destination, target);
+          link.classList.toggle("atpath-link", managed);
+          link.title = managed ? target.reason || target.normalizedPath || nativeTitle : nativeTitle;
+        }
+      });
     }
     const internalLinks = el.querySelectorAll("a.internal-link");
     for (const link of internalLinks) {
@@ -9342,24 +9330,10 @@ function registerPostProcessor(plugin) {
         e.preventDefault();
         showAtPathMenu(plugin, e, vaultPath);
       });
-      if (plugin.settings.showTokenCounts) {
-        const tokenSpan = document.createElement("span");
-        tokenSpan.className = "atpath-token-count";
-        const cached = plugin.tokenCache.get(vaultPath);
-        if (cached) {
-          tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
-        } else {
-          plugin.getTokenCount(vaultPath).then(
-            (tokens) => {
-              if (tokens != null) {
-                tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
-              }
-            },
-            (err) => console.warn("[atpath] token count failed", err)
-          );
-        }
-        link.after(tokenSpan);
-      }
+      const tokenSpan = link.ownerDocument.createElement("span");
+      tokenSpan.className = "atpath-token-count";
+      link.after(tokenSpan);
+      plugin.f_bindReadingTokenBadge(ctx, tokenSpan, { kind: "file", normalizedPath: vaultPath });
     }
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
     const fileRe = /(?:^|(?<=[\s(]))@([\w\p{L}\p{M}./_-]+\.[\w]+|[\w\p{L}\p{M}./_-][\w\p{L}\p{M}./ _()&-]+?\.[\w]+)/gu;
@@ -9462,35 +9436,11 @@ function registerPostProcessor(plugin) {
           });
         }
         if (after) parent.insertBefore(document.createTextNode(after), textNode.nextSibling);
-        if (plugin.settings.showTokenCounts) {
-          const tokenSpan = document.createElement("span");
-          tokenSpan.className = "atpath-token-count";
-          if (kind === "folder") {
-            const resolved = plugin.core.resolveAtPathTarget(
-              { kind: "folder", vaultPath: capture },
-              ctx.sourcePath
-            );
-            if (resolved.kind === "folder") {
-              f_bindReadingFolderCount(plugin, ctx, tokenSpan, resolved.normalizedPath);
-            }
-          } else {
-            const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
-            const cached = plugin.tokenCache.get(vaultPath);
-            if (cached) {
-              tokenSpan.textContent = " (" + formatTokens(cached.tokens) + ")";
-            } else {
-              plugin.getTokenCount(vaultPath).then(
-                (tokens) => {
-                  if (tokens != null) {
-                    tokenSpan.textContent = " (" + formatTokens(tokens) + ")";
-                  }
-                },
-                (err) => console.warn("[atpath] token count failed", err)
-              );
-            }
-          }
-          parent.insertBefore(tokenSpan, textNode.nextSibling);
-        }
+        const target = kind === "folder" ? plugin.core.resolveAtPathTarget({ kind: "folder", vaultPath: capture }, ctx.sourcePath) : { kind: "file", normalizedPath: resolveAtPathFromSource(capture, ctx.sourcePath, plugin) };
+        const tokenSpan = link.ownerDocument.createElement("span");
+        tokenSpan.className = "atpath-token-count";
+        parent.insertBefore(tokenSpan, textNode.nextSibling);
+        plugin.f_bindReadingTokenBadge(ctx, tokenSpan, target);
         parent.insertBefore(link, textNode.nextSibling);
         textNode.textContent = before;
       }
@@ -10005,6 +9955,7 @@ var AtPathPlugin = class extends Plugin {
     this._unindexedTargets = /* @__PURE__ */ new Map();
     this._unindexedProbes = /* @__PURE__ */ new Map();
     this._linkedCountWatches = /* @__PURE__ */ new Map();
+    this._readingTokenRefreshes = /* @__PURE__ */ new Set();
     const vault = this.app.vault;
     const vaultKey = this.app.appId || vault.adapter.getBasePath?.() || vault.getName();
     this._tokenIndex = f_createTokenIndex({
@@ -10046,6 +9997,7 @@ var AtPathPlugin = class extends Plugin {
     this.register(() => {
       this._explorerTokenBadges?.dispose();
       void this._tokenIndex.dispose();
+      this._readingTokenRefreshes.clear();
       clearTimeout(this._refreshTimer);
       clearTimeout(this._statusBarTimeout);
     });
@@ -10302,6 +10254,68 @@ var AtPathPlugin = class extends Plugin {
     if (total.candidates > limit) return { overCap: true, fileCount: total.candidates, limit };
     if (total.pending || total.skipped) return { partial: Boolean(total.pending), skipped: total.skipped, tokens: total.tokens };
     return total.tokens;
+  }
+  f_bindReadingTokenBadge(context, badge, target, navigation) {
+    let active = true;
+    let generation = this._suggestVaultGen;
+    let requestedPath;
+    let probedPath;
+    navigation?.onTarget(target);
+    const paint = () => {
+      if (!active) return;
+      if (navigation && generation !== this._suggestVaultGen) {
+        generation = this._suggestVaultGen;
+        target = navigation.resolve();
+        navigation.onTarget(target);
+        requestedPath = void 0;
+        probedPath = void 0;
+      }
+      const hidden = !this.settings.showTokenCounts || target.kind === "ignored";
+      if (badge.hidden !== hidden) badge.hidden = hidden;
+      if (hidden) return;
+      const { kind, normalizedPath: path } = target;
+      let text = "";
+      let title = READING_TOKEN_TOOLTIP;
+      if (kind === "missing") {
+        text = " (unavailable)";
+        if (navigation && target.status === "missing" && target.vaultPath && probedPath !== target.vaultPath) {
+          const path2 = target.vaultPath;
+          probedPath = path2;
+          void navigation.probe(target).then(() => {
+            if (!active || target.vaultPath !== path2) return;
+            target = navigation.resolve();
+            navigation.onTarget(target);
+            paint();
+          }).catch((error) => console.warn("AtPath could not resolve Reading view count", error));
+        }
+      } else if (kind === "folder") {
+        const count = this.f_folderTokenCount(path);
+        text = " (" + f_formatFolderTokenCount(count) + ")";
+        if (count?.skipped) title = count.skipped + " files skipped. " + title;
+      } else if (kind === "file" && path != null) {
+        const snapshot = this._tokenIndex.get(path);
+        if (snapshot?.counted) text = " (" + formatTokens(snapshot.tokens) + ")";
+        else if (snapshot?.pending) {
+          text = " (\u2026)";
+          this._tokenIndex.prioritize(path);
+        } else if (!snapshot && requestedPath !== path) {
+          requestedPath = path;
+          void this.getTokenCount(path).then(paint).catch((error) => console.warn("AtPath could not count Reading view link", path, error));
+        }
+      }
+      if (badge.textContent !== text) badge.textContent = text;
+      if (badge.title !== title) badge.title = title;
+    };
+    const child = new MarkdownRenderChild(badge);
+    const unsubscribe = this._tokenIndex.subscribe(paint);
+    this._readingTokenRefreshes.add(paint);
+    child.register(() => {
+      active = false;
+      unsubscribe();
+      this._readingTokenRefreshes.delete(paint);
+    });
+    context.addChild(child);
+    paint();
   }
   scheduleTokenFetch(vaultPath, view) {
     if (!this.settings.showTokenCounts) return;
@@ -10855,6 +10869,7 @@ var AtPathPlugin = class extends Plugin {
     this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
     this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
     this.tokenCacheDirty = true;
+    for (const paint of this._readingTokenRefreshes) paint();
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) leaf.view.editor?.cm?.dispatch();
     this._debouncedUpdateStatusBar();
     if (this._nativeRepositoryLinks) void this._nativeRepositoryLinks.refresh().catch((error) => console.warn("AtPath could not refresh repository backlinks", error));
@@ -11738,13 +11753,12 @@ var AtPathPlugin = class extends Plugin {
     }
     this._explorerTokenBadges?.refresh();
     this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
-    this.tokenCacheDirty = true;
-    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (mdView && mdView.editor && mdView.editor.cm) {
-      try {
-        mdView.editor.cm.dispatch();
-      } catch (e) {
-      }
+    for (const paint of this._readingTokenRefreshes) paint();
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const editor = leaf.view.editor?.cm;
+      if (!editor) continue;
+      this.tokenCacheDirty = true;
+      editor.dispatch();
     }
     this.updateStatusBar();
   }

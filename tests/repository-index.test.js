@@ -107,7 +107,13 @@ function f_loadPlugin(isMobile = true) {
   const obsidian = require("obsidian");
   const originalLoad = Module._load;
   Module._load = function (id, ...rest) {
-    if (id === "obsidian") return { ...obsidian, Platform: { isMobile } };
+    if (id === "obsidian") return {
+      ...obsidian, Platform: { isMobile },
+      MarkdownRenderChild: class {
+        register(callback) { this.cleanup = callback; }
+        unload() { this.cleanup(); }
+      },
+    };
     if (id === "@codemirror/view") return {
       ViewPlugin: { define: (_plugin, options) => options },
       EditorView: { domEventHandlers: handlers => handlers },
@@ -127,6 +133,127 @@ function f_loadPlugin(isMobile = true) {
     Module._load = originalLoad;
   }
 }
+
+test("open Reading badges and all editor panes react to count changes and settings", async () => {
+  const AtPath = f_loadPlugin(false);
+  const { f_createTokenIndex } = require("../src/token-index");
+  const file = { path: "a/file.md", stat: { size: 4, mtime: 1 }, text: "1234" };
+  let reads = 0;
+  const index = f_createTokenIndex({
+    enabled: false,
+    getFiles: () => [file],
+    read: async file => { reads++; return file.text; },
+    isEligible: () => true,
+    looksBinary: () => false,
+  });
+  const plugin = new AtPath();
+  const dispatches = [0, 0];
+  const children = [];
+  const context = { addChild: child => children.push(child) };
+  const fileBadge = {};
+  const folderBadge = {};
+  plugin.settings = { showTokenCounts: false };
+  plugin._tokenIndex = index;
+  plugin._linkedCountWatches = new Map();
+  plugin._readingTokenRefreshes = new Set();
+  plugin.getTokenCount = () => index.request(file);
+  plugin.updateStatusBar = () => {};
+  plugin.app = { workspace: {
+    getLeavesOfType(type) {
+      assert.equal(type, "markdown");
+      return dispatches.map((_, pane) => ({ view: { editor: { cm: { dispatch: () => dispatches[pane]++ } } } }));
+    },
+  } };
+  try {
+    plugin.f_bindReadingTokenBadge(context, fileBadge, { kind: "file", normalizedPath: file.path });
+    plugin.f_bindReadingTokenBadge(context, folderBadge, { kind: "folder", normalizedPath: "a" });
+    assert.deepEqual([fileBadge.hidden, folderBadge.hidden, reads], [true, true, 0]);
+
+    async function f_waitForBadges(count) {
+      const expected = " (~" + count + ")";
+      const deadline = Date.now() + 1000;
+      while ((fileBadge.textContent !== expected || folderBadge.textContent !== expected) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.deepEqual([fileBadge.textContent, folderBadge.textContent], [expected, expected]);
+    }
+    plugin.settings.showTokenCounts = true;
+    plugin.onTokenSettingsChanged();
+    await f_waitForBadges(1);
+    assert.deepEqual([fileBadge.hidden, folderBadge.hidden, reads], [false, false, 1]);
+
+    file.text = "123456789012";
+    file.stat = { size: 12, mtime: 2 };
+    index.upsert(file);
+    await f_waitForBadges(3);
+    assert.equal(reads, 2);
+
+    plugin.settings.showTokenCounts = false;
+    plugin.onTokenSettingsChanged();
+    assert.deepEqual([fileBadge.hidden, folderBadge.hidden], [true, true]);
+    plugin.settings.showTokenCounts = true;
+    plugin.onTokenSettingsChanged();
+    await f_waitForBadges(3);
+    assert.deepEqual([fileBadge.hidden, folderBadge.hidden, reads], [false, false, 2]);
+    assert.deepEqual(dispatches, [3, 3]);
+
+    for (const child of children) child.unload();
+    assert.equal(plugin._readingTokenRefreshes.size, 0);
+  } finally {
+    await index.dispose();
+  }
+});
+
+test("Reading badges recover when the repository map becomes ready and recheck missing targets", async () => {
+  const AtPath = f_loadPlugin();
+  const plugin = new AtPath();
+  const { TFile } = require("obsidian");
+  const file = new TFile("a/target.md");
+  let exists = true;
+  let probes = 0;
+  let notify;
+  let child;
+  const badge = {};
+  plugin.settings = { showTokenCounts: true };
+  plugin.repositories = [];
+  plugin._unindexedTargets = new Map();
+  plugin._readingTokenRefreshes = new Set();
+  plugin._debouncedUpdateStatusBar = () => {};
+  plugin._tokenIndex = {
+    subscribe: callback => { notify = callback; return () => { notify = null; }; },
+    get: () => ({ counted: 1, tokens: 3 }),
+  };
+  plugin.app = {
+    vault: { getAbstractFileByPath: path => exists && path === file.path ? file : null },
+    workspace: { getLeavesOfType: () => [] },
+  };
+  const resolve = () => plugin.f_resolveLinkTarget({ destination: "/target.md" }, "a/note.md");
+  plugin.f_bindReadingTokenBadge({ addChild: value => { child = value; } }, badge, resolve(), {
+    resolve,
+    probe: async () => { probes++; },
+    onTarget: () => {},
+  });
+  assert.equal(badge.textContent, " (unavailable)");
+  plugin.repositories = [{ root: "a", identity: "owner/repo" }];
+  plugin.f_repositoryIndexChanged();
+  assert.equal(badge.textContent, " (~3)");
+
+  exists = false;
+  plugin._suggestVaultGen++;
+  notify();
+  assert.equal(badge.textContent, " (unavailable)");
+  await Promise.resolve();
+  notify();
+  notify();
+  assert.equal(probes, 1);
+
+  exists = true;
+  plugin._suggestVaultGen++;
+  notify();
+  assert.equal(badge.textContent, " (~3)");
+  child.unload();
+  assert.equal(notify, null);
+});
 
 test("opened task worktrees use their own checkout and invalid Git markers cannot fall back to the parent", async t => {
   const base = await mkdtemp(join(process.cwd(), ".repository-source-test-"));
@@ -234,18 +361,32 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
   plugin.repositories = [{ root: "checkout", identity: "org/repo" }];
   assert.equal(suggests[1], nativeSuggest);
   const suggest = suggests[0];
+  suggest.close = () => { suggest.context = null; };
   let text = "Before [[space]] after";
+  let cursor;
   const editor = {
     getValue: () => text,
     getLine: () => text,
     posToOffset: cursor => cursor.ch,
     replaceRange: (value, from, to) => { text = text.slice(0, from.ch) + value + text.slice(to.ch); },
+    transaction: ({ changes, selection }, origin) => {
+      assert.equal(suggest.context, null, "the chooser closes before editing");
+      assert.equal(origin, "input.autocomplete");
+      for (const change of changes) editor.replaceRange(change.text, change.from, change.to);
+      cursor = selection.from;
+    },
   };
   const context = suggest.onTrigger({ line: 0, ch: 14 }, editor, source);
   assert.equal(context.query, "space");
   suggest.context = { ...context, editor, file: source };
   suggest.selectSuggestion({ target });
-  assert.equal(text, "Before [space here.md](/space%20here.md)  after");
+  const insertion = "Before [space here.md](/space%20here.md) ";
+  assert.equal(text, insertion + " after");
+  assert.deepEqual(cursor, { line: 0, ch: insertion.length });
+  suggest.selectSuggestion({ target });
+  assert.equal(text, insertion + " after", "a second acceptance cannot replay the stale query");
+  editor.replaceRange("\n[[repo_b/target", cursor, cursor);
+  assert.equal(text, insertion + "\n[[repo_b/target after");
 
   text = "Before @space";
   assert.equal(suggest.onTrigger({ line: 0, ch: text.length }, editor, source), null);
@@ -280,6 +421,66 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
   assert.deepEqual(canonical.actions, ["prevent", "stop"]);
   await Promise.resolve();
   assert.deepEqual(opened, [{ destination: "/missing.md", kind: "missing", reason: "Local target is unavailable" }]);
+});
+
+test("registered drag and drop uses the destination editor's checkout in an inactive split", async t => {
+  const AtPath = f_loadPlugin();
+  const plugin = new AtPath();
+  const { TFile } = require("obsidian");
+  const active = new TFile("checkout-a/active.md");
+  const source = new TFile("checkout-b/note.md");
+  const target = new TFile("checkout-b/docs/space here.md");
+  const files = new Map([active, source, target].map(file => [file.path, file]));
+  const changes = [];
+  const view = { posAtCoords: () => 4, dispatch: transaction => changes.push(transaction) };
+  plugin.app = {
+    appId: "test",
+    vault: { adapter: {}, on() {}, getAbstractFileByPath: path => files.get(path) },
+    workspace: {
+      editorSuggest: { suggests: [] },
+      getActiveFile: () => active,
+      getLeavesOfType: () => [{ view: { file: source, editor: { cm: view } } }],
+      onLayoutReady() {},
+      on() {},
+    },
+  };
+  plugin.loadSettings = async () => { plugin.settings = {}; };
+  plugin.registerEditorSuggest = suggest => plugin.app.workspace.editorSuggest.suggests.push(suggest);
+  let handlers;
+  plugin.registerEditorExtension = extension => { if (extension.drop) handlers = extension; };
+  for (const name of ["register", "registerEvent", "registerDomEvent", "addCommand",
+    "addSettingTab", "registerMarkdownPostProcessor"]) plugin[name] = () => {};
+  const oldDocument = globalThis.document;
+  globalThis.document = {};
+  t.after(() => { globalThis.document = oldDocument; });
+  await plugin.onload();
+  plugin.repositories = [{ root: "checkout-a", identity: "org/a" }, { root: "checkout-b", identity: "org/b" }];
+
+  const f_event = file => ({
+    dataTransfer: {
+      getData: mime => mime === "application/obsidian-file" ? JSON.stringify({ path: file.path }) : "",
+    },
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.propagationStopped = true; },
+  });
+  const hover = f_event(target);
+  assert.equal(handlers.dragover(hover, view), true);
+  assert.equal(hover.dataTransfer.dropEffect, "link");
+  assert.equal(hover.defaultPrevented, true);
+
+  const drop = f_event(target);
+  assert.equal(handlers.drop(drop, view), true);
+  assert.equal(drop.propagationStopped, true);
+  const expected = "[docs/space here.md](/docs/space%20here.md) ";
+  assert.deepEqual(changes, [{
+    changes: { from: 4, to: 4, insert: expected },
+    selection: { anchor: 4 + expected.length },
+    userEvent: "input.drop",
+  }]);
+
+  assert.equal(handlers.dragover(f_event(source), view), false);
+  assert.equal(handlers.drop(f_event(source), view), false);
+  assert.equal(changes.length, 1);
 });
 
 test("canonical linked copy and publishing collection trust destination and deduplicate descendants", async t => {
