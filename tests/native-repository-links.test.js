@@ -98,6 +98,9 @@ test("projects source-specific graph edges and positioned backlinks without modi
   assert.deepEqual(metadataCache.resolvedLinks[source.path], { [project.path]: 1, [nested.path]: 1, [root.path]: 1 });
   assert.deepEqual(metadataCache.resolvedLinks[twin.path], { [nested.path]: 2, [root.path]: 1 });
   assert.deepEqual(base.links.map(({ link }) => link), ["/AGENTS.md", "AGENTS.md"]);
+  assert.deepEqual(metadataCache.getCache(source.path).links.map(({ link }) => link), [
+    "/AGENTS.md", "https://github.com/company/nested/blob/main/AGENTS.md", "AGENTS.md",
+  ]);
   const refs = [];
   metadataCache.iterateAllRefs((path, reference) => {
     if (metadataCache.getFirstLinkpathDest(reference.link, path) === nested) refs.push([path, reference]);
@@ -113,6 +116,24 @@ test("projects source-specific graph edges and positioned backlinks without modi
   assert.deepEqual(metadataCache.resolvedLinks[source.path], { [root.path]: 2 });
 });
 
+test("keeps a native wikilink with the same destination text authoritative", async () => {
+  const fixture = f_fixture();
+  const { base, metadataCache, nested, project, root, source } = fixture;
+  const original = base.links[0];
+  base.links.push({ ...original, position: { start: { offset: 100 }, end: { offset: 112 } } });
+  const bridge = f_installNativeRepositoryLinks(fixture);
+  try {
+    await bridge.refresh();
+    assert.equal(metadataCache.getFirstLinkpathDest("/AGENTS.md", source.path), root);
+    assert.deepEqual(metadataCache.resolvedLinks[source.path], { [project.path]: 1, [nested.path]: 1, [root.path]: 2 });
+    const refs = metadataCache.getCache(source.path).links;
+    assert.match(refs[0].link, /atpath:/);
+    assert.equal(refs.at(-1).link, "/AGENTS.md");
+  } finally {
+    bridge.unload();
+  }
+});
+
 test("reprojects when a target goes missing, the source moves, or the note is edited", async () => {
   const fixture = f_fixture();
   const { caches, files, metadataCache, nested, project, root, source, vault } = fixture;
@@ -123,6 +144,7 @@ test("reprojects when a target goes missing, the source moves, or the note is ed
   vault.trigger("delete", nested);
   await Promise.resolve();
   assert.deepEqual(metadataCache.resolvedLinks[source.path], { [project.path]: 1, [root.path]: 1 });
+  assert.equal(metadataCache.getFirstLinkpathDest("/AGENTS.md", fixture.twin.path), null);
 
   const oldPath = source.path;
   source.path = "project/nested/moved.md";

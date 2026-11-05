@@ -1,4 +1,4 @@
-// obsidian-atpath — Autocomplete and navigate @path/to/file references
+// obsidian-atpath — Author repository Markdown links and navigate local files.
 // Uses Obsidian API + CodeMirror 6.
 
 const { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
@@ -192,7 +192,7 @@ function formatLinkedTargetCount(t) {
   if (!t) return "0";
   if (t.kind === "missing") return "Unavailable";
   if (t.pending) return (t.tokens ? formatTokens(t.tokens) + "+" : "…") + (t.skipped ? " *" : "");
-  if (t.overCap) return "> " + t.overCap.fileCount + " files";
+  if (t.overCap) return "> " + t.overCap.limit + " files";
   return formatTokens(t.tokens || 0) + (t.skipped ? " *" : "");
 }
 
@@ -218,7 +218,7 @@ function f_bindReadingFolderCount(plugin, context, badge, path) {
 function f_uniqueLinkedTokenTotal(targets) {
   const folders = targets.filter(target => target.kind === "folder" && !target.overCap);
   return targets.reduce((total, target) => {
-    if (folders.some(folder => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
+    if (!target.localOnly && folders.some(folder => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
     return total + (target.tokens || 0);
   }, 0);
 }
@@ -521,10 +521,12 @@ class AtPathSuggest extends EditorSuggest {
     const line = editor.getLine(cursor.line);
     const before = line.slice(0, cursor.ch);
     const start = before.lastIndexOf("[[");
-    if (start < 0 || /[\[\]]/.test(before.slice(start + 2))
+    if (start < 0) return null;
+    const query = before.slice(start + 2);
+    if (/[\[\]#^|]/.test(query)
       || before[start - 1] === "!" || /(^|[^\\])(?:\\\\)*\\$/.test(before.slice(0, start))) return null;
     if (isInExcludedRange(editor.posToOffset(cursor), buildExcludedRanges(editor.getValue()))) return null;
-    return { start: { line: cursor.line, ch: start }, end: cursor, query: before.slice(start + 2) };
+    return { start: { line: cursor.line, ch: start }, end: cursor, query };
   }
 
   getSuggestions(context) {
@@ -1588,7 +1590,7 @@ class AtPathSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Max file size (MB)")
-      .setDesc("Skip token counting for files larger than this.")
+      .setDesc("Skip larger linked files when counting, copying or publishing.")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.maxFileSizeMB)).onChange(async (value) => {
           const num = parseFloat(value);
@@ -2566,7 +2568,7 @@ class AtPathPlugin extends Plugin {
 
   f_linkedCountSignature(path, folder) {
     const count = this._tokenIndex.get(path, folder);
-    return count ? [count.tokens, count.pending, count.skipped, count.counted].join(":") : "";
+    return count ? [count.tokens, count.pending, count.skipped, count.counted, count.candidates].join(":") : "";
   }
 
   f_watchLinkedCount(path, folder) {
@@ -2586,7 +2588,7 @@ class AtPathPlugin extends Plugin {
     this.f_watchLinkedCount(path, true);
     const total = this._tokenIndex.get(path, true);
     const limit = this.settings.maxFolderFiles || 500;
-    if (total.counted + total.pending > limit) return { overCap: true, fileCount: total.counted + total.pending };
+    if (total.candidates > limit) return { overCap: true, fileCount: total.candidates, limit };
     if (total.pending || total.skipped) return { partial: Boolean(total.pending), skipped: total.skipped, tokens: total.tokens };
     return total.tokens;
   }
@@ -2709,7 +2711,7 @@ class AtPathPlugin extends Plugin {
       const tokens = await this.getTokenCount(normalizedPath);
       if (gen !== this._statusBarGen) return;
       if (tokens != null) {
-        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens });
+        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens, localOnly: resolved.target?.localOnly });
       }
     }
 
@@ -3142,7 +3144,7 @@ class AtPathPlugin extends Plugin {
           const item = pending.pop();
           if (item instanceof TFolder) {
             for (let index = item.children.length - 1; index >= 0; index--) pending.push(item.children[index]);
-          } else if (item instanceof TFile && !includedFiles.has(item.path)) {
+          } else if (item instanceof TFile) {
             if (this.f_eligibleLinkedFile(item)) files.push(item);
             else excluded++;
           }
@@ -3530,7 +3532,7 @@ class AtPathPlugin extends Plugin {
             console.warn("AtPath could not update repository link", mdFile.path, ref.destination, error);
             continue;
           }
-          const suffix = ref.destination.match(/\?[^#]*|#.*$/)?.[0] || "";
+          const suffix = ref.destination.match(/[?#].*$/)?.[0] || "";
           if (suffix) replacement = replacement.slice(0, -1) + suffix + ")";
           output = output.slice(0, ref.start) + replacement + output.slice(ref.end);
         }
@@ -3717,7 +3719,7 @@ class AtPathPlugin extends Plugin {
       await this.saveSettings();
     }
 
-    this.trayBarEl.setText("...");
+    this.trayBarEl?.setText("...");
 
     try {
       const atPathSlugs = new Map();
@@ -3877,7 +3879,7 @@ class AtPathPlugin extends Plugin {
           isPrivate: true,
           envVars,
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg),
+          onProgress: (msg) => this.trayBarEl?.setText(msg),
         });
 
         // Save page state
@@ -3896,7 +3898,7 @@ class AtPathPlugin extends Plugin {
         deployFiles.unshift({ path: "index.html", content: mainHtml });
         result = await deployToVercel(token, noteTitle, deployFiles, {
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg),
+          onProgress: (msg) => this.trayBarEl?.setText(msg),
         });
 
         this.settings.publishedPages[notePath] = {
@@ -3911,7 +3913,7 @@ class AtPathPlugin extends Plugin {
         await this.saveSettings();
       }
 
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
 
       const linkedCount = atPathFiles.length + fileProtoFiles.length;
       const summary = "Deployed \"" + noteTitle + "\"" + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "")
@@ -3928,7 +3930,7 @@ class AtPathPlugin extends Plugin {
 
       new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
@@ -3950,7 +3952,7 @@ class AtPathPlugin extends Plugin {
       await this.saveSettings();
     }
 
-    this.trayBarEl.setText("...");
+    this.trayBarEl?.setText("...");
 
     try {
       const entryHtml = await this.app.vault.cachedRead(htmlFile);
@@ -4024,12 +4026,12 @@ class AtPathPlugin extends Plugin {
           isPrivate: true,
           envVars: { CLERK_SECRET_KEY: this.settings.clerkSecretKey },
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg),
+          onProgress: (msg) => this.trayBarEl?.setText(msg),
         });
       } else {
         result = await deployToVercel(token, siteTitle, deployFiles, {
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg),
+          onProgress: (msg) => this.trayBarEl?.setText(msg),
         });
       }
 
@@ -4046,7 +4048,7 @@ class AtPathPlugin extends Plugin {
       });
       await this.saveSettings();
 
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
 
       const modeLabel = publishScope === HTML_APP_SCOPE_FOLDER ? "folder app" : "single HTML file";
       const summary = "Deployed \"" + siteTitle + "\" as a " + modeLabel
@@ -4064,7 +4066,7 @@ class AtPathPlugin extends Plugin {
 
       new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
@@ -4080,7 +4082,7 @@ class AtPathPlugin extends Plugin {
       return;
     }
 
-    plugin.trayBarEl.setText("...");
+    plugin.trayBarEl?.setText("...");
 
     try {
       const placeholderHtml = buildUnpublishedPage(title, plugin.settings.siteIconDataUrl);
@@ -4095,10 +4097,10 @@ class AtPathPlugin extends Plugin {
       });
       await plugin.saveSettings();
 
-      plugin.trayBarEl.setText("@Path");
+      plugin.trayBarEl?.setText("@Path");
       new Notice("Unpublished \"" + title + "\". You can republish at any time.");
     } catch (e) {
-      plugin.trayBarEl.setText("@Path");
+      plugin.trayBarEl?.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
     }
   }

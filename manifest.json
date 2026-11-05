@@ -1,9 +1,9 @@
 {
   "id": "atpath",
   "name": "AtPath",
-  "version": "1.8.4",
-  "minAppVersion": "0.15.0",
-  "description": "Autocomplete and navigate @path/to/file references.",
+  "version": "1.9.0",
+  "minAppVersion": "1.15.0",
+  "description": "Author repository Markdown links, open local files, and estimate context sizes.",
   "author": "sergio",
   "authorUrl": "https://github.com/sergiogportela",
   "isDesktopOnly": false

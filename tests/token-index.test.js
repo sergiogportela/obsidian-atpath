@@ -40,6 +40,7 @@ test("folder totals distinguish pending, skipped and estimated files", async () 
     const inProgress = index.get("top", true);
     assert.equal(inProgress.tokens, 3);
     assert.ok(inProgress.pending > 0);
+    assert.equal(inProgress.candidates, 3);
     const pendingBadge = f_describeTokenBadge(inProgress, String);
     assert.equal(pendingBadge.text, "~3 …");
     assert.match(pendingBadge.title, /still pending/);
@@ -47,10 +48,27 @@ test("folder totals distinguish pending, skipped and estimated files", async () 
     assert.equal(await index.request(unicode), 2);
     assert.equal(await index.request(binary), null);
     assert.equal(await index.request(oversized), null);
-    assert.deepEqual(index.get("top", true), { tokens: 5, pending: 0, skipped: 2, counted: 2 });
-    assert.deepEqual(index.get("top/deep", true), { tokens: 2, pending: 0, skipped: 1, counted: 1 });
+    assert.deepEqual(index.get("top", true), { tokens: 5, pending: 0, skipped: 2, counted: 2, candidates: 3 });
+    assert.deepEqual(index.get("top/deep", true), { tokens: 2, pending: 0, skipped: 1, counted: 1, candidates: 2 });
     assert.deepEqual(index.get("/", true), index.get("top", true));
     assert.match(f_describeTokenBadge(index.get("/", true), String).title, /2 files skipped/);
+  } finally {
+    await index.dispose();
+  }
+});
+
+test("explicit unindexed targets have direct estimates and no folder contribution", async () => {
+  const indexed = f_file("folder/native.md", "abcd");
+  const explicit = { ...f_file("folder/unindexed.md", "abcdefgh"), localOnly: true };
+  const index = f_index([indexed, explicit]);
+  try {
+    await index.start();
+    assert.equal(await index.request(indexed), 1);
+    assert.equal(await index.request(explicit), 2);
+    assert.deepEqual(index.get("folder", true), {
+      tokens: 1, pending: 0, skipped: 0, counted: 1, candidates: 1,
+    });
+    assert.deepEqual(index.get(explicit.path), { tokens: 2, pending: 0, skipped: 0, counted: 1 });
   } finally {
     await index.dispose();
   }
@@ -123,8 +141,8 @@ test("a priority link overtakes background work and stale reads cannot revive de
     assert.equal(reads[1], "linked.md");
     assert.equal(await index.request(slow), 3);
     assert.equal(index.get("old/slow.md"), null);
-    assert.deepEqual(index.get("new", true), { tokens: 3, pending: 0, skipped: 0, counted: 1 });
-    assert.deepEqual(index.get("old", true), { tokens: 0, pending: 0, skipped: 0, counted: 0 });
+    assert.deepEqual(index.get("new", true), { tokens: 3, pending: 0, skipped: 0, counted: 1, candidates: 1 });
+    assert.deepEqual(index.get("old", true), { tokens: 0, pending: 0, skipped: 0, counted: 0, candidates: 0 });
   } finally {
     release.resolve("");
     await index.dispose();
@@ -142,7 +160,7 @@ test("folder-first native rename events wait for descendant paths to update", as
     file.path = "new/leaf.md";
     index.rename(file, "old/leaf.md");
     assert.equal(await index.request(file), 2);
-    assert.deepEqual(index.get("new", true), { tokens: 2, pending: 0, skipped: 0, counted: 1 });
+    assert.deepEqual(index.get("new", true), { tokens: 2, pending: 0, skipped: 0, counted: 1, candidates: 1 });
   } finally {
     await index.dispose();
   }

@@ -9,6 +9,7 @@ var require_token_index = __commonJS({
     "use strict";
     var ESTIMATOR_VERSION = 1;
     var EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
+    var EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
     function f_estimateTokens2(text) {
       return Math.ceil(text.length / 4);
     }
@@ -48,11 +49,13 @@ var require_token_index = __commonJS({
         }, 40);
       }
       function f_adjust(entry, direction) {
+        if (entry.file.localOnly) return;
         let folder = entry.path;
         do {
           folder = folder.slice(0, Math.max(0, folder.lastIndexOf("/")));
-          const total = folders.get(folder) ?? { ...EMPTY };
+          const total = folders.get(folder) ?? { ...EMPTY_FOLDER };
           total[entry.state] += direction;
+          if (entry.eligible) total.candidates += direction;
           total.tokens += direction * (entry.tokens ?? 0);
           if (total.pending || total.counted || total.skipped) folders.set(folder, total);
           else folders.delete(folder);
@@ -260,7 +263,7 @@ var require_token_index = __commonJS({
         },
         get(path, isFolder = false) {
           if (isFolder) {
-            const total = folders.get(path === "/" ? "" : path) ?? EMPTY;
+            const total = folders.get(path === "/" ? "" : path) ?? EMPTY_FOLDER;
             return { ...total, pending: total.pending + (inventoried ? 0 : 1) };
           }
           const entry = entries.get(path);
@@ -469,9 +472,9 @@ var require_token_cache_storage = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/mdurl/build/index.cjs.js
+// node_modules/mdurl/build/index.cjs.js
 var require_index_cjs = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/mdurl/build/index.cjs.js"(exports2) {
+  "node_modules/mdurl/build/index.cjs.js"(exports2) {
     "use strict";
     var decodeCache = {};
     function getDecodeCache(exclude) {
@@ -816,9 +819,9 @@ var require_index_cjs = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/uc.micro/build/index.cjs.js
+// node_modules/uc.micro/build/index.cjs.js
 var require_index_cjs2 = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/uc.micro/build/index.cjs.js"(exports2) {
+  "node_modules/uc.micro/build/index.cjs.js"(exports2) {
     "use strict";
     var regex$5 = /[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
     var regex$4 = /[\0-\x1F\x7F-\x9F]/;
@@ -835,9 +838,9 @@ var require_index_cjs2 = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-html.js
+// node_modules/entities/lib/generated/decode-data-html.js
 var require_decode_data_html = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-html.js"(exports2) {
+  "node_modules/entities/lib/generated/decode-data-html.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.default = new Uint16Array(
@@ -849,9 +852,9 @@ var require_decode_data_html = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-xml.js
+// node_modules/entities/lib/generated/decode-data-xml.js
 var require_decode_data_xml = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-xml.js"(exports2) {
+  "node_modules/entities/lib/generated/decode-data-xml.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.default = new Uint16Array(
@@ -863,9 +866,9 @@ var require_decode_data_xml = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode_codepoint.js
+// node_modules/entities/lib/decode_codepoint.js
 var require_decode_codepoint = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode_codepoint.js"(exports2) {
+  "node_modules/entities/lib/decode_codepoint.js"(exports2) {
     "use strict";
     var _a;
     Object.defineProperty(exports2, "__esModule", { value: true });
@@ -927,9 +930,9 @@ var require_decode_codepoint = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode.js
+// node_modules/entities/lib/decode.js
 var require_decode = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode.js"(exports2) {
+  "node_modules/entities/lib/decode.js"(exports2) {
     "use strict";
     var __createBinding = exports2 && exports2.__createBinding || (Object.create ? (function(o, m, k, k2) {
       if (k2 === void 0) k2 = k;
@@ -1286,9 +1289,9 @@ var require_decode = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/encode-html.js
+// node_modules/entities/lib/generated/encode-html.js
 var require_encode_html = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/encode-html.js"(exports2) {
+  "node_modules/entities/lib/generated/encode-html.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     function restoreDiff(arr) {
@@ -1301,9 +1304,9 @@ var require_encode_html = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/escape.js
+// node_modules/entities/lib/escape.js
 var require_escape = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/escape.js"(exports2) {
+  "node_modules/entities/lib/escape.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.escapeText = exports2.escapeAttribute = exports2.escapeUTF8 = exports2.escape = exports2.encodeXML = exports2.getCodePoint = exports2.xmlReplacer = void 0;
@@ -1374,9 +1377,9 @@ var require_escape = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/encode.js
+// node_modules/entities/lib/encode.js
 var require_encode = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/encode.js"(exports2) {
+  "node_modules/entities/lib/encode.js"(exports2) {
     "use strict";
     var __importDefault = exports2 && exports2.__importDefault || function(mod) {
       return mod && mod.__esModule ? mod : { "default": mod };
@@ -1429,9 +1432,9 @@ var require_encode = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/index.js
+// node_modules/entities/lib/index.js
 var require_lib = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/index.js"(exports2) {
+  "node_modules/entities/lib/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.decodeXMLStrict = exports2.decodeHTML5Strict = exports2.decodeHTML4Strict = exports2.decodeHTML5 = exports2.decodeHTML4 = exports2.decodeHTMLAttribute = exports2.decodeHTMLStrict = exports2.decodeHTML = exports2.decodeXML = exports2.DecodingMode = exports2.EntityDecoder = exports2.encodeHTML5 = exports2.encodeHTML4 = exports2.encodeNonAsciiHTML = exports2.encodeHTML = exports2.escapeText = exports2.escapeAttribute = exports2.escapeUTF8 = exports2.escape = exports2.encodeXML = exports2.encode = exports2.decodeStrict = exports2.decode = exports2.EncodingMode = exports2.EntityLevel = void 0;
@@ -1559,9 +1562,9 @@ var require_lib = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/linkify-it/build/index.cjs.js
+// node_modules/linkify-it/build/index.cjs.js
 var require_index_cjs3 = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/linkify-it/build/index.cjs.js"(exports2, module2) {
+  "node_modules/linkify-it/build/index.cjs.js"(exports2, module2) {
     "use strict";
     var uc_micro = require_index_cjs2();
     function reFactory(opts) {
@@ -1992,9 +1995,9 @@ var require_index_cjs3 = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/punycode.js/punycode.js
+// node_modules/punycode.js/punycode.js
 var require_punycode = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/punycode.js/punycode.js"(exports2, module2) {
+  "node_modules/punycode.js/punycode.js"(exports2, module2) {
     "use strict";
     var maxInt = 2147483647;
     var base = 36;
@@ -2231,9 +2234,9 @@ var require_punycode = __commonJS({
   }
 });
 
-// ../../../../../../../obsidian_plugin_atpath/node_modules/markdown-it/dist/index.cjs.js
+// node_modules/markdown-it/dist/index.cjs.js
 var require_index_cjs4 = __commonJS({
-  "../../../../../../../obsidian_plugin_atpath/node_modules/markdown-it/dist/index.cjs.js"(exports2, module2) {
+  "node_modules/markdown-it/dist/index.cjs.js"(exports2, module2) {
     var __create = Object.create;
     var __defProp = Object.defineProperty;
     var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5602,14 +5605,14 @@ var require_native_repository_links = __commonJS({
           return entry && entry.base === base && entry.overlay ? entry.overlay : base;
         },
         function f_getFirstLinkpathDest(linkPath, sourcePath) {
-          const target = typeof linkPath === "string" && linkPath.startsWith("\0atpath:") && f_currentEntry(sourcePath)?.targets.get(linkPath);
-          return target ? vault.getFileByPath(target) : getFirstLinkpathDest.call(this, linkPath, sourcePath);
+          const target = entries.get(sourcePath)?.targets.get(linkPath);
+          if (target !== void 0 && f_currentEntry(sourcePath)) return target ? vault.getFileByPath(target) : null;
+          return getFirstLinkpathDest.call(this, linkPath, sourcePath);
         },
         function f_iterateAllRefs(visit) {
           const stopped = /* @__PURE__ */ new Set();
           const result = iterateAllRefs.call(this, (sourcePath, reference) => {
-            const start = reference.position?.start.offset;
-            if (entries.get(sourcePath)?.removed.has(start) && f_currentEntry(sourcePath)) return;
+            if (entries.get(sourcePath)?.removedReferences.has(reference) && f_currentEntry(sourcePath)) return;
             if (visit(sourcePath, reference) === true) {
               stopped.add(sourcePath);
               return true;
@@ -5630,25 +5633,48 @@ var require_native_repository_links = __commonJS({
       function f_project(sourcePath, entry) {
         const targets = /* @__PURE__ */ new Map();
         const removed = /* @__PURE__ */ new Set();
-        const references = [];
-        for (const { destination, label, position, original } of entry.links) {
+        const managed = [];
+        for (const reference of entry.links) {
+          const { destination, position } = reference;
           const result = resolve(destination, sourcePath);
           if (!result) continue;
-          const { offset } = position.start;
-          removed.add(offset);
-          if (!result.file) continue;
-          const link = "\0atpath:" + offset;
-          targets.set(link, result.file.path);
-          references.push({ link, original, displayText: label, position });
+          removed.add(position.start.offset);
+          managed.push({ reference, path: result.file?.path ?? null });
+        }
+        if (!managed.length && !entry.removed.size) return false;
+        const removedReferences = /* @__PURE__ */ new Set();
+        const ordinaryLinks = (entry.base.links ?? []).filter((reference) => {
+          if (!removed.has(reference.position?.start.offset)) return true;
+          removedReferences.add(reference);
+          return false;
+        });
+        const ordinaryPaths = new Set([...ordinaryLinks, ...entry.base.embeds ?? [], ...entry.base.frontmatterLinks ?? []].map(({ link }) => link.split("#", 1)[0]));
+        const references = [];
+        const visibleReferences = [];
+        for (const { reference: { destination, label, position, original }, path } of managed) {
+          const [linkPath] = destination.split("#", 1);
+          const opaque = "\0atpath:" + position.start.offset;
+          const displayPath = ordinaryPaths.has(linkPath) ? opaque : linkPath;
+          targets.set(displayPath, path);
+          if (!path) continue;
+          targets.set(opaque, path);
+          references.push({ link: opaque, original, displayText: label, position });
+          visibleReferences.push({
+            link: displayPath + destination.slice(linkPath.length),
+            original,
+            displayText: label,
+            position
+          });
         }
         const changed = removed.size !== entry.removed.size || [...removed].some((offset) => !entry.removed.has(offset)) || targets.size !== entry.targets.size || [...targets].some(([key, path]) => entry.targets.get(key) !== path);
         if (!changed) return false;
         entry.targets = targets;
         entry.removed = removed;
+        entry.removedReferences = removedReferences;
         entry.references = references;
         entry.overlay = removed.size ? {
           ...entry.base,
-          links: [...(entry.base.links ?? []).filter((reference) => !removed.has(reference.position?.start.offset)), ...references].sort((left, right) => left.position.start.offset - right.position.start.offset)
+          links: [...ordinaryLinks, ...visibleReferences].sort((left, right) => left.position.start.offset - right.position.start.offset)
         } : null;
         return true;
       }
@@ -5660,7 +5686,15 @@ var require_native_repository_links = __commonJS({
           ...link,
           original: text.slice(link.position.start.offset, link.position.end.offset)
         }));
-        const entry = { base, links, targets: /* @__PURE__ */ new Map(), removed: /* @__PURE__ */ new Set(), references: [], overlay: null };
+        const entry = {
+          base,
+          links,
+          targets: /* @__PURE__ */ new Map(),
+          removed: /* @__PURE__ */ new Set(),
+          removedReferences: /* @__PURE__ */ new Set(),
+          references: [],
+          overlay: null
+        };
         entries.set(sourcePath, entry);
         if (f_project(sourcePath, entry) || previous?.overlay) metadataCache.queueFileForLinkResolution(file);
       }
@@ -8061,7 +8095,7 @@ function formatLinkedTargetCount(t) {
   if (!t) return "0";
   if (t.kind === "missing") return "Unavailable";
   if (t.pending) return (t.tokens ? formatTokens(t.tokens) + "+" : "\u2026") + (t.skipped ? " *" : "");
-  if (t.overCap) return "> " + t.overCap.fileCount + " files";
+  if (t.overCap) return "> " + t.overCap.limit + " files";
   return formatTokens(t.tokens || 0) + (t.skipped ? " *" : "");
 }
 function f_formatFolderTokenCount(value) {
@@ -8083,7 +8117,7 @@ function f_bindReadingFolderCount(plugin, context, badge, path) {
 function f_uniqueLinkedTokenTotal(targets) {
   const folders = targets.filter((target) => target.kind === "folder" && !target.overCap);
   return targets.reduce((total, target) => {
-    if (folders.some((folder) => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
+    if (!target.localOnly && folders.some((folder) => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
     return total + (target.tokens || 0);
   }, 0);
 }
@@ -8332,9 +8366,11 @@ var AtPathSuggest = class extends EditorSuggest {
     const line = editor.getLine(cursor.line);
     const before = line.slice(0, cursor.ch);
     const start = before.lastIndexOf("[[");
-    if (start < 0 || /[\[\]]/.test(before.slice(start + 2)) || before[start - 1] === "!" || /(^|[^\\])(?:\\\\)*\\$/.test(before.slice(0, start))) return null;
+    if (start < 0) return null;
+    const query = before.slice(start + 2);
+    if (/[\[\]#^|]/.test(query) || before[start - 1] === "!" || /(^|[^\\])(?:\\\\)*\\$/.test(before.slice(0, start))) return null;
     if (isInExcludedRange(editor.posToOffset(cursor), buildExcludedRanges(editor.getValue()))) return null;
-    return { start: { line: cursor.line, ch: start }, end: cursor, query: before.slice(start + 2) };
+    return { start: { line: cursor.line, ch: start }, end: cursor, query };
   }
   getSuggestions(context) {
     if (this._suggestDebounceTimer) clearTimeout(this._suggestDebounceTimer);
@@ -9244,7 +9280,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
         this.plugin.onTokenSettingsChanged();
       })
     );
-    new Setting(containerEl).setName("Max file size (MB)").setDesc("Skip token counting for files larger than this.").addText(
+    new Setting(containerEl).setName("Max file size (MB)").setDesc("Skip larger linked files when counting, copying or publishing.").addText(
       (text) => text.setValue(String(this.plugin.settings.maxFileSizeMB)).onChange(async (value) => {
         const num = parseFloat(value);
         if (!isNaN(num) && num > 0) {
@@ -10007,7 +10043,7 @@ var AtPathPlugin = class extends Plugin {
   }
   f_linkedCountSignature(path, folder) {
     const count = this._tokenIndex.get(path, folder);
-    return count ? [count.tokens, count.pending, count.skipped, count.counted].join(":") : "";
+    return count ? [count.tokens, count.pending, count.skipped, count.counted, count.candidates].join(":") : "";
   }
   f_watchLinkedCount(path, folder) {
     const key = (folder ? "folder:" : "file:") + path;
@@ -10024,7 +10060,7 @@ var AtPathPlugin = class extends Plugin {
     this.f_watchLinkedCount(path, true);
     const total = this._tokenIndex.get(path, true);
     const limit = this.settings.maxFolderFiles || 500;
-    if (total.counted + total.pending > limit) return { overCap: true, fileCount: total.counted + total.pending };
+    if (total.candidates > limit) return { overCap: true, fileCount: total.candidates, limit };
     if (total.pending || total.skipped) return { partial: Boolean(total.pending), skipped: total.skipped, tokens: total.tokens };
     return total.tokens;
   }
@@ -10134,7 +10170,7 @@ var AtPathPlugin = class extends Plugin {
       const tokens = await this.getTokenCount(normalizedPath);
       if (gen !== this._statusBarGen) return;
       if (tokens != null) {
-        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens });
+        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens, localOnly: resolved.target?.localOnly });
       }
     }
     linkedTotal = f_uniqueLinkedTokenTotal(linkedTargets);
@@ -10494,7 +10530,7 @@ var AtPathPlugin = class extends Plugin {
           const item = pending.pop();
           if (item instanceof TFolder) {
             for (let index = item.children.length - 1; index >= 0; index--) pending.push(item.children[index]);
-          } else if (item instanceof TFile && !includedFiles.has(item.path)) {
+          } else if (item instanceof TFile) {
             if (this.f_eligibleLinkedFile(item)) files.push(item);
             else excluded++;
           }
@@ -10858,7 +10894,7 @@ var AtPathPlugin = class extends Plugin {
             console.warn("AtPath could not update repository link", mdFile.path, ref.destination, error);
             continue;
           }
-          const suffix = ref.destination.match(/\?[^#]*|#.*$/)?.[0] || "";
+          const suffix = ref.destination.match(/[?#].*$/)?.[0] || "";
           if (suffix) replacement = replacement.slice(0, -1) + suffix + ")";
           output = output.slice(0, ref.start) + replacement + output.slice(ref.end);
         }
@@ -11025,7 +11061,7 @@ var AtPathPlugin = class extends Plugin {
       this.settings.vercelToken = token;
       await this.saveSettings();
     }
-    this.trayBarEl.setText("...");
+    this.trayBarEl?.setText("...");
     try {
       const atPathSlugs = /* @__PURE__ */ new Map();
       const slugsByPath = /* @__PURE__ */ new Map();
@@ -11159,7 +11195,7 @@ var AtPathPlugin = class extends Plugin {
           isPrivate: true,
           envVars,
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg)
+          onProgress: (msg) => this.trayBarEl?.setText(msg)
         });
         this.settings.publishedPages[notePath] = {
           ...pageState,
@@ -11175,7 +11211,7 @@ var AtPathPlugin = class extends Plugin {
         deployFiles.unshift({ path: "index.html", content: mainHtml });
         result = await deployToVercel(token, noteTitle, deployFiles, {
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg)
+          onProgress: (msg) => this.trayBarEl?.setText(msg)
         });
         this.settings.publishedPages[notePath] = {
           ...pageState,
@@ -11188,7 +11224,7 @@ var AtPathPlugin = class extends Plugin {
         };
         await this.saveSettings();
       }
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       const linkedCount = atPathFiles.length + fileProtoFiles.length;
       const summary = 'Deployed "' + noteTitle + '"' + (linkedCount > 0 ? " with " + linkedCount + " linked page" + (linkedCount > 1 ? "s" : "") : "") + (isPrivate ? " (private)" : "");
       let warning = "";
@@ -11201,7 +11237,7 @@ var AtPathPlugin = class extends Plugin {
       }
       new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
@@ -11220,7 +11256,7 @@ var AtPathPlugin = class extends Plugin {
       this.settings.vercelToken = token;
       await this.saveSettings();
     }
-    this.trayBarEl.setText("...");
+    this.trayBarEl?.setText("...");
     try {
       const entryHtml = await this.app.vault.cachedRead(htmlFile);
       const folderFiles = publishScope === HTML_APP_SCOPE_FOLDER ? await this.collectHtmlAppFolderFiles(htmlFile) : [];
@@ -11283,12 +11319,12 @@ var AtPathPlugin = class extends Plugin {
           isPrivate: true,
           envVars: { CLERK_SECRET_KEY: this.settings.clerkSecretKey },
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg)
+          onProgress: (msg) => this.trayBarEl?.setText(msg)
         });
       } else {
         result = await deployToVercel(token, siteTitle, deployFiles, {
           projectName,
-          onProgress: (msg) => this.trayBarEl.setText(msg)
+          onProgress: (msg) => this.trayBarEl?.setText(msg)
         });
       }
       setPublishedHtmlAppState(this.settings, sourcePath, {
@@ -11303,7 +11339,7 @@ var AtPathPlugin = class extends Plugin {
         siteTitle
       });
       await this.saveSettings();
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       const modeLabel = publishScope === HTML_APP_SCOPE_FOLDER ? "folder app" : "single HTML file";
       const summary = 'Deployed "' + siteTitle + '" as a ' + modeLabel + " (" + deployFiles.length + " file" + (deployFiles.length === 1 ? "" : "s") + ")" + (isPrivate ? " (private)." : ".");
       let warning = "";
@@ -11316,7 +11352,7 @@ var AtPathPlugin = class extends Plugin {
       }
       new PublishResultModal(this.app, { success: true, url: result.url, summary, warning }).open();
     } catch (e) {
-      this.trayBarEl.setText("@Path");
+      this.trayBarEl?.setText("@Path");
       new PublishResultModal(this.app, { success: false, error: e.message || String(e) }).open();
     }
   }
@@ -11329,7 +11365,7 @@ var AtPathPlugin = class extends Plugin {
       new Notice("No Vercel token configured.");
       return;
     }
-    plugin.trayBarEl.setText("...");
+    plugin.trayBarEl?.setText("...");
     try {
       const placeholderHtml = buildUnpublishedPage(title, plugin.settings.siteIconDataUrl);
       const files = [{ path: "index.html", content: placeholderHtml }];
@@ -11340,10 +11376,10 @@ var AtPathPlugin = class extends Plugin {
         isUnpublished: true
       });
       await plugin.saveSettings();
-      plugin.trayBarEl.setText("@Path");
+      plugin.trayBarEl?.setText("@Path");
       new Notice('Unpublished "' + title + '". You can republish at any time.');
     } catch (e) {
-      plugin.trayBarEl.setText("@Path");
+      plugin.trayBarEl?.setText("@Path");
       new PublishResultModal(plugin.app, { success: false, error: e.message || String(e) }).open();
     }
   }

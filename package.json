@@ -1,7 +1,7 @@
 {
   "name": "obsidian-atpath",
-  "version": "1.8.4",
-  "description": "Autocomplete and navigate @path/to/file references in Obsidian",
+  "version": "1.9.0",
+  "description": "Author repository Markdown links, open local files, and estimate context sizes.",
   "author": "sergio",
   "license": "MIT",
   "keywords": [
@@ -16,7 +16,6 @@
     "test": "node --test --require ./tests/_setup.js tests/*.test.js"
   },
   "dependencies": {
-    "gpt-tokenizer": "^2.8.1",
     "markdown-it": "^14.1.1"
   },
   "devDependencies": {

@@ -2,6 +2,7 @@
 
 const ESTIMATOR_VERSION = 1;
 const EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
+const EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
 
 function f_estimateTokens(text) {
   return Math.ceil(text.length / 4);
@@ -37,11 +38,13 @@ function f_createTokenIndex({
   }
 
   function f_adjust(entry, direction) {
+    if (entry.file.localOnly) return;
     let folder = entry.path;
     do {
       folder = folder.slice(0, Math.max(0, folder.lastIndexOf("/")));
-      const total = folders.get(folder) ?? { ...EMPTY };
+      const total = folders.get(folder) ?? { ...EMPTY_FOLDER };
       total[entry.state] += direction;
+      if (entry.eligible) total.candidates += direction;
       total.tokens += direction * (entry.tokens ?? 0);
       if (total.pending || total.counted || total.skipped) folders.set(folder, total);
       else folders.delete(folder);
@@ -258,7 +261,7 @@ function f_createTokenIndex({
     },
     get(path, isFolder = false) {
       if (isFolder) {
-        const total = folders.get(path === "/" ? "" : path) ?? EMPTY;
+        const total = folders.get(path === "/" ? "" : path) ?? EMPTY_FOLDER;
         return { ...total, pending: total.pending + (inventoried ? 0 : 1) };
       }
       const entry = entries.get(path);

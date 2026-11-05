@@ -13,6 +13,8 @@ Autocomplete, click-to-open, token counting, one-click publish to the web, and c
 
 ---
 
+The repository-link migration is an unreleased 1.9.0 task-branch build for Obsidian 1.15 or newer. Screenshots below show the previous released UI.
+
 <p align="center">
   <img src="screenshots/atpath-links.png" width="600" alt="@path references rendered as clickable links with token counts" />
 </p>
@@ -38,6 +40,8 @@ The containing note's innermost Git checkout defines `/`. Cross-repository links
 ### Native backlinks and graph
 
 An isolated compatibility layer supplies repository-aware references to Obsidian's native metadata index. It leaves note text unchanged and restores native resolution on unload. Desktop tests against Obsidian 1.15 verified backlink source passages and local/global graph inputs, including identical filenames in nested repositories. This uses internal APIs and checks their availability at runtime; mobile and full installed-plugin UI acceptance remain pending on this task branch.
+
+Native Outgoing Links shows canonical destinations and navigates local files, including headings. If a note mixes a repository Markdown link with a native wikilink/embed using identical destination text, the repository row can display an internal key; the bridge preserves the native reference's original resolution in that ambiguous case.
 
 Existing `@path` and AtPath wikilink references remain readable during migration. New authoring uses Markdown. The legacy-link preview identifies candidates without rewriting the vault automatically.
 
@@ -94,9 +98,8 @@ AtPath updates repository links for file/folder moves performed through Obsidian
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Show token counts | On | Approximate inline, explorer and status-bar counts |
-| Max file size (MB) | 5 | Skip token counting above this |
-| Max files per folder reference | 500 | Limit recursive folder expansion for copying |
-| Folder encode batch size | 1 | Lower = smoother UI but slower folder counts |
+| Max file size (MB) | 5 | Skip larger linked files when counting, copying or publishing |
+| Max files per folder reference | 500 | Limit recursive folder expansion and its estimate by the number of indexed candidates before reading content |
 | Show selection tokens in status bar | On | When text is selected, status bar shows `Sel: <selected> / <total>` |
 | Suggest folders in autocomplete | On | Include folders in `[[` suggestions |
 | Drag-and-drop link inserts | On | Insert a canonical Markdown link when dragging a file/folder |

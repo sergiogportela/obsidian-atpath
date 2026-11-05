@@ -35,15 +35,14 @@ function f_installNativeRepositoryLinks({ metadataCache, vault, scan, resolve })
       return entry && entry.base === base && entry.overlay ? entry.overlay : base;
     },
     function f_getFirstLinkpathDest(linkPath, sourcePath) {
-      const target = typeof linkPath === "string" && linkPath.startsWith("\0atpath:")
-        && f_currentEntry(sourcePath)?.targets.get(linkPath);
-      return target ? vault.getFileByPath(target) : getFirstLinkpathDest.call(this, linkPath, sourcePath);
+      const target = entries.get(sourcePath)?.targets.get(linkPath);
+      if (target !== undefined && f_currentEntry(sourcePath)) return target ? vault.getFileByPath(target) : null;
+      return getFirstLinkpathDest.call(this, linkPath, sourcePath);
     },
     function f_iterateAllRefs(visit) {
       const stopped = new Set();
       const result = iterateAllRefs.call(this, (sourcePath, reference) => {
-        const start = reference.position?.start.offset;
-        if (entries.get(sourcePath)?.removed.has(start) && f_currentEntry(sourcePath)) return;
+        if (entries.get(sourcePath)?.removedReferences.has(reference) && f_currentEntry(sourcePath)) return;
         if (visit(sourcePath, reference) === true) {
           stopped.add(sourcePath);
           return true;
@@ -65,19 +64,41 @@ function f_installNativeRepositoryLinks({ metadataCache, vault, scan, resolve })
   function f_project(sourcePath, entry) {
     const targets = new Map();
     const removed = new Set();
-    const references = [];
-    for (const { destination, label, position, original } of entry.links) {
+    const managed = [];
+    for (const reference of entry.links) {
+      const { destination, position } = reference;
       const result = resolve(destination, sourcePath);
       if (!result) continue;
-      const { offset } = position.start;
-      removed.add(offset);
-      if (!result.file) continue;
+      removed.add(position.start.offset);
+      managed.push({ reference, path: result.file?.path ?? null });
+    }
+    if (!managed.length && !entry.removed.size) return false;
 
-      // Only the source-specific lookup above resolves these keys. Native file
-      // rename uses getLinkpathDest and therefore cannot rewrite these links.
-      const link = "\0atpath:" + offset;
-      targets.set(link, result.file.path);
-      references.push({ link, original, displayText: label, position });
+    const removedReferences = new Set();
+    const ordinaryLinks = (entry.base.links ?? []).filter(reference => {
+      if (!removed.has(reference.position?.start.offset)) return true;
+      removedReferences.add(reference);
+      return false;
+    });
+    const ordinaryPaths = new Set([...ordinaryLinks, ...(entry.base.embeds ?? []), ...(entry.base.frontmatterLinks ?? [])]
+      .map(({ link }) => link.split("#", 1)[0]));
+    const references = [];
+    const visibleReferences = [];
+    for (const { reference: { destination, label, position, original }, path } of managed) {
+      const [linkPath] = destination.split("#", 1);
+      const opaque = "\0atpath:" + position.start.offset;
+      // The native lookup receives only source and link text. Keep ordinary
+      // references authoritative if the same text occurs in both formats.
+      const displayPath = ordinaryPaths.has(linkPath) ? opaque : linkPath;
+      targets.set(displayPath, path);
+      if (!path) continue;
+      // Native rename traverses iterateAllRefs. Its fragment-free key cannot
+      // be mistaken for a native file path or a heading reference.
+      targets.set(opaque, path);
+      references.push({ link: opaque, original, displayText: label, position });
+      visibleReferences.push({
+        link: displayPath + destination.slice(linkPath.length), original, displayText: label, position,
+      });
     }
 
     const changed = removed.size !== entry.removed.size
@@ -87,10 +108,11 @@ function f_installNativeRepositoryLinks({ metadataCache, vault, scan, resolve })
     if (!changed) return false;
     entry.targets = targets;
     entry.removed = removed;
+    entry.removedReferences = removedReferences;
     entry.references = references;
     entry.overlay = removed.size ? {
       ...entry.base,
-      links: [...(entry.base.links ?? []).filter(reference => !removed.has(reference.position?.start.offset)), ...references]
+      links: [...ordinaryLinks, ...visibleReferences]
         .sort((left, right) => left.position.start.offset - right.position.start.offset),
     } : null;
     return true;
@@ -107,7 +129,9 @@ function f_installNativeRepositoryLinks({ metadataCache, vault, scan, resolve })
         ...link,
         original: text.slice(link.position.start.offset, link.position.end.offset),
       }));
-    const entry = { base, links, targets: new Map(), removed: new Set(), references: [], overlay: null };
+    const entry = {
+      base, links, targets: new Map(), removed: new Set(), removedReferences: new Set(), references: [], overlay: null,
+    };
     entries.set(sourcePath, entry);
     if (f_project(sourcePath, entry) || previous?.overlay) metadataCache.queueFileForLinkResolution(file);
   }

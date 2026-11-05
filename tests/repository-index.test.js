@@ -117,8 +117,10 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
 
   text = "Before @space";
   assert.equal(suggest.onTrigger({ line: 0, ch: text.length }, editor, source), null);
-  text = "Before ![[space";
-  assert.equal(suggest.onTrigger({ line: 0, ch: text.length }, editor, source), null);
+  for (const nativeQuery of ["![[space", "[[space#heading", "[[#^block", "[[space^block", "[[space|alias"]) {
+    text = "Before " + nativeQuery;
+    assert.equal(suggest.onTrigger({ line: 0, ch: text.length }, editor, source), null, nativeQuery);
+  }
 });
 
 test("canonical linked copy and publishing collection trust destination and deduplicate descendants", async t => {
@@ -128,27 +130,31 @@ test("canonical linked copy and publishing collection trust destination and dedu
   const source = new TFile("checkout/note.md");
   const target = new TFile("checkout/docs/actual.md");
   const docs = new TFolder("checkout/docs", [target]);
-  const note = "[wrong](/docs/actual.md) [folder](/docs/) [ordinary](#heading)";
+  let note = "[wrong](/docs/actual.md) [folder](/docs/) [ordinary](#heading)";
   const files = new Map([target, docs].map(file => [file.path, file]));
   plugin.app = {
     vault: {
       getAbstractFileByPath: path => files.get(path),
       cachedRead: async () => "ACTUAL FILE",
+      adapter: { read: async () => "12345678" },
     },
     workspace: {
       getActiveViewOfType: () => ({ file: source, editor: { getValue: () => note } }),
+      getActiveFile: () => source,
     },
   };
   plugin.settings = { maxFileSizeMB: 5, maxFolderFiles: 10 };
   plugin.repositories = [{ root: "checkout", identity: "org/repo" }];
   plugin._unindexedTargets = new Map();
   plugin.core = { isIgnored: () => false };
-  const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   let clipboard;
-  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { clipboard = text; } } });
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: {
+    clipboard: { writeText: async text => { clipboard = text; } },
+  } });
   t.after(() => {
-    if (original) Object.defineProperty(navigator, "clipboard", original);
-    else delete navigator.clipboard;
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+    else delete globalThis.navigator;
   });
   await plugin.copyNoteWithAtPaths();
   assert.equal(clipboard.split("ACTUAL FILE").length, 2);
@@ -157,4 +163,71 @@ test("canonical linked copy and publishing collection trust destination and dedu
   assert.deepEqual(await plugin.collectAtPathFiles(note, source), [{
     relPath: "docs/actual.md", legacyLabel: null, vaultPath: target.path, content: "ACTUAL FILE",
   }]);
+
+  // A folder whose candidate count exceeds the cap cannot become copyable
+  // simply by placing one of its children earlier in the note.
+  const second = new TFile("checkout/docs/second.md");
+  docs.children.push(second);
+  files.set(second.path, second);
+  plugin.settings.maxFolderFiles = 1;
+  for (const markdown of [
+    "[explicit](/docs/actual.md) [folder](/docs/)",
+    "[folder](/docs/) [explicit](/docs/actual.md)",
+  ]) {
+    note = markdown;
+    await plugin.copyNoteWithAtPaths();
+    assert.match(clipboard, /## docs\/actual\.md/);
+    assert.doesNotMatch(clipboard, /## docs\/second\.md/);
+  }
+
+  const localOnly = { path: "checkout/docs/direct.md", localOnly: true, extension: "md", stat: { size: 8, mtime: 1 } };
+  plugin._unindexedTargets.set(localOnly.path, localOnly);
+  plugin._linkedCountWatches = new Map();
+  const { f_createTokenIndex } = require("../src/token-index");
+  const index = f_createTokenIndex({
+    getFiles: () => [target, second, localOnly],
+    read: file => plugin.f_readLinkedFile(file),
+    isEligible: file => plugin.f_eligibleLinkedFile(file),
+    looksBinary: () => false,
+  });
+  t.after(() => index.dispose());
+  plugin._tokenIndex = index;
+  plugin.settings.showTokenCounts = true;
+  plugin.noteBarEl = {};
+  plugin.linkedBarEl = {};
+  plugin._statusBarGen = 0;
+  plugin._renderStatusBarSegments = () => {};
+  plugin._renderLinkedPopover = () => {};
+  await index.start();
+  await Promise.all([target, second, localOnly].map(file => index.request(file)));
+  assert.deepEqual(plugin.f_folderTokenCount(docs.path), { overCap: true, fileCount: 2, limit: 1 });
+  plugin.settings.maxFolderFiles = 2;
+  note = "[folder](/docs/) [indexed](/docs/actual.md) [unindexed](/docs/direct.md)";
+  await plugin.updateStatusBar();
+  assert.equal(plugin._lastLinkedTotal, 8, "the folder covers the indexed file but not the explicitly linked unindexed file");
+  await plugin.copyNoteWithAtPaths();
+  assert.equal(clipboard.split("ACTUAL FILE").length, 3);
+  assert.match(clipboard, /## docs\/direct\.md\n\n```\n12345678/);
+});
+
+test("repository rename rewrites local targets while preserving query, fragment and historical SHA", async () => {
+  const AtPath = f_loadPlugin();
+  const plugin = new AtPath();
+  const { TFile } = require("obsidian");
+  const source = new TFile("checkout/note.md");
+  const target = new TFile("checkout/new.md");
+  const shaLink = "[Historical](https://github.com/org/repo/blob/abcd123/old.md?raw=1#Heading)";
+  let text = "[Old](/old.md?raw=1#Heading)\n" + shaLink;
+  plugin.repositories = [{ root: "checkout", identity: "org/repo" }];
+  plugin.app = { vault: {
+    getMarkdownFiles: () => [source],
+    getAbstractFileByPath: path => path === target.path ? target : undefined,
+    cachedRead: async () => text,
+    process: async (file, update) => {
+      assert.equal(file, source);
+      text = update(text);
+    },
+  } };
+  await plugin.f_rewriteRepositoryReferences(target.path, "checkout/old.md");
+  assert.equal(text, "[new.md](/new.md?raw=1#Heading)\n" + shaLink);
 });
