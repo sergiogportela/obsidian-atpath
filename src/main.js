@@ -7,11 +7,13 @@ const { Compartment, Prec } = require("@codemirror/state");
 const { f_createTokenIndex, f_estimateTokens } = require("./token-index");
 const { f_installExplorerTokenBadges } = require("./explorer-token-badges");
 const { f_loadTokenCache, f_saveTokenCache } = require("./token-cache-storage");
+const { f_isEligibleLinkedPath } = require("./linked-file-policy");
 
-const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink } = require("./repository-links");
+const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_rewriteRepositoryDestinations } = require("./repository-links");
 const { f_installNativeRepositoryLinks } = require("./native-repository-links");
 const {
-  REPOSITORY_MAP_PATH, f_discoverRepositories, f_lookupRenamedRepository,
+  REPOSITORY_MAP_PATH, f_discoverRepositories, f_discoverSourceCheckout, f_isPrunedSourcePath,
+  f_lookupRenamedRepository,
   f_readRepositoryMap, f_writeRepositoryMap,
 } = require("./repository-index");
 
@@ -1257,7 +1259,7 @@ class RepositoryTokenWidget extends WidgetType {
     const span = document.createElement("span");
     span.className = "atpath-token-count";
     span.textContent = " (" + this.count + ")";
-    span.title = "Approximate tokens from character count" + (this.skipped ? ". " + this.skipped + " files skipped." : "");
+    span.title = "Approximate (characters / 4). Sample errors −56% to +60%; JSON/CSV may need over twice this count." + (this.skipped ? " " + this.skipped + " files skipped." : "");
     return span;
   }
 }
@@ -1269,7 +1271,7 @@ function f_buildRepositoryLinkView(plugin) {
     for (const ref of refs) {
       if (!view.visibleRanges.some(range => ref.start >= range.from && ref.end <= range.to)) continue;
       const result = plugin.f_resolveLinkTarget(ref, sourcePath);
-      if (result.kind === "ignored") continue;
+      if (!f_managesRepositoryNavigation(ref.destination, result)) continue;
       ranges.push(Decoration.mark({
         attributes: { "data-atpath-destination": ref.destination, "data-atpath-source": sourcePath,
           title: result.reason || result.normalizedPath },
@@ -1340,9 +1342,13 @@ function f_isCanonicalRepositoryDestination(destination) {
     || /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\//i.test(destination);
 }
 
+function f_managesRepositoryNavigation(destination, result) {
+  return result.kind !== "ignored" && (result.kind !== "missing" || f_isCanonicalRepositoryDestination(destination));
+}
+
 function f_interceptRepositoryLink(plugin, event, destination, sourcePath) {
   const resolved = plugin.f_resolveLinkTarget({ destination }, sourcePath);
-  if (resolved.kind === "ignored") return false;
+  if (!f_managesRepositoryNavigation(destination, resolved)) return false;
   event.preventDefault();
   event.stopImmediatePropagation();
   if (event.type === "contextmenu") {
@@ -1362,8 +1368,7 @@ function registerPostProcessor(plugin) {
       const destination = link.dataset.href || link.getAttribute("href");
       if (!destination || (!f_isCanonicalRepositoryDestination(destination) && !/^\.\.?\//.test(destination))) continue;
       const result = plugin.f_resolveLinkTarget({ destination }, ctx.sourcePath);
-      if (!f_isCanonicalRepositoryDestination(destination) && result.kind === "missing") continue;
-      if (result.kind === "ignored" && !result.repository) continue;
+      if (!f_managesRepositoryNavigation(destination, result) && !(result.kind === "ignored" && result.repository)) continue;
       link.addEventListener("click", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       link.addEventListener("contextmenu", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       if (result.kind === "ignored") continue;
@@ -1371,7 +1376,7 @@ function registerPostProcessor(plugin) {
       link.title = result.reason || result.normalizedPath;
       if (!plugin.settings.showTokenCounts) continue;
       const badge = link.createSpan({ cls: "atpath-token-count" });
-      badge.title = "Approximate tokens from character count";
+      badge.title = "Approximate (characters / 4). Sample errors −56% to +60%; JSON/CSV may need over twice this count.";
       if (result.kind === "folder") f_bindReadingFolderCount(plugin, ctx, badge, result.normalizedPath);
       else {
         if (result.kind === "missing") badge.textContent = " (unavailable)";
@@ -1579,7 +1584,7 @@ class AtPathSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Show token counts")
-      .setDesc("Display approximate token counts next to linked targets and in the status bar. Counts use four characters per token.")
+      .setDesc("Show estimates beside links and explorer rows and in the status bar. Estimates use characters / 4. Sample errors ranged from −56% to +60%; JSON/CSV may need over twice the displayed count. These are not hard context limits.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showTokenCounts).onChange(async (value) => {
           this.plugin.settings.showTokenCounts = value;
@@ -2252,6 +2257,7 @@ class AtPathPlugin extends Plugin {
     const vault = this.app.vault;
     const vaultKey = this.app.appId || vault.adapter.getBasePath?.() || vault.getName();
     this._tokenIndex = f_createTokenIndex({
+      enabled: this.settings.showTokenCounts,
       getFiles: () => [...vault.getFiles(), ...this._unindexedTargets.values()],
       read: file => this.f_readLinkedFile(file),
       isEligible: file => this.f_eligibleLinkedFile(file),
@@ -2281,7 +2287,9 @@ class AtPathPlugin extends Plugin {
         formatTokens: tokens => formatTokens(tokens).slice(1),
         isEnabled: () => this.settings.showTokenCounts,
       });
-      void this._tokenIndex.start().catch(error => console.warn("AtPath could not start token counting", error));
+      if (this.settings.showTokenCounts) {
+        void this._tokenIndex.start().catch(error => console.warn("AtPath could not start token counting", error));
+      }
     });
     this.register(() => {
       this._explorerTokenBadges?.dispose();
@@ -2291,6 +2299,7 @@ class AtPathPlugin extends Plugin {
     });
 
     this.repositories = [];
+    this._sourceCheckoutChecks = new Map();
     this._repositoryAliasAttempts = new Map();
     const suggest = new AtPathSuggest(this);
     this.registerEditorSuggest(suggest);
@@ -2317,6 +2326,7 @@ class AtPathPlugin extends Plugin {
     this.addCommand({ id: "refresh-repositories", name: "Refresh repository map",
       callback: () => {
         this._repositoryAliasAttempts.clear();
+        this._repositoryAliasWarning = false;
         return this.f_refreshRepositoryIndex();
       } });
     this.registerEditorExtension(buildAtPathViewPlugin(this));
@@ -2473,7 +2483,8 @@ class AtPathPlugin extends Plugin {
       })
     );
     this.registerEvent(
-      this.app.workspace.on("file-open", () => {
+      this.app.workspace.on("file-open", file => {
+        if (file?.extension === "md") void this.f_discoverOpenedSource(file.path);
         this._noteBufferTokens = 0;
         this._selectionTokens = 0;
         if (this.core) this.core.clearFolderTokenMemo();
@@ -2579,6 +2590,7 @@ class AtPathPlugin extends Plugin {
   }
 
   async getTokenCount(vaultPath) {
+    if (!this.settings.showTokenCounts) return null;
     this.f_watchLinkedCount(vaultPath, false);
     const file = this.app.vault.getAbstractFileByPath(vaultPath) || this._unindexedTargets.get(vaultPath);
     return file && (file instanceof TFile || file.localOnly) ? this._tokenIndex.request(file) : null;
@@ -3196,7 +3208,7 @@ class AtPathPlugin extends Plugin {
     return !BINARY_EXTENSIONS.has(file.extension.toLowerCase())
       && file.stat.size <= this.settings.maxFileSizeMB * 1024 * 1024
       && !this.core.isIgnored(file.path)
-      && !file.path.split("/").some(part => part === this.app.vault.configDir || part === ".git" || part === "node_modules");
+      && f_isEligibleLinkedPath(file.path, this.app.vault.configDir);
   }
 
   f_readLinkedFile(file) {
@@ -3250,6 +3262,52 @@ class AtPathPlugin extends Plugin {
       console.warn("AtPath could not refresh repository backlinks", error));
   }
 
+  f_sourceCheckoutIssue(sourcePath) {
+    if (!f_isPrunedSourcePath(sourcePath)) return null;
+    const repo = f_repositoryForPath(sourcePath, this.repositories);
+    if (Platform.isMobile) {
+      return repo?.root && f_isPrunedSourcePath(repo.root + "/.atpath-source") ? null :
+        "Source checkout is unavailable in this device's repository map: " + sourcePath;
+    }
+    const check = this._sourceCheckoutChecks?.get(sourcePath.slice(0, sourcePath.lastIndexOf("/")));
+    if (check?.reason) return check.reason;
+    if (check && check.root === repo?.root) return null;
+    return "Source checkout has not been verified: " + sourcePath;
+  }
+
+  async f_readOpenedSource(sourcePath, basePath) {
+    const directory = sourcePath.slice(0, sourcePath.lastIndexOf("/"));
+    try {
+      const repo = await f_discoverSourceCheckout(basePath, sourcePath);
+      if (!this._repositoryIndexClosed) this._sourceCheckoutChecks.set(directory, { root: repo.root });
+      return repo;
+    } catch (error) {
+      if (!this._repositoryIndexClosed) this._sourceCheckoutChecks.set(directory, { reason: error.message });
+      return null;
+    }
+  }
+
+  async f_discoverOpenedSource(sourcePath) {
+    const adapter = this.app.vault.adapter;
+    if (Platform.isMobile || this._repositoryIndexClosed || !f_isPrunedSourcePath(sourcePath)
+      || typeof adapter.getBasePath !== "function") return;
+    await this._repositoryRefresh;
+    if (this._repositoryIndexClosed) return;
+    const directory = sourcePath.slice(0, sourcePath.lastIndexOf("/"));
+    const check = this._sourceCheckoutChecks.get(directory);
+    if (check && !check.reason && check.root === f_repositoryForPath(sourcePath, this.repositories)?.root) return;
+    const repo = await this.f_readOpenedSource(sourcePath, adapter.getBasePath());
+    if (this._repositoryIndexClosed) return;
+    if (repo && !this.repositories.some(entry => entry.root === repo.root)) {
+      const matches = this.repositories.filter(entry => entry.identity && entry.identity === repo.identity);
+      const aliases = [...new Set(matches.flatMap(entry => entry.aliases || []))].sort();
+      if (aliases.length) repo.aliases = aliases;
+      this.repositories.push(repo);
+      await this.f_persistRepositoryMap().catch(error => console.warn("AtPath could not save the opened source checkout", error));
+    }
+    this.f_repositoryIndexChanged();
+  }
+
   async f_refreshRepositoryIndex() {
     if (this._repositoryIndexClosed) return;
     if (this._repositoryRefresh) {
@@ -3258,6 +3316,7 @@ class AtPathPlugin extends Plugin {
     }
     const adapter = this.app.vault.adapter;
     this._repositoryRefresh = (async () => {
+      this._sourceCheckoutChecks.clear();
       const cached = await f_readRepositoryMap(adapter).catch(error => {
         console.warn("AtPath could not read the repository map", error);
         return [];
@@ -3269,9 +3328,24 @@ class AtPathPlugin extends Plugin {
         this.f_repositoryIndexChanged();
       }
       if (!Platform.isMobile && typeof adapter.getBasePath === "function") {
-        const discovered = await f_discoverRepositories(adapter.getBasePath());
+        const basePath = adapter.getBasePath();
+        const discovered = await f_discoverRepositories(basePath);
         if (this._repositoryIndexClosed) return;
         const prior = [...cached, ...this.repositories];
+        const retainedRoots = new Set(prior.filter(repo =>
+          repo.root && f_isPrunedSourcePath(repo.root + "/.atpath-source")
+        ).map(repo => repo.root));
+        for (const root of retainedRoots) {
+          if (this._repositoryIndexClosed) return;
+          const retained = await f_discoverSourceCheckout(basePath, root + "/.atpath-source").catch(() => null);
+          if (retained?.root === root) discovered.push(retained);
+        }
+        const activePath = this.app.workspace.getActiveFile()?.path;
+        if (activePath && f_isPrunedSourcePath(activePath)) {
+          const activeRepo = await this.f_readOpenedSource(activePath, basePath);
+          if (activeRepo && !discovered.some(repo => repo.root === activeRepo.root)) discovered.push(activeRepo);
+        }
+        if (this._repositoryIndexClosed) return;
         for (const repo of discovered) {
           const aliases = prior.filter(item => item.identity && item.identity === repo.identity)
             .flatMap(item => item.aliases || []);
@@ -3339,7 +3413,16 @@ class AtPathPlugin extends Plugin {
       this.repositories = repositories.filter(repo => repo.root !== undefined || repo.identity !== identity);
       this.f_repositoryIndexChanged();
       await this.f_persistRepositoryMap();
-    }).catch(() => { /* Out-of-scope GitHub links stay ordinary external links. */ });
+    }).catch(error => {
+      if (this._repositoryAliasWarning) return;
+      if (error.code === "ENOENT") {
+        this._repositoryAliasWarning = true;
+        console.warn("AtPath cannot look up GitHub repository renames because the GitHub CLI (gh) was not found.");
+      } else if (/gh auth login|authentication required/i.test(error.stderr || "")) {
+        this._repositoryAliasWarning = true;
+        console.warn("AtPath cannot look up GitHub repository renames until the GitHub CLI is authenticated.");
+      }
+    });
   }
 
   f_displayLinkedPath(path, sourcePath) {
@@ -3351,6 +3434,8 @@ class AtPathPlugin extends Plugin {
   }
 
   f_formatLinkedTarget(target, sourcePath) {
+    const sourceIssue = this.f_sourceCheckoutIssue?.(sourcePath);
+    if (sourceIssue) throw new Error(sourceIssue);
     return f_formatRepositoryLink(target.path === "/" ? "" : target.path, sourcePath, this.repositories,
       target instanceof TFolder ? "folder" : "file");
   }
@@ -3406,6 +3491,11 @@ class AtPathPlugin extends Plugin {
       (result.status === "missing" && result.vaultPath === undefined))) this.f_requestRepositoryAlias(result.repository);
     if (result.status === "out-of-scope") {
       return { ...result, kind: "ignored" };
+    }
+    const sourceIssue = this.f_sourceCheckoutIssue?.(sourcePath);
+    if (sourceIssue) return { status: "missing", kind: "missing", reason: sourceIssue, sourcePath };
+    if (result.status === "missing" && /^\/(?:Users|home|Volumes|private|tmp)\//.test(ref.destination)) {
+      result.reason = "This absolute-looking destination is repository-relative. Migrate it to a repository path or a workspace GitHub link.";
     }
     if (result.status !== "resolved" && !f_isCanonicalRepositoryDestination(ref.destination)) {
       const pathname = ref.destination.split(/[?#]/)[0];
@@ -3502,42 +3592,14 @@ class AtPathPlugin extends Plugin {
     if (this._repositoryIndexClosed || !this.repositories.length) return;
     for (const mdFile of this.app.vault.getMarkdownFiles()) {
       if (this._repositoryIndexClosed) break;
-      const sourceAfter = mdFile.path;
-      const sourceBefore = sourceAfter === newPath || sourceAfter.startsWith(newPath + "/") ?
-        oldPath + sourceAfter.slice(newPath.length) : sourceAfter;
-      const sourceMovedRepo = f_repositoryForPath(sourceAfter, this.repositories) !== f_repositoryForPath(sourceBefore, this.repositories);
-      const rewrite = content => {
-        let output = content;
-        for (const ref of this.f_scanMarkdownRefs(content).reverse()) {
-          // Obsidian maintains ordinary file-relative links. Only rewrite our canonical links.
-          if (!f_isCanonicalRepositoryDestination(ref.destination)) continue;
-          const result = f_resolveRepositoryLink(ref, {
-            sourcePath: sourceBefore,
-            repositories: this.repositories,
-            getTargetType: path => {
-              const targetPath = path === oldPath || path.startsWith(oldPath + "/") ?
-                newPath + path.slice(oldPath.length) : path;
-              const target = this.app.vault.getAbstractFileByPath(targetPath);
-              return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
-            },
-          });
-          if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref || "")) continue;
-          const moved = result.vaultPath === oldPath || result.vaultPath.startsWith(oldPath + "/");
-          if (!moved && !sourceMovedRepo) continue;
-          const targetPath = moved ? newPath + result.vaultPath.slice(oldPath.length) : result.vaultPath;
-          let replacement;
-          try {
-            replacement = f_formatRepositoryLink(targetPath, sourceAfter, this.repositories, result.kind);
-          } catch (error) {
-            console.warn("AtPath could not update repository link", mdFile.path, ref.destination, error);
-            continue;
-          }
-          const suffix = ref.destination.match(/[?#].*$/)?.[0] || "";
-          if (suffix) replacement = replacement.slice(0, -1) + suffix + ")";
-          output = output.slice(0, ref.start) + replacement + output.slice(ref.end);
-        }
-        return output;
-      };
+      const rewrite = content => f_rewriteRepositoryDestinations(content, {
+        sourcePath: mdFile.path, oldPath, newPath, repositories: this.repositories,
+        getTargetType: path => {
+          const target = path ? this.app.vault.getAbstractFileByPath(path) : this.app.vault.getRoot();
+          return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
+        },
+        onError: (error, destination) => console.warn("AtPath could not update repository link", mdFile.path, destination, error),
+      });
       const content = await this.app.vault.cachedRead(mdFile);
       if (rewrite(content) !== content) await this.app.vault.process(mdFile, rewrite);
     }
@@ -4162,7 +4224,13 @@ class AtPathPlugin extends Plugin {
   }
 
   onTokenSettingsChanged() {
-    void this._tokenIndex.sync();
+    const enabled = this.settings.showTokenCounts;
+    this._tokenIndex.setEnabled(enabled);
+    if (enabled) {
+      void this._tokenIndex.start().then(() => {
+        if (this.settings.showTokenCounts) return this._tokenIndex.sync();
+      }).catch(error => console.warn("AtPath could not refresh token counts", error));
+    }
     this._explorerTokenBadges?.refresh();
     this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
     this.tokenCacheDirty = true;

@@ -10,6 +10,7 @@ function f_describeTokenBadge(snapshot, formatTokens) {
   const { tokens, counted, pending, skipped } = snapshot;
   const notes = [];
   if (counted || (!skipped && !pending)) notes.push("About " + tokens.toLocaleString() + " tokens, estimated as characters divided by four");
+  if (counted) notes.push("Sample errors −56% to +60%; JSON/CSV may need over twice this count");
   if (pending) notes.push(counted ? "Some files are still pending" : "Token estimate pending");
   if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
   return {

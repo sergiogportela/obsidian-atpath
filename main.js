@@ -8,6 +8,7 @@ var require_token_index = __commonJS({
   "src/token-index.js"(exports2, module2) {
     "use strict";
     var ESTIMATOR_VERSION = 1;
+    var CHECKPOINT_INTERVAL_MS = 5e3;
     var EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
     var EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
     function f_estimateTokens2(text) {
@@ -20,6 +21,7 @@ var require_token_index = __commonJS({
       looksBinary: looksBinary2,
       load,
       save,
+      enabled = true,
       tokenCache = /* @__PURE__ */ new Map(),
       onError = () => {
       }
@@ -85,12 +87,11 @@ var require_token_index = __commonJS({
       function f_scheduleSave() {
         if (!save) return;
         dirty = true;
-        if (saving || disposed) return;
-        clearTimeout(saveTimer);
+        if (saving || disposed || saveTimer != null) return;
         saveTimer = setTimeout(() => {
           saveTimer = null;
           void f_flush();
-        }, 750);
+        }, CHECKPOINT_INTERVAL_MS);
       }
       function f_drop(path) {
         const entry = entries.get(path);
@@ -116,7 +117,7 @@ var require_token_index = __commonJS({
         f_notify();
       }
       function f_queueRead() {
-        if (disposed || reading || readTimer != null || !priority.size && !background.size) return;
+        if (disposed || !enabled || reading || readTimer != null || !priority.size && !background.size) return;
         readTimer = setTimeout(() => {
           readTimer = null;
           void f_readNext();
@@ -125,7 +126,7 @@ var require_token_index = __commonJS({
       async function f_readNext() {
         const queue = priority.size ? priority : background;
         const entry = queue.values().next().value;
-        if (!entry || disposed) return;
+        if (!entry || disposed || !enabled) return;
         queue.delete(entry);
         reading = true;
         try {
@@ -224,6 +225,22 @@ var require_token_index = __commonJS({
         }
       }
       return {
+        setEnabled(value) {
+          if (enabled === value) return;
+          enabled = value;
+          if (enabled) {
+            f_queueRead();
+            return;
+          }
+          clearTimeout(readTimer);
+          readTimer = null;
+          for (const entry of entries.values()) {
+            if (entry.state !== "pending" || !entry.resolve) continue;
+            entry.resolve(null);
+            entry.resolve = null;
+            entry.promise = null;
+          }
+        },
         start() {
           if (!initialization) initialization = (async () => {
             try {
@@ -271,6 +288,7 @@ var require_token_index = __commonJS({
         },
         prioritize: f_prioritize,
         request(file) {
+          if (!enabled) return Promise.resolve(null);
           const entry = f_upsert(file, true);
           if (!entry || entry.state !== "pending") return Promise.resolve(entry?.tokens ?? null);
           f_prioritize(entry.path);
@@ -312,6 +330,7 @@ var require_explorer_token_badges = __commonJS({
       const { tokens, counted, pending, skipped } = snapshot;
       const notes = [];
       if (counted || !skipped && !pending) notes.push("About " + tokens.toLocaleString() + " tokens, estimated as characters divided by four");
+      if (counted) notes.push("Sample errors \u221256% to +60%; JSON/CSV may need over twice this count");
       if (pending) notes.push(counted ? "Some files are still pending" : "Token estimate pending");
       if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
       return {
@@ -469,6 +488,31 @@ var require_token_cache_storage = __commonJS({
       });
     }
     module2.exports = { f_loadTokenCache: f_loadTokenCache2, f_saveTokenCache: f_saveTokenCache2 };
+  }
+});
+
+// src/linked-file-policy.js
+var require_linked_file_policy = __commonJS({
+  "src/linked-file-policy.js"(exports2, module2) {
+    "use strict";
+    var GENERATED_DIRECTORIES = /* @__PURE__ */ new Set(["__pycache__", "build", "dist", "node_modules", "target", "venv"]);
+    var PRIVATE_FILENAMES = /* @__PURE__ */ new Set([
+      "credentials.json",
+      "id_ed25519",
+      "id_rsa",
+      "secrets.json",
+      "secrets.yaml",
+      "secrets.yml",
+      "service-account.json",
+      "token.json",
+      "tokens.json"
+    ]);
+    function f_isEligibleLinkedPath2(path, configDir) {
+      const parts = path.split("/");
+      const name = parts[parts.length - 1].toLowerCase();
+      return !name.startsWith(".env") && !PRIVATE_FILENAMES.has(name) && !/\.(?:key|p12|pem|pfx)$/.test(name) && !parts.includes(".git") && !parts.slice(0, -1).some((part) => GENERATED_DIRECTORIES.has(part)) && !(configDir && (path === configDir || path.startsWith(configDir + "/")));
+    }
+    module2.exports = { f_isEligibleLinkedPath: f_isEligibleLinkedPath2 };
   }
 });
 
@@ -5360,20 +5404,71 @@ var require_repository_links = __commonJS({
     var markdownParser = new MarkdownIt({ html: true });
     markdownParser.normalizeLink = (value) => value;
     markdownParser.validateLink = () => true;
+    var captureDestination;
+    var parseLinkDestination = markdownParser.helpers.parseLinkDestination;
+    markdownParser.helpers.parseLinkDestination = (text, start, max) => {
+      const result = parseLinkDestination(text, start, max);
+      if (captureDestination && result.ok) {
+        const angle = text[start] === "<";
+        captureDestination({ destination: result.str, start: start + Number(angle), end: result.pos - Number(angle) });
+      }
+      return result;
+    };
+    function f_captureDestination(parse, accepts = () => true) {
+      const previous = captureDestination;
+      let destination;
+      captureDestination = (value) => {
+        if (accepts()) destination = value;
+      };
+      try {
+        return { matched: parse(), destination };
+      } finally {
+        captureDestination = previous;
+      }
+    }
     for (const name of ["link", "autolink"]) {
       const rule = markdownParser.inline.ruler.__rules__.find((entry) => entry.name === name).fn;
       markdownParser.inline.ruler.at(name, (state, silent) => {
         const start = state.pos;
         const tokenCount = state.tokens.length;
-        const matched = rule(state, silent);
+        const { matched, destination } = state.env.repositoryDefinitions && name === "link" && state.src.charCodeAt(start) === 91 ? f_captureDestination(() => rule(state, silent), () => state.pos === start) : { matched: rule(state, silent) };
         if (matched && !silent) {
           const first = state.tokens[tokenCount];
           const token = first.type === "link_open" ? first : state.tokens[tokenCount + 1];
           token.meta = { start, end: state.pos };
+          if (state.env.repositoryDefinitions) {
+            if (name === "autolink") token.meta.destination = { start: start + 1, end: state.pos - 1 };
+            else if (destination?.end < state.pos && destination.destination === token.attrGet("href")) {
+              token.meta.destination = destination;
+            }
+          }
         }
         return matched;
       });
     }
+    var { fn: parseReference, alt: referenceAlternatives } = markdownParser.block.ruler.__rules__.find((entry) => entry.name === "reference");
+    markdownParser.block.ruler.at("reference", (state, startLine, endLine, silent) => {
+      const definitions = state.env.repositoryDefinitions;
+      if (!definitions || silent || state.src.charCodeAt(state.bMarks[startLine] + state.tShift[startLine]) !== 91) {
+        return parseReference(state, startLine, endLine, silent);
+      }
+      const { matched, destination } = f_captureDestination(() => parseReference(state, startLine, endLine, silent));
+      if (matched && destination) {
+        let { start, end } = destination;
+        for (let line = startLine; line < state.line; line++) {
+          const prefix = state.bMarks[line] + state.tShift[line];
+          const length = state.eMarks[line] - prefix;
+          if (start <= length && end <= length) {
+            const lineStart = state.src.lastIndexOf("\n", prefix - 1) + 1;
+            definitions.push({ destination: destination.destination, line, col: prefix - lineStart + start, length: end - start });
+            break;
+          }
+          start -= length + 1;
+          end -= length + 1;
+        }
+      }
+      return matched;
+    }, { alt: referenceAlternatives });
     function f_inlineSourceMap(content, sourceLines, firstLine, tableColumn) {
       let inlineOffset = 0;
       return content.split("\n").map((line, index) => {
@@ -5405,7 +5500,7 @@ var require_repository_links = __commonJS({
       const col = column + removed.filter((escape) => escape <= column).length;
       return { line, col, offset: sourceLines[line].offset + col };
     }
-    function f_scanMarkdownLinks2(markdown) {
+    function f_scanMarkdownLinks2(markdown, { destinationRanges = false } = {}) {
       const links = [];
       let offset = 0;
       const sourceLines = markdown.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g).map((line) => {
@@ -5418,7 +5513,8 @@ var require_repository_links = __commonJS({
       const body = markdown.slice(0, bodyStart).replace(/[^\r\n]/g, " ") + markdown.slice(bodyStart);
       let tableLine = 0;
       let tableColumn = 0;
-      for (const block of markdownParser.parse(body, {})) {
+      const env = destinationRanges ? { repositoryDefinitions: [] } : {};
+      for (const block of markdownParser.parse(body, env)) {
         if (block.type === "tr_open") {
           tableLine = block.map[0];
           tableColumn = 0;
@@ -5440,8 +5536,18 @@ var require_repository_links = __commonJS({
             if (child.type === "link_close") depth--;
             label += child.type.endsWith("break") ? "\n" : child.content;
           }
-          links.push({ destination: token.attrGet("href"), label, position: { start, end } });
+          const link = { destination: token.attrGet("href"), label, position: { start, end } };
+          if (token.meta.destination) {
+            const from = f_sourcePosition(token.meta.destination.start, ranges, sourceLines, firstLine);
+            const to = f_sourcePosition(token.meta.destination.end, ranges, sourceLines, firstLine);
+            if (from && to) link.destinationRange = { start: from.offset, end: to.offset };
+          }
+          links.push(link);
         }
+      }
+      for (const { destination, line, col, length } of env.repositoryDefinitions ?? []) {
+        const start = sourceLines[line].offset + col;
+        links.push({ destination, destinationRange: { start, end: start + length } });
       }
       return links;
     }
@@ -5489,17 +5595,18 @@ var require_repository_links = __commonJS({
       }
       const parts = f_decodePathSegments(rest.join("/"));
       if (kind === "file" && !parts.some(Boolean)) throw new URIError("GitHub file path is empty");
-      if (ref.includes("/")) return { ref, parts };
+      if (ref.includes("/")) return { ref, rawRef: first, parts };
       const tail = [ref, ...parts].join("/");
       const matches = [...new Set(refs || [])].filter((name) => tail === name || tail.startsWith(name + "/"));
       if (matches.length > 1) return null;
       if (matches.length === 1) {
-        return { ref: matches[0], parts: parts.slice(matches[0].split("/").length - 1) };
+        const boundary = matches[0].split("/").length - 1;
+        return { ref: matches[0], rawRef: [first, ...rest.slice(0, boundary)].join("/"), parts: parts.slice(boundary) };
       }
       const conventionalRef = /^(?:main|master|HEAD|[\da-f]{7,64})$/i.test(ref);
       const pathSegments = parts.filter(Boolean).length;
       const uniqueBoundary = kind === "folder" ? pathSegments === 0 : pathSegments === 1;
-      return conventionalRef || uniqueBoundary ? { ref, parts } : null;
+      return conventionalRef || uniqueBoundary ? { ref, rawRef: first, parts } : null;
     }
     function f_resolveRepositoryLink2(link, { sourcePath, repositories, getTargetType }) {
       const { destination, position } = typeof link === "string" ? { destination: link } : link;
@@ -5529,6 +5636,7 @@ var require_repository_links = __commonJS({
           const parsed = f_githubRefAndPath(github[3], repo.refs, expectedKind);
           if (!parsed) return fail("ambiguous", "GitHub ref boundary is ambiguous");
           result.ref = parsed.ref;
+          result.rawRef = parsed.rawRef;
           parts = parsed.parts;
           if (expectedKind === "file" && !parts.some(Boolean)) throw new URIError("GitHub file path is empty");
         } else {
@@ -5554,12 +5662,12 @@ var require_repository_links = __commonJS({
       if (expectedKind && expectedKind !== kind) return fail("invalid", "Local target has a different type");
       return { ...result, status: "resolved", kind };
     }
-    function f_formatRepositoryLink2(targetPath, sourcePath, repositories, kind) {
+    function f_repositoryLinkParts(targetPath, sourcePath, repositories, kind, github) {
       const source = f_repositoryForPath2(sourcePath, repositories);
       const target = f_repositoryForPath2(targetPath, repositories);
       if (!source || !target) throw new Error("Repository map is unavailable for this link");
       const sameCheckout = source.root === target.root;
-      if (!sameCheckout && (!target.identity || source.identity === target.identity || repositories.filter((repo) => typeof repo.root === "string" && repo.identity === target.identity).length !== 1)) {
+      if (github && !target.identity || !sameCheckout && (!target.identity || source.identity === target.identity || repositories.filter((repo) => typeof repo.root === "string" && repo.identity === target.identity).length !== 1)) {
         throw new Error("Target checkout cannot be addressed by a unique GitHub link");
       }
       const relative = f_repoPath(targetPath, target);
@@ -5568,11 +5676,70 @@ var require_repository_links = __commonJS({
       ).join("/");
       const directory = kind === "folder";
       const suffix = directory && relative ? "/" : "";
-      const destination = sameCheckout ? "/" + encoded + suffix : "https://github.com/" + target.identity + "/" + (directory ? "tree" : "blob") + "/main/" + encoded + suffix;
+      const destination = sameCheckout && !github ? "/" + encoded + suffix : "https://github.com/" + (github?.identity ?? target.identity) + "/" + (directory ? "tree" : "blob") + "/" + (github?.ref ?? "main") + "/" + encoded + suffix;
       const label = (sameCheckout ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
+      return { label, destination };
+    }
+    function f_formatRepositoryLink2(targetPath, sourcePath, repositories, kind) {
+      const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
       return "[" + label.replace(/([\\\[\]*_`<>&~])/g, "\\$1") + "](" + destination + ")";
     }
-    module2.exports = { f_scanMarkdownLinks: f_scanMarkdownLinks2, f_originIdentity, f_repositoryForPath: f_repositoryForPath2, f_resolveRepositoryLink: f_resolveRepositoryLink2, f_formatRepositoryLink: f_formatRepositoryLink2 };
+    function f_rewriteRepositoryDestinations2(markdown, { sourcePath, oldPath, newPath, repositories, getTargetType, onError }) {
+      const f_wasMoved = (path) => path === oldPath || path.startsWith(oldPath + "/");
+      const f_move = (path) => f_wasMoved(path) ? newPath + path.slice(oldPath.length) : path;
+      const sourceBefore = sourcePath === newPath || sourcePath.startsWith(newPath + "/") ? oldPath + sourcePath.slice(newPath.length) : sourcePath;
+      const sourceMovedRepo = f_repositoryForPath2(sourcePath, repositories) !== f_repositoryForPath2(sourceBefore, repositories);
+      const edits = [];
+      for (const link of f_scanMarkdownLinks2(markdown, { destinationRanges: true })) {
+        if (!link.destinationRange) continue;
+        const github = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:blob|tree)\//i.exec(link.destination);
+        if (!github && (!link.destination.startsWith("/") || link.destination.startsWith("//"))) continue;
+        const result = f_resolveRepositoryLink2(link, {
+          sourcePath: sourceBefore,
+          repositories,
+          getTargetType: (path) => getTargetType(f_move(path))
+        });
+        if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref ?? "")) continue;
+        const moved = f_wasMoved(result.vaultPath);
+        if (!moved && !sourceMovedRepo) continue;
+        if (!moved && github && f_resolveRepositoryLink2(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
+        const targetPath = f_move(result.vaultPath);
+        const targetMovedRepo = f_repositoryForPath2(targetPath, repositories) !== f_repositoryForPath2(result.vaultPath, repositories);
+        const url = github ? {
+          identity: targetMovedRepo ? void 0 : github[1],
+          ref: targetMovedRepo ? encodeURIComponent(result.ref) : result.rawRef
+        } : void 0;
+        let destination;
+        try {
+          ({ destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, result.kind, url));
+        } catch (error) {
+          onError?.(error, link.destination);
+          continue;
+        }
+        const { start, end } = link.destinationRange;
+        const raw = markdown.slice(start, end);
+        let pathEnd = end;
+        for (const match of raw.matchAll(/\\[^\s]|&(?:#[xX]?[\da-fA-F]+|[a-zA-Z][\da-zA-Z]+);|[?#]/g)) {
+          if (!/^[?#]/.test(markdownParser.utils.unescapeAll(match[0]))) continue;
+          pathEnd = start + match.index;
+          break;
+        }
+        edits.push({ start, end: pathEnd, destination });
+      }
+      let output = markdown;
+      for (const { start, end, destination } of edits.sort((left, right) => right.start - left.start)) {
+        output = output.slice(0, start) + destination + output.slice(end);
+      }
+      return output;
+    }
+    module2.exports = {
+      f_scanMarkdownLinks: f_scanMarkdownLinks2,
+      f_originIdentity,
+      f_repositoryForPath: f_repositoryForPath2,
+      f_resolveRepositoryLink: f_resolveRepositoryLink2,
+      f_formatRepositoryLink: f_formatRepositoryLink2,
+      f_rewriteRepositoryDestinations: f_rewriteRepositoryDestinations2
+    };
   }
 });
 
@@ -5825,12 +5992,64 @@ var require_repository_index = __commonJS({
     var { f_originIdentity } = require_repository_links();
     var REPOSITORY_MAP_PATH2 = "repository-map.json";
     var SKIP_DIRECTORIES = /* @__PURE__ */ new Set(["data", "node_modules", "venv", "dist", "build", "__pycache__"]);
-    async function f_discoverRepositories2(basePath) {
-      const { readdir } = require("fs").promises;
-      const { join } = require("path");
+    function f_git(cwd, args) {
       const { execFile } = require("child_process");
       const { promisify } = require("util");
-      const run = promisify(execFile);
+      return promisify(execFile)("git", args, { cwd, timeout: 5e3 });
+    }
+    async function f_readGitCheckout(cwd, root) {
+      const [origin, refs] = await Promise.allSettled([
+        f_git(cwd, ["config", "--local", "--get", "remote.origin.url"]),
+        f_git(cwd, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"])
+      ]);
+      const identity = origin.status === "fulfilled" ? f_originIdentity(origin.value.stdout) : null;
+      const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n").filter(Boolean).map(
+        (ref) => ref.replace(/^refs\/(?:heads\/|tags\/|remotes\/[^/]+\/)/, "")
+      ) : [];
+      return { root, identity, refs: [...new Set(names)].sort() };
+    }
+    function f_isPrunedSourcePath2(sourcePath) {
+      return sourcePath.split("/").slice(0, -1).some((part) => part.startsWith(".") || SKIP_DIRECTORIES.has(part));
+    }
+    async function f_discoverSourceCheckout2(basePath, sourcePath) {
+      const { lstat, realpath } = require("fs").promises;
+      const { dirname, isAbsolute, join, relative, resolve, sep } = require("path");
+      const base = await realpath(basePath);
+      const sourceDirectory = sourcePath.split("/").slice(0, -1).join("/");
+      const directory = await realpath(resolve(base, sourceDirectory));
+      if (relative(base, directory).split(sep).join("/") !== sourceDirectory) {
+        throw new Error("Source directory is outside the vault or uses a symbolic link: " + sourcePath);
+      }
+      let marker;
+      for (let ancestor = directory; ; ancestor = dirname(ancestor)) {
+        try {
+          await lstat(join(ancestor, ".git"));
+          marker = ancestor;
+          break;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        if (ancestor === base) break;
+      }
+      let checkout;
+      try {
+        const { stdout } = await f_git(directory, ["rev-parse", "--show-toplevel"]);
+        checkout = await realpath(stdout.trim());
+      } catch {
+        throw new Error((marker ? "Invalid Git marker at " + relative(base, marker) + "/.git" : "No Git checkout found") + " for source " + sourcePath);
+      }
+      if (marker && checkout !== marker) {
+        throw new Error("Invalid Git marker at " + relative(base, marker) + "/.git for source " + sourcePath);
+      }
+      const root = relative(base, checkout);
+      if (root === ".." || root.startsWith(".." + sep) || isAbsolute(root)) {
+        throw new Error("Source Git checkout is outside the vault: " + sourcePath);
+      }
+      return f_readGitCheckout(checkout, root.split(sep).join("/"));
+    }
+    async function f_discoverRepositories2(basePath) {
+      const { readdir, realpath } = require("fs").promises;
+      const { join } = require("path");
       const repositories = [];
       const pending = [""];
       while (pending.length) {
@@ -5844,15 +6063,17 @@ var require_repository_index = __commonJS({
           throw error;
         }
         if (entries.some((entry) => entry.name === ".git" && (entry.isDirectory() || entry.isFile()))) {
-          const [origin, refs] = await Promise.allSettled([
-            run("git", ["config", "--local", "--get", "remote.origin.url"], { cwd, timeout: 5e3 }),
-            run("git", ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"], { cwd, timeout: 5e3 })
-          ]);
-          const identity = origin.status === "fulfilled" ? f_originIdentity(origin.value.stdout) : null;
-          const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n").filter(Boolean).map(
-            (ref) => ref.replace(/^refs\/(?:heads\/|tags\/|remotes\/[^/]+\/)/, "")
-          ) : [];
-          repositories.push({ root, identity, refs: [...new Set(names)].sort() });
+          let topLevel;
+          try {
+            ({ stdout: topLevel } = await f_git(cwd, ["rev-parse", "--show-toplevel"]));
+          } catch (error) {
+            if (typeof error.code !== "number") throw error;
+          }
+          if (topLevel && await realpath(topLevel.trim()) === await realpath(cwd)) {
+            repositories.push(await f_readGitCheckout(cwd, root));
+          } else {
+            console.warn("AtPath skipped invalid Git marker: " + join(cwd, ".git"));
+          }
         }
         for (const entry of entries) {
           if (entry.isDirectory() && !entry.name.startsWith(".") && !SKIP_DIRECTORIES.has(entry.name)) {
@@ -5884,16 +6105,22 @@ var require_repository_index = __commonJS({
     async function f_lookupRenamedRepository2(identity) {
       const { execFile } = require("child_process");
       const { promisify } = require("util");
+      const options = { timeout: 8e3 };
+      if (process.platform === "darwin") {
+        options.env = { ...process.env, PATH: [process.env.PATH, "/opt/homebrew/bin", "/usr/local/bin"].filter(Boolean).join(":") };
+      }
       const { stdout } = await promisify(execFile)(
         "gh",
         ["api", "repos/" + identity, "--jq", ".full_name"],
-        { timeout: 8e3 }
+        options
       );
       return f_originIdentity("github.com/" + stdout.trim());
     }
     module2.exports = {
       REPOSITORY_MAP_PATH: REPOSITORY_MAP_PATH2,
       f_discoverRepositories: f_discoverRepositories2,
+      f_discoverSourceCheckout: f_discoverSourceCheckout2,
+      f_isPrunedSourcePath: f_isPrunedSourcePath2,
       f_lookupRenamedRepository: f_lookupRenamedRepository2,
       f_readRepositoryMap: f_readRepositoryMap2,
       f_writeRepositoryMap: f_writeRepositoryMap2
@@ -7870,11 +8097,14 @@ var { Compartment, Prec } = require("@codemirror/state");
 var { f_createTokenIndex, f_estimateTokens } = require_token_index();
 var { f_installExplorerTokenBadges } = require_explorer_token_badges();
 var { f_loadTokenCache, f_saveTokenCache } = require_token_cache_storage();
-var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink } = require_repository_links();
+var { f_isEligibleLinkedPath } = require_linked_file_policy();
+var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_rewriteRepositoryDestinations } = require_repository_links();
 var { f_installNativeRepositoryLinks } = require_native_repository_links();
 var {
   REPOSITORY_MAP_PATH,
   f_discoverRepositories,
+  f_discoverSourceCheckout,
+  f_isPrunedSourcePath,
   f_lookupRenamedRepository,
   f_readRepositoryMap,
   f_writeRepositoryMap
@@ -8982,7 +9212,7 @@ var RepositoryTokenWidget = class extends WidgetType {
     const span = document.createElement("span");
     span.className = "atpath-token-count";
     span.textContent = " (" + this.count + ")";
-    span.title = "Approximate tokens from character count" + (this.skipped ? ". " + this.skipped + " files skipped." : "");
+    span.title = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count." + (this.skipped ? " " + this.skipped + " files skipped." : "");
     return span;
   }
 };
@@ -8993,7 +9223,7 @@ function f_buildRepositoryLinkView(plugin) {
     for (const ref of refs) {
       if (!view.visibleRanges.some((range) => ref.start >= range.from && ref.end <= range.to)) continue;
       const result = plugin.f_resolveLinkTarget(ref, sourcePath);
-      if (result.kind === "ignored") continue;
+      if (!f_managesRepositoryNavigation(ref.destination, result)) continue;
       ranges.push(Decoration.mark({
         attributes: {
           "data-atpath-destination": ref.destination,
@@ -9060,9 +9290,12 @@ function f_captureEditorRepositoryLinks(plugin) {
 function f_isCanonicalRepositoryDestination(destination) {
   return destination.startsWith("/") && !destination.startsWith("//") || /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\//i.test(destination);
 }
+function f_managesRepositoryNavigation(destination, result) {
+  return result.kind !== "ignored" && (result.kind !== "missing" || f_isCanonicalRepositoryDestination(destination));
+}
 function f_interceptRepositoryLink(plugin, event, destination, sourcePath) {
   const resolved = plugin.f_resolveLinkTarget({ destination }, sourcePath);
-  if (resolved.kind === "ignored") return false;
+  if (!f_managesRepositoryNavigation(destination, resolved)) return false;
   event.preventDefault();
   event.stopImmediatePropagation();
   if (event.type === "contextmenu") {
@@ -9079,8 +9312,7 @@ function registerPostProcessor(plugin) {
       const destination = link.dataset.href || link.getAttribute("href");
       if (!destination || !f_isCanonicalRepositoryDestination(destination) && !/^\.\.?\//.test(destination)) continue;
       const result = plugin.f_resolveLinkTarget({ destination }, ctx.sourcePath);
-      if (!f_isCanonicalRepositoryDestination(destination) && result.kind === "missing") continue;
-      if (result.kind === "ignored" && !result.repository) continue;
+      if (!f_managesRepositoryNavigation(destination, result) && !(result.kind === "ignored" && result.repository)) continue;
       link.addEventListener("click", (event) => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       link.addEventListener("contextmenu", (event) => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       if (result.kind === "ignored") continue;
@@ -9088,7 +9320,7 @@ function registerPostProcessor(plugin) {
       link.title = result.reason || result.normalizedPath;
       if (!plugin.settings.showTokenCounts) continue;
       const badge = link.createSpan({ cls: "atpath-token-count" });
-      badge.title = "Approximate tokens from character count";
+      badge.title = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count.";
       if (result.kind === "folder") f_bindReadingFolderCount(plugin, ctx, badge, result.normalizedPath);
       else {
         if (result.kind === "missing") badge.textContent = " (unavailable)";
@@ -9273,7 +9505,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new Setting(containerEl).setName("Show token counts").setDesc("Display approximate token counts next to linked targets and in the status bar. Counts use four characters per token.").addToggle(
+    new Setting(containerEl).setName("Show token counts").setDesc("Show estimates beside links and explorer rows and in the status bar. Estimates use characters / 4. Sample errors ranged from \u221256% to +60%; JSON/CSV may need over twice the displayed count. These are not hard context limits.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTokenCounts).onChange(async (value) => {
         this.plugin.settings.showTokenCounts = value;
         await this.plugin.saveSettings();
@@ -9776,6 +10008,7 @@ var AtPathPlugin = class extends Plugin {
     const vault = this.app.vault;
     const vaultKey = this.app.appId || vault.adapter.getBasePath?.() || vault.getName();
     this._tokenIndex = f_createTokenIndex({
+      enabled: this.settings.showTokenCounts,
       getFiles: () => [...vault.getFiles(), ...this._unindexedTargets.values()],
       read: (file) => this.f_readLinkedFile(file),
       isEligible: (file) => this.f_eligibleLinkedFile(file),
@@ -9806,7 +10039,9 @@ var AtPathPlugin = class extends Plugin {
         formatTokens: (tokens) => formatTokens(tokens).slice(1),
         isEnabled: () => this.settings.showTokenCounts
       });
-      void this._tokenIndex.start().catch((error) => console.warn("AtPath could not start token counting", error));
+      if (this.settings.showTokenCounts) {
+        void this._tokenIndex.start().catch((error) => console.warn("AtPath could not start token counting", error));
+      }
     });
     this.register(() => {
       this._explorerTokenBadges?.dispose();
@@ -9815,6 +10050,7 @@ var AtPathPlugin = class extends Plugin {
       clearTimeout(this._statusBarTimeout);
     });
     this.repositories = [];
+    this._sourceCheckoutChecks = /* @__PURE__ */ new Map();
     this._repositoryAliasAttempts = /* @__PURE__ */ new Map();
     const suggest = new AtPathSuggest(this);
     this.registerEditorSuggest(suggest);
@@ -9843,6 +10079,7 @@ var AtPathPlugin = class extends Plugin {
       name: "Refresh repository map",
       callback: () => {
         this._repositoryAliasAttempts.clear();
+        this._repositoryAliasWarning = false;
         return this.f_refreshRepositoryIndex();
       }
     });
@@ -9968,7 +10205,8 @@ var AtPathPlugin = class extends Plugin {
       })
     );
     this.registerEvent(
-      this.app.workspace.on("file-open", () => {
+      this.app.workspace.on("file-open", (file) => {
+        if (file?.extension === "md") void this.f_discoverOpenedSource(file.path);
         this._noteBufferTokens = 0;
         this._selectionTokens = 0;
         if (this.core) this.core.clearFolderTokenMemo();
@@ -10052,6 +10290,7 @@ var AtPathPlugin = class extends Plugin {
     this._linkedCountWatches.set(key, { path, folder, signature: this.f_linkedCountSignature(path, folder) });
   }
   async getTokenCount(vaultPath) {
+    if (!this.settings.showTokenCounts) return null;
     this.f_watchLinkedCount(vaultPath, false);
     const file = this.app.vault.getAbstractFileByPath(vaultPath) || this._unindexedTargets.get(vaultPath);
     return file && (file instanceof TFile || file.localOnly) ? this._tokenIndex.request(file) : null;
@@ -10576,7 +10815,7 @@ var AtPathPlugin = class extends Plugin {
     new Notice("Copied " + (includeNote ? "note" + (added ? " and " : "") : "") + (added ? added + " linked file(s)" : "") + "." + (skipped.length ? "\nSkipped " + skipped.length + " target(s):\n" + skipped.join("\n") : ""), skipped.length ? 0 : 5e3);
   }
   f_eligibleLinkedFile(file) {
-    return !BINARY_EXTENSIONS.has(file.extension.toLowerCase()) && file.stat.size <= this.settings.maxFileSizeMB * 1024 * 1024 && !this.core.isIgnored(file.path) && !file.path.split("/").some((part) => part === this.app.vault.configDir || part === ".git" || part === "node_modules");
+    return !BINARY_EXTENSIONS.has(file.extension.toLowerCase()) && file.stat.size <= this.settings.maxFileSizeMB * 1024 * 1024 && !this.core.isIgnored(file.path) && f_isEligibleLinkedPath(file.path, this.app.vault.configDir);
   }
   f_readLinkedFile(file) {
     return file.localOnly ? this.app.vault.adapter.read(file.path) : this.app.vault.cachedRead(file);
@@ -10620,6 +10859,47 @@ var AtPathPlugin = class extends Plugin {
     this._debouncedUpdateStatusBar();
     if (this._nativeRepositoryLinks) void this._nativeRepositoryLinks.refresh().catch((error) => console.warn("AtPath could not refresh repository backlinks", error));
   }
+  f_sourceCheckoutIssue(sourcePath) {
+    if (!f_isPrunedSourcePath(sourcePath)) return null;
+    const repo = f_repositoryForPath(sourcePath, this.repositories);
+    if (Platform.isMobile) {
+      return repo?.root && f_isPrunedSourcePath(repo.root + "/.atpath-source") ? null : "Source checkout is unavailable in this device's repository map: " + sourcePath;
+    }
+    const check = this._sourceCheckoutChecks?.get(sourcePath.slice(0, sourcePath.lastIndexOf("/")));
+    if (check?.reason) return check.reason;
+    if (check && check.root === repo?.root) return null;
+    return "Source checkout has not been verified: " + sourcePath;
+  }
+  async f_readOpenedSource(sourcePath, basePath) {
+    const directory = sourcePath.slice(0, sourcePath.lastIndexOf("/"));
+    try {
+      const repo = await f_discoverSourceCheckout(basePath, sourcePath);
+      if (!this._repositoryIndexClosed) this._sourceCheckoutChecks.set(directory, { root: repo.root });
+      return repo;
+    } catch (error) {
+      if (!this._repositoryIndexClosed) this._sourceCheckoutChecks.set(directory, { reason: error.message });
+      return null;
+    }
+  }
+  async f_discoverOpenedSource(sourcePath) {
+    const adapter = this.app.vault.adapter;
+    if (Platform.isMobile || this._repositoryIndexClosed || !f_isPrunedSourcePath(sourcePath) || typeof adapter.getBasePath !== "function") return;
+    await this._repositoryRefresh;
+    if (this._repositoryIndexClosed) return;
+    const directory = sourcePath.slice(0, sourcePath.lastIndexOf("/"));
+    const check = this._sourceCheckoutChecks.get(directory);
+    if (check && !check.reason && check.root === f_repositoryForPath(sourcePath, this.repositories)?.root) return;
+    const repo = await this.f_readOpenedSource(sourcePath, adapter.getBasePath());
+    if (this._repositoryIndexClosed) return;
+    if (repo && !this.repositories.some((entry) => entry.root === repo.root)) {
+      const matches = this.repositories.filter((entry) => entry.identity && entry.identity === repo.identity);
+      const aliases = [...new Set(matches.flatMap((entry) => entry.aliases || []))].sort();
+      if (aliases.length) repo.aliases = aliases;
+      this.repositories.push(repo);
+      await this.f_persistRepositoryMap().catch((error) => console.warn("AtPath could not save the opened source checkout", error));
+    }
+    this.f_repositoryIndexChanged();
+  }
   async f_refreshRepositoryIndex() {
     if (this._repositoryIndexClosed) return;
     if (this._repositoryRefresh) {
@@ -10628,6 +10908,7 @@ var AtPathPlugin = class extends Plugin {
     }
     const adapter = this.app.vault.adapter;
     this._repositoryRefresh = (async () => {
+      this._sourceCheckoutChecks.clear();
       const cached = await f_readRepositoryMap(adapter).catch((error) => {
         console.warn("AtPath could not read the repository map", error);
         return [];
@@ -10639,9 +10920,24 @@ var AtPathPlugin = class extends Plugin {
         this.f_repositoryIndexChanged();
       }
       if (!Platform.isMobile && typeof adapter.getBasePath === "function") {
-        const discovered = await f_discoverRepositories(adapter.getBasePath());
+        const basePath = adapter.getBasePath();
+        const discovered = await f_discoverRepositories(basePath);
         if (this._repositoryIndexClosed) return;
         const prior = [...cached, ...this.repositories];
+        const retainedRoots = new Set(prior.filter(
+          (repo) => repo.root && f_isPrunedSourcePath(repo.root + "/.atpath-source")
+        ).map((repo) => repo.root));
+        for (const root of retainedRoots) {
+          if (this._repositoryIndexClosed) return;
+          const retained = await f_discoverSourceCheckout(basePath, root + "/.atpath-source").catch(() => null);
+          if (retained?.root === root) discovered.push(retained);
+        }
+        const activePath = this.app.workspace.getActiveFile()?.path;
+        if (activePath && f_isPrunedSourcePath(activePath)) {
+          const activeRepo = await this.f_readOpenedSource(activePath, basePath);
+          if (activeRepo && !discovered.some((repo) => repo.root === activeRepo.root)) discovered.push(activeRepo);
+        }
+        if (this._repositoryIndexClosed) return;
         for (const repo of discovered) {
           const aliases = prior.filter((item) => item.identity && item.identity === repo.identity).flatMap((item) => item.aliases || []);
           if (aliases.length) repo.aliases = [...new Set(aliases)].sort();
@@ -10706,7 +11002,15 @@ var AtPathPlugin = class extends Plugin {
       this.repositories = repositories.filter((repo) => repo.root !== void 0 || repo.identity !== identity);
       this.f_repositoryIndexChanged();
       await this.f_persistRepositoryMap();
-    }).catch(() => {
+    }).catch((error) => {
+      if (this._repositoryAliasWarning) return;
+      if (error.code === "ENOENT") {
+        this._repositoryAliasWarning = true;
+        console.warn("AtPath cannot look up GitHub repository renames because the GitHub CLI (gh) was not found.");
+      } else if (/gh auth login|authentication required/i.test(error.stderr || "")) {
+        this._repositoryAliasWarning = true;
+        console.warn("AtPath cannot look up GitHub repository renames until the GitHub CLI is authenticated.");
+      }
     });
   }
   f_displayLinkedPath(path, sourcePath) {
@@ -10717,6 +11021,8 @@ var AtPathPlugin = class extends Plugin {
     return sourceRepo === repo ? relative || "/" : (repo.identity?.split("/")[1] ?? repo.root.split("/").pop()) + "/" + relative;
   }
   f_formatLinkedTarget(target, sourcePath) {
+    const sourceIssue = this.f_sourceCheckoutIssue?.(sourcePath);
+    if (sourceIssue) throw new Error(sourceIssue);
     return f_formatRepositoryLink(
       target.path === "/" ? "" : target.path,
       sourcePath,
@@ -10774,6 +11080,11 @@ var AtPathPlugin = class extends Plugin {
     if (lookupAlias && result.repository && (result.status === "out-of-scope" || result.status === "missing" && result.vaultPath === void 0)) this.f_requestRepositoryAlias(result.repository);
     if (result.status === "out-of-scope") {
       return { ...result, kind: "ignored" };
+    }
+    const sourceIssue = this.f_sourceCheckoutIssue?.(sourcePath);
+    if (sourceIssue) return { status: "missing", kind: "missing", reason: sourceIssue, sourcePath };
+    if (result.status === "missing" && /^\/(?:Users|home|Volumes|private|tmp)\//.test(ref.destination)) {
+      result.reason = "This absolute-looking destination is repository-relative. Migrate it to a repository path or a workspace GitHub link.";
     }
     if (result.status !== "resolved" && !f_isCanonicalRepositoryDestination(ref.destination)) {
       const pathname = ref.destination.split(/[?#]/)[0];
@@ -10867,39 +11178,17 @@ var AtPathPlugin = class extends Plugin {
     if (this._repositoryIndexClosed || !this.repositories.length) return;
     for (const mdFile of this.app.vault.getMarkdownFiles()) {
       if (this._repositoryIndexClosed) break;
-      const sourceAfter = mdFile.path;
-      const sourceBefore = sourceAfter === newPath || sourceAfter.startsWith(newPath + "/") ? oldPath + sourceAfter.slice(newPath.length) : sourceAfter;
-      const sourceMovedRepo = f_repositoryForPath(sourceAfter, this.repositories) !== f_repositoryForPath(sourceBefore, this.repositories);
-      const rewrite = (content2) => {
-        let output = content2;
-        for (const ref of this.f_scanMarkdownRefs(content2).reverse()) {
-          if (!f_isCanonicalRepositoryDestination(ref.destination)) continue;
-          const result = f_resolveRepositoryLink(ref, {
-            sourcePath: sourceBefore,
-            repositories: this.repositories,
-            getTargetType: (path) => {
-              const targetPath2 = path === oldPath || path.startsWith(oldPath + "/") ? newPath + path.slice(oldPath.length) : path;
-              const target = this.app.vault.getAbstractFileByPath(targetPath2);
-              return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
-            }
-          });
-          if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref || "")) continue;
-          const moved = result.vaultPath === oldPath || result.vaultPath.startsWith(oldPath + "/");
-          if (!moved && !sourceMovedRepo) continue;
-          const targetPath = moved ? newPath + result.vaultPath.slice(oldPath.length) : result.vaultPath;
-          let replacement;
-          try {
-            replacement = f_formatRepositoryLink(targetPath, sourceAfter, this.repositories, result.kind);
-          } catch (error) {
-            console.warn("AtPath could not update repository link", mdFile.path, ref.destination, error);
-            continue;
-          }
-          const suffix = ref.destination.match(/[?#].*$/)?.[0] || "";
-          if (suffix) replacement = replacement.slice(0, -1) + suffix + ")";
-          output = output.slice(0, ref.start) + replacement + output.slice(ref.end);
-        }
-        return output;
-      };
+      const rewrite = (content2) => f_rewriteRepositoryDestinations(content2, {
+        sourcePath: mdFile.path,
+        oldPath,
+        newPath,
+        repositories: this.repositories,
+        getTargetType: (path) => {
+          const target = path ? this.app.vault.getAbstractFileByPath(path) : this.app.vault.getRoot();
+          return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
+        },
+        onError: (error, destination) => console.warn("AtPath could not update repository link", mdFile.path, destination, error)
+      });
       const content = await this.app.vault.cachedRead(mdFile);
       if (rewrite(content) !== content) await this.app.vault.process(mdFile, rewrite);
     }
@@ -11440,7 +11729,13 @@ var AtPathPlugin = class extends Plugin {
     new Notice("Migrated " + replaced + " legacy links." + (stale.length ? "\nSkipped files changed since preview:\n" + stale.join("\n") : ""), stale.length ? 0 : 5e3);
   }
   onTokenSettingsChanged() {
-    void this._tokenIndex.sync();
+    const enabled = this.settings.showTokenCounts;
+    this._tokenIndex.setEnabled(enabled);
+    if (enabled) {
+      void this._tokenIndex.start().then(() => {
+        if (this.settings.showTokenCounts) return this._tokenIndex.sync();
+      }).catch((error) => console.warn("AtPath could not refresh token counts", error));
+    }
     this._explorerTokenBadges?.refresh();
     this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
     this.tokenCacheDirty = true;

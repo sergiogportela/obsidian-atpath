@@ -53,7 +53,18 @@ Click a repository link in Live Preview or Reading mode to open the local file, 
 
 Approximate counts appear beside links, visible File Explorer rows, and in the desktop status bar. Folder totals update incrementally; pending or skipped content is identified. Click the status bar to copy the note and its linked content.
 
-The estimate is `ceil(character count / 4)`, marked `~`. A 62-file Markdown/Python/JavaScript calibration against the GPT-4o tokenizer observed per-file errors from −20.5% to +17.8%; this is a sample, not an error guarantee for other text or models. Counts exclude model instructions and message history. Content reads run through a yielding queue, and validated file snapshots persist in device-local IndexedDB rather than synced settings.
+The estimate is `ceil(character count / 4)`, marked `~`. **JSON and CSV can require over twice the displayed count.** A broader workspace calibration against `o200k_base` found the following per-file errors (negative means an underestimate):
+
+| Content | Files | Observed error |
+| --- | ---: | ---: |
+| Portuguese Markdown | 40 | −33.7% to +13.9% |
+| Python | 40 | −24.7% to +7.0% |
+| SQL | 28 | −26.4% to +59.3% |
+| YAML | 18 | −42.5% to +57.7% |
+| JSON | 40 | −55.6% to +4.8% |
+| CSV | 13 | −50.4% to −47.3% |
+
+These are observed samples, not guaranteed bounds for other files or models; Claude tokenizers were not tested. An earlier 62-file Markdown/Python/JavaScript sample had a narrower −20.5% to +17.8% range. Use a model's actual tokenizer for hard context limits. Counts exclude model instructions and message history. Content reads run through a yielding queue, and validated file snapshots persist in device-local IndexedDB rather than synced settings.
 
 <p align="center">
   <img src="screenshots/status-bar.png" width="500" alt="Status bar showing total token count with tooltip breakdown" />
@@ -63,9 +74,13 @@ The estimate is `ceil(character count / 4)`, marked `~`. A 62-file Markdown/Pyth
 
 Copy the current editor buffer with referenced text files appended in fenced blocks. Folder references expand recursively, with file-size/count limits and skipped-file reporting. Overlapping file and folder references are deduplicated by local target path.
 
+Counting, copy and linked-page collection exclude generated directories, Git/plugin metadata, binary content and sensitive filenames such as `.env`, private keys and `credentials.json`. Native indexed descendants define folder scope; explicitly linked eligible files outside the index are handled individually. AtPath's configurable defaults are 5 MB per file and 500 candidates per folder. AgentKit uses stricter dispatch limits of 1 MB per file, 100 files and 10 MB total; an AtPath estimate does not override those limits.
+
 ### Publish to Vercel
 
 Deploy notes and standalone HTML apps to Vercel with one click. Notes can publish linked local content, while `.html` files in the File Explorer can publish either as a single-file app or as a whole folder-based static site. Included repository links are rewritten to their published pages by resolved target, independently of their display labels; the downloadable Markdown remains the original source.
+
+The linked-page preview includes every eligible resolved local file linked from the main note, including ordinary Markdown links. Review that list before confirming publication. Links to local content excluded from the publication become inert text in the generated page.
 
 Private publishing is supported through Clerk, and the publish flow also stores a reusable site icon so your deployed pages can show a favicon in browser tabs without asking every time.
 
@@ -87,11 +102,15 @@ Published pages include collapsible sections, foldable bold list items, inlined 
 
 Desktop discovery builds `repository-map.json` with vault-relative checkout roots and normalized GitHub identities. A mobile device consumes the synchronized map without needing `.git`. Configure the map's Sync coverage separately; excluded content remains unavailable on that device. The map contains no publishing credentials and describes one person's checkout layout.
 
+The map also records known refs to disambiguate GitHub URL paths; it should be excluded from Git. Discovery skips generated and task-data trees. Opening a note in such a tree verifies its Git checkout separately and adds it to the map, without scanning sibling task directories. Unverified desktop sources or unmapped mobile sources report a diagnostic instead of inheriting the wrong repository root.
+
 Use **Refresh repository map** after changes made outside Obsidian. Authenticated desktop GitHub rename lookup uses `gh` for unresolved names within known workspace organizations; it never downloads file content. URLs with an ambiguous slash-containing revision require a known ref boundary or explicit encoding and produce a diagnostic rather than a guessed path.
 
 ### Auto-Update References
 
 AtPath updates repository links for file/folder moves performed through Obsidian, including source notes moved between repositories. Intentional commit-SHA destinations remain unchanged. Moving an entire checkout updates its map location instead of rewriting canonical references.
+
+Only destinations change: existing labels, link titles, reference definitions, autolink syntax and non-main refs are preserved.
 
 ## Settings
 

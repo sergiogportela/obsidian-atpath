@@ -3,10 +3,10 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { execFileSync } = require("node:child_process");
-const { mkdir, mkdtemp, rm, symlink } = require("node:fs/promises");
+const { mkdir, mkdtemp, rm, symlink, writeFile } = require("node:fs/promises");
 const { join } = require("node:path");
 const {
-  REPOSITORY_MAP_PATH, f_discoverRepositories, f_readRepositoryMap, f_writeRepositoryMap,
+  REPOSITORY_MAP_PATH, f_discoverRepositories, f_lookupRenamedRepository, f_readRepositoryMap, f_writeRepositoryMap,
 } = require("../src/repository-index");
 
 test("desktop discovery preserves innermost Git worktrees and repositories without origins", async t => {
@@ -16,19 +16,42 @@ test("desktop discovery preserves innermost Git worktrees and repositories witho
   const parent = join(cwd, "local-checkout");
   const child = join(parent, "nested");
   const storage = join(base, "child-git");
+  const invalid = join(parent, "not-a-repo");
   const skipped = join(cwd, "node_modules");
-  await Promise.all([mkdir(child, { recursive: true }), mkdir(skipped, { recursive: true })]);
+  await Promise.all([mkdir(child, { recursive: true }), mkdir(skipped, { recursive: true }), mkdir(join(invalid, ".git"), { recursive: true })]);
   execFileSync("git", ["init", "-q"], { cwd });
   execFileSync("git", ["init", "-q"], { cwd: parent });
   execFileSync("git", ["config", "--local", "remote.origin.url", "git@github.com:Org/Actual-Name.git"], { cwd: parent });
   execFileSync("git", ["init", "-q", "--separate-git-dir", storage], { cwd: child });
   execFileSync("git", ["init", "-q"], { cwd: skipped });
   await symlink(child, join(cwd, "redirect"), "dir");
+  const warnings = [];
+  t.mock.method(console, "warn", message => warnings.push(message));
   assert.deepEqual(await f_discoverRepositories(cwd), [
     { root: "", identity: null, refs: [] },
     { root: "local-checkout", identity: "org/actual-name", refs: [] },
     { root: "local-checkout/nested", identity: null, refs: [] },
   ]);
+  assert.deepEqual(warnings, ["AtPath skipped invalid Git marker: " + join(invalid, ".git")]);
+});
+
+test("missing Git executable rejects discovery so the caller retains the cache", async t => {
+  const base = await mkdtemp(join(process.cwd(), ".repository-no-git-test-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(join(base, ".git"));
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  Module._load = function (id, ...rest) {
+    if (id === "child_process") return {
+      execFile: (_name, _args, _options, callback) => callback(Object.assign(new Error("git was not found"), { code: "ENOENT" })),
+    };
+    return originalLoad.call(this, id, ...rest);
+  };
+  try {
+    await assert.rejects(f_discoverRepositories(base), { code: "ENOENT" });
+  } finally {
+    Module._load = originalLoad;
+  }
 });
 
 test("repository map persists only when changed and rejects traversal roots", async () => {
@@ -53,12 +76,38 @@ test("repository map persists only when changed and rejects traversal roots", as
   await assert.rejects(f_readRepositoryMap(adapter), /Invalid repository map entry/);
 });
 
-function f_loadPlugin() {
+test("rename lookup invokes the GitHub CLI and adds macOS Homebrew locations", async () => {
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  let command;
+  Module._load = function (id, ...rest) {
+    if (id === "child_process") return {
+      execFile: (name, args, options, callback) => {
+        command = { name, args, options };
+        callback(null, { stdout: "Org/New-Name\n" });
+      },
+    };
+    return originalLoad.call(this, id, ...rest);
+  };
+  try {
+    assert.equal(await f_lookupRenamedRepository("org/old-name"), "org/new-name");
+  } finally {
+    Module._load = originalLoad;
+  }
+  assert.equal(command.name, "gh");
+  assert.deepEqual(command.args, ["api", "repos/org/old-name", "--jq", ".full_name"]);
+  if (process.platform === "darwin") {
+    assert.ok(command.options.env.PATH.split(":").includes("/opt/homebrew/bin"));
+    assert.ok(command.options.env.PATH.split(":").includes("/usr/local/bin"));
+  }
+});
+
+function f_loadPlugin(isMobile = true) {
   const Module = require("node:module");
   const obsidian = require("obsidian");
   const originalLoad = Module._load;
   Module._load = function (id, ...rest) {
-    if (id === "obsidian") return { ...obsidian, Platform: { isMobile: true } };
+    if (id === "obsidian") return { ...obsidian, Platform: { isMobile } };
     if (id === "@codemirror/view") return {
       ViewPlugin: { define: (_plugin, options) => options },
       EditorView: { domEventHandlers: handlers => handlers },
@@ -72,11 +121,92 @@ function f_loadPlugin() {
     return originalLoad.call(this, id, ...rest);
   };
   try {
+    delete require.cache[require.resolve("../src/main")];
     return require("../src/main");
   } finally {
     Module._load = originalLoad;
   }
 }
+
+test("opened task worktrees use their own checkout and invalid Git markers cannot fall back to the parent", async t => {
+  const base = await mkdtemp(join(process.cwd(), ".repository-source-test-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const vaultPath = join(base, "vault");
+  const taskRoot = "data/0_llm/worktrees/task";
+  const invalidRoot = "data/0_llm/worktrees/invalid";
+  const taskDirectory = join(vaultPath, taskRoot);
+  const invalidDirectory = join(vaultPath, invalidRoot);
+  await Promise.all([
+    mkdir(join(taskDirectory, "_work_units"), { recursive: true }),
+    mkdir(invalidDirectory, { recursive: true }),
+  ]);
+  execFileSync("git", ["init", "-q"], { cwd: vaultPath });
+  execFileSync("git", ["init", "-q", "--separate-git-dir", join(base, "task.git")], { cwd: taskDirectory });
+  execFileSync("git", ["config", "--local", "remote.origin.url", "git@github.com:Org/Task.git"], { cwd: taskDirectory });
+  await writeFile(join(invalidDirectory, ".git"), "gitdir: ../missing");
+  await Promise.all([
+    writeFile(join(vaultPath, "README.md"), "parent"),
+    writeFile(join(taskDirectory, "README.md"), "task"),
+  ]);
+
+  const AtPath = f_loadPlugin(false);
+  const plugin = new AtPath();
+  const { TFile } = require("obsidian");
+  const readme = new TFile(taskRoot + "/README.md");
+  const parentReadme = new TFile("README.md");
+  const files = new Map([parentReadme, readme].map(file => [file.path, file]));
+  const sourcePath = taskRoot + "/_work_units/source.md";
+  let activePath = sourcePath;
+  let savedMap;
+  plugin.app = {
+    vault: {
+      adapter: {
+        getBasePath: () => vaultPath,
+        exists: async () => savedMap !== undefined,
+        read: async () => savedMap,
+        write: async (_path, value) => { savedMap = value; },
+      },
+      getAbstractFileByPath: path => files.get(path),
+    },
+    workspace: { getActiveFile: () => ({ path: activePath }) },
+  };
+  plugin.repositories = await f_discoverRepositories(vaultPath);
+  plugin._sourceCheckoutChecks = new Map();
+  plugin._unindexedTargets = new Map();
+  plugin.f_repositoryIndexChanged = () => {};
+  plugin._nativeRepositoryLinks = {};
+  assert.deepEqual(plugin.repositories.map(repo => repo.root), [""]);
+  const link = { destination: "/README.md" };
+  assert.match(plugin.f_resolveLinkTarget(link, sourcePath).reason, /not been verified/);
+
+  await plugin.f_refreshRepositoryIndex();
+  assert.equal(plugin.f_resolveLinkTarget(link, sourcePath).target, readme);
+  assert.equal(JSON.parse(savedMap).repositories.find(repo => repo.root === taskRoot).identity, "org/task");
+
+  const invalidSource = invalidRoot + "/source.md";
+  await plugin.f_discoverOpenedSource(invalidSource);
+  assert.match(plugin.f_resolveLinkTarget(link, invalidSource).reason, /Invalid Git marker.*invalid\/\.git/);
+  assert.equal(plugin.f_resolveLinkTarget(link, invalidSource).normalizedPath, undefined);
+
+  activePath = "source.md";
+  await plugin.f_refreshRepositoryIndex();
+  assert.equal(JSON.parse(savedMap).repositories.find(repo => repo.root === taskRoot).identity, "org/task");
+  assert.equal(plugin.f_resolveLinkTarget(link, activePath).target, parentReadme);
+  await plugin.f_discoverOpenedSource(sourcePath);
+  assert.equal(plugin.f_resolveLinkTarget(link, sourcePath).target, readme);
+  const looseSource = "data/source.md";
+  assert.match(plugin.f_resolveLinkTarget(link, looseSource).reason, /not been verified/);
+  await plugin.f_discoverOpenedSource(looseSource);
+  assert.equal(plugin.f_resolveLinkTarget(link, looseSource).target, parentReadme);
+
+  const MobileAtPath = f_loadPlugin();
+  const mobile = new MobileAtPath();
+  mobile.app = plugin.app;
+  mobile._unindexedTargets = new Map();
+  mobile.repositories = JSON.parse(savedMap).repositories;
+  assert.equal(mobile.f_resolveLinkTarget(link, sourcePath).target, readme);
+  assert.match(mobile.f_resolveLinkTarget(link, invalidSource).reason, /unavailable in this device's repository map/);
+});
 
 test("normal plugin registration prioritizes [[ and consumes its closing pair", async t => {
   const AtPath = f_loadPlugin();
@@ -93,7 +223,9 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
   };
   plugin.loadSettings = async () => { plugin.settings = {}; };
   plugin.registerEditorSuggest = suggest => suggests.push(suggest);
-  for (const name of ["register", "registerEditorExtension", "registerEvent", "registerDomEvent",
+  const editorHandlers = new Map();
+  plugin.registerDomEvent = (_element, name, handler) => editorHandlers.set(name, handler);
+  for (const name of ["register", "registerEditorExtension", "registerEvent",
     "addCommand", "addSettingTab", "registerMarkdownPostProcessor"]) plugin[name] = () => {};
   const oldDocument = globalThis.document;
   globalThis.document = {};
@@ -121,6 +253,33 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
     text = "Before " + nativeQuery;
     assert.equal(suggest.onTrigger({ line: 0, ch: text.length }, editor, source), null, nativeQuery);
   }
+
+  const opened = [];
+  plugin.f_resolveLinkTarget = ({ destination }) => ({ destination, kind: "missing", reason: "Local target is unavailable" });
+  plugin.f_resolveLinkTargetAsync = async ref => plugin.f_resolveLinkTarget(ref);
+  plugin.f_openRepositoryTarget = async result => { opened.push(result); };
+  const f_editorEvent = (type, destination) => {
+    const actions = [];
+    const link = {
+      dataset: { atpathDestination: destination, atpathSource: source.path },
+      closest: () => link,
+    };
+    return {
+      type, button: 0, actions, target: link,
+      preventDefault: () => actions.push("prevent"),
+      stopImmediatePropagation: () => actions.push("stop"),
+    };
+  };
+  for (const type of ["click", "contextmenu"]) {
+    const ordinary = f_editorEvent(type, "Note.md");
+    editorHandlers.get(type)(ordinary);
+    assert.deepEqual(ordinary.actions, [], "unresolved ordinary relative links keep native " + type);
+  }
+  const canonical = f_editorEvent("click", "/missing.md");
+  editorHandlers.get("click")(canonical);
+  assert.deepEqual(canonical.actions, ["prevent", "stop"]);
+  await Promise.resolve();
+  assert.deepEqual(opened, [{ destination: "/missing.md", kind: "missing", reason: "Local target is unavailable" }]);
 });
 
 test("canonical linked copy and publishing collection trust destination and deduplicate descendants", async t => {
@@ -156,6 +315,11 @@ test("canonical linked copy and publishing collection trust destination and dedu
     if (original) Object.defineProperty(globalThis, "navigator", original);
     else delete globalThis.navigator;
   });
+  const absoluteDestination = { destination: "/Users/example/old.md" };
+  assert.match(plugin.f_resolveLinkTarget(absoluteDestination, source.path).reason, /migrate|repository-relative/i);
+  const validUsersFile = new TFile("checkout/Users/example/old.md");
+  files.set(validUsersFile.path, validUsersFile);
+  assert.equal(plugin.f_resolveLinkTarget(absoluteDestination, source.path).target, validUsersFile);
   await plugin.copyNoteWithAtPaths();
   assert.equal(clipboard.split("ACTUAL FILE").length, 2);
   assert.match(clipboard, /^\[wrong\]\(\/docs\/actual.md\)/);
@@ -229,5 +393,5 @@ test("repository rename rewrites local targets while preserving query, fragment 
     },
   } };
   await plugin.f_rewriteRepositoryReferences(target.path, "checkout/old.md");
-  assert.equal(text, "[new.md](/new.md?raw=1#Heading)\n" + shaLink);
+  assert.equal(text, "[Old](/new.md?raw=1#Heading)\n" + shaLink);
 });

@@ -74,6 +74,76 @@ test("explicit unindexed targets have direct estimates and no folder contributio
   }
 });
 
+test("disabled counts do not read content and queued estimates resume when enabled", async () => {
+  const first = f_file("first.md", "abcd");
+  const next = f_file("next.md", "abcdefgh");
+  const started = f_deferred();
+  const release = f_deferred();
+  const readPaths = [];
+  const index = f_index([first, next], {
+    enabled: false,
+    read: async file => {
+      readPaths.push(file.path);
+      if (file === first) {
+        started.resolve();
+        await release.promise;
+      }
+      return file.text;
+    },
+  });
+  try {
+    await index.start();
+    assert.equal(await index.request(first), null);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(readPaths, []);
+    index.setEnabled(true);
+    await started.promise;
+    const nextRequest = index.request(next);
+    index.setEnabled(false);
+    assert.equal(await nextRequest, null);
+    release.resolve();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(readPaths, [first.path]);
+    index.setEnabled(true);
+    assert.equal(await index.request(next), 2);
+    assert.deepEqual(readPaths, [first.path, next.path]);
+  } finally {
+    release.resolve();
+    await index.dispose();
+  }
+});
+
+test("cache checkpoints preserve completed work despite continuous queue progress", async t => {
+  try {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+  } catch (error) {
+    if (error.code !== "ERR_INVALID_ARG_TYPE") throw error;
+    t.mock.timers.enable(["setTimeout"]);
+  }
+  const files = Array.from({ length: 12 }, (_, index) => f_file("note-" + index + ".md", "abcd"));
+  const delays = files.map(f_deferred);
+  const checkpoints = [];
+  const index = f_index(files, {
+    read: file => delays[files.indexOf(file)].promise,
+    save: async value => { checkpoints.push(value); },
+  });
+  try {
+    await index.start();
+    for (let indexInQueue = 0; indexInQueue <= 10; indexInQueue++) {
+      const request = index.request(files[indexInQueue]);
+      t.mock.timers.tick(indexInQueue === 0 ? 0 : 500);
+      delays[indexInQueue].resolve(files[indexInQueue].text);
+      assert.equal(await request, 1);
+    }
+    assert.equal(checkpoints.length, 1, "continuous reads must not postpone the checkpoint");
+    assert.equal(Object.keys(checkpoints[0].files).length, 10);
+    assert.equal(checkpoints[0].files["note-0.md"].tokens, 1);
+  } finally {
+    for (let i = 0; i < files.length; i++) delays[i].resolve(files[i].text);
+    await index.dispose();
+  }
+});
+
 test("restart reuses warm counts only for matching estimator version, mtime and size", async () => {
   const note = f_file("note.md", "12345678");
   const binary = f_file("sniffed.md", "\0");

@@ -5,21 +5,82 @@ const markdownParser = new MarkdownIt({ html: true });
 markdownParser.normalizeLink = value => value;
 markdownParser.validateLink = () => true;
 
+let captureDestination;
+const parseLinkDestination = markdownParser.helpers.parseLinkDestination;
+markdownParser.helpers.parseLinkDestination = (text, start, max) => {
+  const result = parseLinkDestination(text, start, max);
+  if (captureDestination && result.ok) {
+    const angle = text[start] === "<";
+    captureDestination({ destination: result.str, start: start + Number(angle), end: result.pos - Number(angle) });
+  }
+  return result;
+};
+
+function f_captureDestination(parse, accepts = () => true) {
+  const previous = captureDestination;
+  let destination;
+  captureDestination = value => { if (accepts()) destination = value; };
+  try {
+    return { matched: parse(), destination };
+  } finally {
+    captureDestination = previous;
+  }
+}
+
 for (const name of ["link", "autolink"]) {
   // markdown-it exposes block line maps, but no inline source offsets.
   const rule = markdownParser.inline.ruler.__rules__.find(entry => entry.name === name).fn;
   markdownParser.inline.ruler.at(name, (state, silent) => {
     const start = state.pos;
     const tokenCount = state.tokens.length;
-    const matched = rule(state, silent);
+    const { matched, destination } = state.env.repositoryDefinitions && name === "link" && state.src.charCodeAt(start) === 0x5b
+      // The link rule parses its own destination at the original cursor.
+      // It moves the cursor before inspecting or tokenizing the label, where
+      // nested image rules can also call parseLinkDestination.
+      ? f_captureDestination(() => rule(state, silent), () => state.pos === start)
+      : { matched: rule(state, silent) };
     if (matched && !silent) {
       const first = state.tokens[tokenCount];
       const token = first.type === "link_open" ? first : state.tokens[tokenCount + 1];
       token.meta = { start, end: state.pos };
+      if (state.env.repositoryDefinitions) {
+        if (name === "autolink") token.meta.destination = { start: start + 1, end: state.pos - 1 };
+        // A failed inline parse can fall back to a shorter reference link.
+        else if (destination?.end < state.pos && destination.destination === token.attrGet("href")) {
+          token.meta.destination = destination;
+        }
+      }
     }
     return matched;
   });
 }
+
+const { fn: parseReference, alt: referenceAlternatives } = markdownParser.block.ruler.__rules__
+  .find(entry => entry.name === "reference");
+markdownParser.block.ruler.at("reference", (state, startLine, endLine, silent) => {
+  const definitions = state.env.repositoryDefinitions;
+  if (!definitions || silent || state.src.charCodeAt(state.bMarks[startLine] + state.tShift[startLine]) !== 0x5b) {
+    return parseReference(state, startLine, endLine, silent);
+  }
+  const { matched, destination } = f_captureDestination(() => parseReference(state, startLine, endLine, silent));
+  if (matched && destination) {
+    let { start, end } = destination;
+    // The reference rule joins continuation lines after stripping container
+    // prefixes and indentation. A destination itself occupies one line.
+    for (let line = startLine; line < state.line; line++) {
+      const prefix = state.bMarks[line] + state.tShift[line];
+      const length = state.eMarks[line] - prefix;
+      if (start <= length && end <= length) {
+        const lineStart = state.src.lastIndexOf("\n", prefix - 1) + 1;
+        definitions.push({ destination: destination.destination, line, col: prefix - lineStart + start, length: end - start });
+        break;
+      }
+      start -= length + 1;
+      end -= length + 1;
+    }
+  }
+  return matched;
+}, { alt: referenceAlternatives });
 
 function f_inlineSourceMap(content, sourceLines, firstLine, tableColumn) {
   let inlineOffset = 0;
@@ -56,7 +117,7 @@ function f_sourcePosition(offset, ranges, sourceLines, firstLine) {
   return { line, col, offset: sourceLines[line].offset + col };
 }
 
-function f_scanMarkdownLinks(markdown) {
+function f_scanMarkdownLinks(markdown, { destinationRanges = false } = {}) {
   const links = [];
   let offset = 0;
   const sourceLines = markdown.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g).map(line => {
@@ -72,7 +133,8 @@ function f_scanMarkdownLinks(markdown) {
   const body = markdown.slice(0, bodyStart).replace(/[^\r\n]/g, " ") + markdown.slice(bodyStart);
   let tableLine = 0;
   let tableColumn = 0;
-  for (const block of markdownParser.parse(body, {})) {
+  const env = destinationRanges ? { repositoryDefinitions: [] } : {};
+  for (const block of markdownParser.parse(body, env)) {
     if (block.type === "tr_open") {
       tableLine = block.map[0];
       tableColumn = 0;
@@ -94,8 +156,18 @@ function f_scanMarkdownLinks(markdown) {
         if (child.type === "link_close") depth--;
         label += child.type.endsWith("break") ? "\n" : child.content;
       }
-      links.push({ destination: token.attrGet("href"), label, position: { start, end } });
+      const link = { destination: token.attrGet("href"), label, position: { start, end } };
+      if (token.meta.destination) {
+        const from = f_sourcePosition(token.meta.destination.start, ranges, sourceLines, firstLine);
+        const to = f_sourcePosition(token.meta.destination.end, ranges, sourceLines, firstLine);
+        if (from && to) link.destinationRange = { start: from.offset, end: to.offset };
+      }
+      links.push(link);
     }
+  }
+  for (const { destination, line, col, length } of env.repositoryDefinitions ?? []) {
+    const start = sourceLines[line].offset + col;
+    links.push({ destination, destinationRange: { start, end: start + length } });
   }
   return links;
 }
@@ -149,17 +221,18 @@ function f_githubRefAndPath(raw, refs, kind) {
   }
   const parts = f_decodePathSegments(rest.join("/"));
   if (kind === "file" && !parts.some(Boolean)) throw new URIError("GitHub file path is empty");
-  if (ref.includes("/")) return { ref, parts };
+  if (ref.includes("/")) return { ref, rawRef: first, parts };
   const tail = [ref, ...parts].join("/");
   const matches = [...new Set(refs || [])].filter(name => tail === name || tail.startsWith(name + "/"));
   if (matches.length > 1) return null;
   if (matches.length === 1) {
-    return { ref: matches[0], parts: parts.slice(matches[0].split("/").length - 1) };
+    const boundary = matches[0].split("/").length - 1;
+    return { ref: matches[0], rawRef: [first, ...rest.slice(0, boundary)].join("/"), parts: parts.slice(boundary) };
   }
   const conventionalRef = /^(?:main|master|HEAD|[\da-f]{7,64})$/i.test(ref);
   const pathSegments = parts.filter(Boolean).length;
   const uniqueBoundary = kind === "folder" ? pathSegments === 0 : pathSegments === 1;
-  return conventionalRef || uniqueBoundary ? { ref, parts } : null;
+  return conventionalRef || uniqueBoundary ? { ref, rawRef: first, parts } : null;
 }
 
 function f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType }) {
@@ -190,6 +263,7 @@ function f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType
       const parsed = f_githubRefAndPath(github[3], repo.refs, expectedKind);
       if (!parsed) return fail("ambiguous", "GitHub ref boundary is ambiguous");
       result.ref = parsed.ref;
+      result.rawRef = parsed.rawRef;
       parts = parsed.parts;
       if (expectedKind === "file" && !parts.some(Boolean)) throw new URIError("GitHub file path is empty");
     } else {
@@ -218,13 +292,13 @@ function f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType
   return { ...result, status: "resolved", kind };
 }
 
-function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
+function f_repositoryLinkParts(targetPath, sourcePath, repositories, kind, github) {
   const source = f_repositoryForPath(sourcePath, repositories);
   const target = f_repositoryForPath(targetPath, repositories);
   if (!source || !target) throw new Error("Repository map is unavailable for this link");
   const sameCheckout = source.root === target.root;
-  if (!sameCheckout && (!target.identity || source.identity === target.identity ||
-    repositories.filter(repo => typeof repo.root === "string" && repo.identity === target.identity).length !== 1)) {
+  if ((github && !target.identity) || (!sameCheckout && (!target.identity || source.identity === target.identity ||
+    repositories.filter(repo => typeof repo.root === "string" && repo.identity === target.identity).length !== 1))) {
     throw new Error("Target checkout cannot be addressed by a unique GitHub link");
   }
   const relative = f_repoPath(targetPath, target);
@@ -233,10 +307,71 @@ function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
   ).join("/");
   const directory = kind === "folder";
   const suffix = directory && relative ? "/" : "";
-  const destination = sameCheckout ? "/" + encoded + suffix :
-    "https://github.com/" + target.identity + "/" + (directory ? "tree" : "blob") + "/main/" + encoded + suffix;
+  const destination = sameCheckout && !github ? "/" + encoded + suffix :
+    "https://github.com/" + (github?.identity ?? target.identity) + "/" + (directory ? "tree" : "blob")
+      + "/" + (github?.ref ?? "main") + "/" + encoded + suffix;
   const label = (sameCheckout ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
+  return { label, destination };
+}
+
+function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
+  const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
   return "[" + label.replace(/([\\\[\]*_`<>&~])/g, "\\$1") + "](" + destination + ")";
 }
 
-module.exports = { f_scanMarkdownLinks, f_originIdentity, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink };
+function f_rewriteRepositoryDestinations(markdown, { sourcePath, oldPath, newPath, repositories, getTargetType, onError }) {
+  const f_wasMoved = path => path === oldPath || path.startsWith(oldPath + "/");
+  const f_move = path => f_wasMoved(path) ? newPath + path.slice(oldPath.length) : path;
+  const sourceBefore = sourcePath === newPath || sourcePath.startsWith(newPath + "/")
+    ? oldPath + sourcePath.slice(newPath.length)
+    : sourcePath;
+  const sourceMovedRepo = f_repositoryForPath(sourcePath, repositories) !== f_repositoryForPath(sourceBefore, repositories);
+  const edits = [];
+  for (const link of f_scanMarkdownLinks(markdown, { destinationRanges: true })) {
+    if (!link.destinationRange) continue;
+    const github = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:blob|tree)\//i.exec(link.destination);
+    if (!github && (!link.destination.startsWith("/") || link.destination.startsWith("//"))) continue;
+    const result = f_resolveRepositoryLink(link, {
+      sourcePath: sourceBefore,
+      repositories,
+      getTargetType: path => getTargetType(f_move(path)),
+    });
+    if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref ?? "")) continue;
+    const moved = f_wasMoved(result.vaultPath);
+    if (!moved && !sourceMovedRepo) continue;
+    if (!moved && github && f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
+    const targetPath = f_move(result.vaultPath);
+    const targetMovedRepo = f_repositoryForPath(targetPath, repositories) !== f_repositoryForPath(result.vaultPath, repositories);
+    const url = github ? {
+      identity: targetMovedRepo ? undefined : github[1],
+      ref: targetMovedRepo ? encodeURIComponent(result.ref) : result.rawRef,
+    } : undefined;
+    let destination;
+    try {
+      ({ destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, result.kind, url));
+    } catch (error) {
+      onError?.(error, link.destination);
+      continue;
+    }
+    const { start, end } = link.destinationRange;
+    const raw = markdown.slice(start, end);
+    // Keep the literal query/fragment, including Markdown escapes and entities.
+    let pathEnd = end;
+    for (const match of raw.matchAll(/\\[^\s]|&(?:#[xX]?[\da-fA-F]+|[a-zA-Z][\da-zA-Z]+);|[?#]/g)) {
+      if (!/^[?#]/.test(markdownParser.utils.unescapeAll(match[0]))) continue;
+      pathEnd = start + match.index;
+      break;
+    }
+    edits.push({ start, end: pathEnd, destination });
+  }
+  let output = markdown;
+  for (const { start, end, destination } of edits.sort((left, right) => right.start - left.start)) {
+    output = output.slice(0, start) + destination + output.slice(end);
+  }
+  return output;
+}
+
+module.exports = {
+  f_scanMarkdownLinks, f_originIdentity, f_repositoryForPath, f_resolveRepositoryLink,
+  f_formatRepositoryLink, f_rewriteRepositoryDestinations,
+};

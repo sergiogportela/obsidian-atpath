@@ -1,6 +1,7 @@
 "use strict";
 
 const ESTIMATOR_VERSION = 1;
+const CHECKPOINT_INTERVAL_MS = 5000;
 const EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
 const EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
 
@@ -9,7 +10,8 @@ function f_estimateTokens(text) {
 }
 
 function f_createTokenIndex({
-  getFiles, read, isEligible, looksBinary, load, save, tokenCache = new Map(), onError = () => {},
+  getFiles, read, isEligible, looksBinary, load, save, enabled = true,
+  tokenCache = new Map(), onError = () => {},
 }) {
   const entries = new Map();
   const folders = new Map();
@@ -74,12 +76,11 @@ function f_createTokenIndex({
   function f_scheduleSave() {
     if (!save) return;
     dirty = true;
-    if (saving || disposed) return;
-    clearTimeout(saveTimer);
+    if (saving || disposed || saveTimer != null) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
       void f_flush();
-    }, 750);
+    }, CHECKPOINT_INTERVAL_MS);
   }
 
   function f_drop(path) {
@@ -108,7 +109,7 @@ function f_createTokenIndex({
   }
 
   function f_queueRead() {
-    if (disposed || reading || readTimer != null || (!priority.size && !background.size)) return;
+    if (disposed || !enabled || reading || readTimer != null || (!priority.size && !background.size)) return;
     readTimer = setTimeout(() => {
       readTimer = null;
       void f_readNext();
@@ -118,7 +119,7 @@ function f_createTokenIndex({
   async function f_readNext() {
     const queue = priority.size ? priority : background;
     const entry = queue.values().next().value;
-    if (!entry || disposed) return;
+    if (!entry || disposed || !enabled) return;
     queue.delete(entry);
     reading = true;
     try {
@@ -220,6 +221,22 @@ function f_createTokenIndex({
   }
 
   return {
+    setEnabled(value) {
+      if (enabled === value) return;
+      enabled = value;
+      if (enabled) {
+        f_queueRead();
+        return;
+      }
+      clearTimeout(readTimer);
+      readTimer = null;
+      for (const entry of entries.values()) {
+        if (entry.state !== "pending" || !entry.resolve) continue;
+        entry.resolve(null);
+        entry.resolve = null;
+        entry.promise = null;
+      }
+    },
     start() {
       if (!initialization) initialization = (async () => {
         try {
@@ -269,6 +286,7 @@ function f_createTokenIndex({
     },
     prioritize: f_prioritize,
     request(file) {
+      if (!enabled) return Promise.resolve(null);
       const entry = f_upsert(file, true);
       if (!entry || entry.state !== "pending") return Promise.resolve(entry?.tokens ?? null);
       f_prioritize(entry.path);
