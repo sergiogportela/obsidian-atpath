@@ -6,7 +6,7 @@ const { execFileSync } = require("node:child_process");
 const { mkdir, mkdtemp, rm, symlink, writeFile } = require("node:fs/promises");
 const { join } = require("node:path");
 const {
-  REPOSITORY_MAP_PATH, f_discoverRepositories, f_lookupRenamedRepository, f_readRepositoryMap, f_writeRepositoryMap,
+  REPOSITORY_MAP_PATH, f_discoverRepositories, f_discoverSourceCheckout, f_lookupRenamedRepository, f_readRepositoryMap, f_writeRepositoryMap,
 } = require("../src/repository-index");
 
 test("desktop discovery preserves innermost Git worktrees and repositories without origins", async t => {
@@ -102,7 +102,7 @@ test("rename lookup invokes the GitHub CLI and adds macOS Homebrew locations", a
   }
 });
 
-function f_loadPlugin(isMobile = true) {
+function f_loadPlugin(isMobile = true, obsidianOverrides = {}) {
   const Module = require("node:module");
   const obsidian = require("obsidian");
   const originalLoad = Module._load;
@@ -113,6 +113,7 @@ function f_loadPlugin(isMobile = true) {
         register(callback) { this.cleanup = callback; }
         unload() { this.cleanup(); }
       },
+      ...obsidianOverrides,
     };
     if (id === "@codemirror/view") return {
       ViewPlugin: { define: (_plugin, options) => options },
@@ -593,6 +594,213 @@ test("repository rename rewrites local targets while preserving query, fragment 
       text = update(text);
     },
   } };
-  await plugin.f_rewriteRepositoryReferences(target.path, "checkout/old.md");
+  await plugin.f_rewriteRepositoryReferences([{ newPath: target.path, oldPath: "checkout/old.md" }]);
   assert.equal(text, "[Old](/new.md?raw=1#Heading)\n" + shaLink);
+});
+
+test("queued renames preserve event order and ignore redundant folder descendants", async () => {
+  const plugin = new (f_loadPlugin())();
+  const { TFile, TFolder } = require("obsidian");
+  plugin.repositories = [{ root: "a", identity: "org/a" }];
+  const batches = [];
+  plugin.f_rewriteRepositoryReferences = async moves => { batches.push(moves); };
+  const first = new TFile("a/tmp.md");
+  plugin.f_queueRepositoryMove(first, "a/first.md");
+  plugin.f_queueRepositoryMove(new TFile("a/first.md"), "a/second.md");
+  first.path = "a/second.md";
+  plugin.f_queueRepositoryMove(first, "a/tmp.md");
+  plugin.f_queueRepositoryMove(new TFolder("a/new"), "a/old");
+  plugin.f_queueRepositoryMove(new TFile("a/new/child.md"), "a/old/child.md");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await plugin._repositoryRename;
+  assert.deepEqual(batches, [[
+    { oldPath: "a/first.md", newPath: "a/tmp.md", isFolder: false },
+    { oldPath: "a/second.md", newPath: "a/first.md", isFolder: false },
+    { oldPath: "a/tmp.md", newPath: "a/second.md", isFolder: false },
+    { oldPath: "a/old", newPath: "a/new", isFolder: true },
+  ]]);
+});
+
+test("one rename batch reads each note once and retains an edit made before atomic processing", async () => {
+  const plugin = new (f_loadPlugin())();
+  const { TFile } = require("obsidian");
+  const sources = [new TFile("a/note.md"), new TFile("a/concurrent.md")];
+  const targets = [new TFile("a/new.md"), new TFile("a/second.md")];
+  const files = new Map(targets.map(file => [file.path, file]));
+  const contents = new Map(sources.map(file => [file.path, '[First](/old.md) [Second](/other.md)']));
+  let reads = 0, resolutions = 0, writes = 0;
+  plugin.repositories = [{ root: "a", identity: "org/a" }];
+  plugin.app = { vault: {
+    getMarkdownFiles: () => sources,
+    getAbstractFileByPath: path => { resolutions++; return files.get(path); },
+    cachedRead: async file => { reads++; return contents.get(file.path); },
+    process: async (file, update) => {
+      writes++;
+      const suffix = file === sources[1] ? '\nUser edit [Added](/old.md)' : '';
+      contents.set(file.path, update(contents.get(file.path) + suffix));
+    },
+  } };
+  await plugin.f_rewriteRepositoryReferences([
+    { oldPath: "a/old.md", newPath: "a/new.md" },
+    { oldPath: "a/other.md", newPath: "a/second.md" },
+  ]);
+  assert.equal(reads, 2);
+  assert.equal(writes, 2);
+  assert.equal(resolutions, 7, "two initial parses plus one reparse only for the concurrently edited note");
+  assert.equal(contents.get(sources[0].path), '[First](/new.md) [Second](/second.md)');
+  assert.equal(contents.get(sources[1].path), '[First](/new.md) [Second](/second.md)\nUser edit [Added](/new.md)');
+});
+
+test("failed notes and unaddressable destinations produce one notice and do not stop other notes", async t => {
+  const notices = [];
+  const plugin = new (f_loadPlugin(true, { Notice: class { constructor(text) { notices.push(text); } } }))();
+  const { TFile } = require("obsidian");
+  const sources = [new TFile("a/unreadable.md"), new TFile("a/ambiguous.md"), new TFile("a/success.md")];
+  const target = new TFile("b/new.md");
+  const local = new TFile("a/new.md");
+  const text = '[Moved](/old.md) [Local](/local.md)';
+  const results = [];
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args));
+  plugin.repositories = [{ root: "a", identity: "org/a" }, { root: "b", identity: "org/b" }, { root: "duplicate", identity: "org/b" }];
+  plugin.app = { vault: {
+    getMarkdownFiles: () => sources,
+    getAbstractFileByPath: path => [target, local].find(file => file.path === path),
+    cachedRead: async file => {
+      if (file === sources[0]) throw new Error("Cannot read this note");
+      return file === sources[1] ? text : '[Local](/local.md)';
+    },
+    process: async (file, update) => results.push([file.path, update(file === sources[1] ? text : '[Local](/local.md)')]),
+  } };
+  await plugin.f_rewriteRepositoryReferences([
+    { oldPath: "a/old.md", newPath: "b/new.md" },
+    { oldPath: "a/local.md", newPath: "a/new.md" },
+  ]);
+  assert.deepEqual(results, [
+    ["a/ambiguous.md", '[Moved](/old.md) [Local](/new.md)'],
+    ["a/success.md", '[Local](/new.md)'],
+  ]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /2 note\(s\):\na\/unreadable.md\na\/ambiguous.md/);
+  assert.equal(warnings.length, 2);
+});
+
+test("legacy path and wikilink alias repair share the batch's final paths", () => {
+  const plugin = new (f_loadPlugin())();
+  plugin.app = { metadataCache: { getFirstLinkpathDest: () => ({ path: "a/second.md" }) } };
+  const moves = [
+    { oldPath: "a/first.md", newPath: "a/tmp.md" },
+    { oldPath: "a/second.md", newPath: "a/first.md" },
+    { oldPath: "a/tmp.md", newPath: "a/second.md" },
+    { oldPath: "a/old", newPath: "a/new", isFolder: true },
+  ];
+  // These paths have no legacy repo-root marker, so references are vault-relative.
+  assert.equal(plugin.f_rewriteLegacyReferences('@a/first.md @a/second.md @a/old/child.md [[a/second.md|@a/first.md]]', 'note.md', moves),
+    '@a/second.md @a/first.md @a/new/child.md [[a/second.md|@a/second.md]]');
+});
+
+test("shared discovery contract excludes hidden duplicates and includes only the explicit source checkout", async t => {
+  const fixture = require("./fixtures/repository-discovery.json");
+  const { f_resolveRepositoryLink } = require("../src/repository-links");
+  const base = await mkdtemp(join(process.cwd(), ".repository-discovery-test-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  for (const checkout of fixture.checkouts) {
+    const cwd = join(base, checkout.root);
+    await mkdir(cwd, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd });
+    execFileSync("git", ["config", "--local", "remote.origin.url", "https://github.com/" + checkout.identity + ".git"], { cwd });
+    await writeFile(join(cwd, "note.md"), "Fixture target");
+    if (checkout.gitRefs) {
+      execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Discovery fixture"], { cwd });
+      for (const ref of checkout.gitRefs) execFileSync("git", ["update-ref", ref, "HEAD"], { cwd });
+      for (const [ref, target] of Object.entries(checkout.symbolicRefs || {})) {
+        execFileSync("git", ["symbolic-ref", ref, target], { cwd });
+      }
+    }
+  }
+  for (const entry of fixture.symlinks) await symlink(join(base, entry.target), join(base, entry.path), "dir");
+  const discovered = await f_discoverRepositories(base);
+  for (const entry of fixture.cases) {
+    const repositories = [...discovered];
+    if (entry.sourceRoot !== undefined && !repositories.some(repo => repo.root === entry.sourceRoot)) {
+      repositories.push(await f_discoverSourceCheckout(base, entry.sourcePath));
+    }
+    assert.deepEqual(repositories.map(repo => repo.root).sort(), entry.expectedRoots, entry.name);
+    for (const repo of repositories) {
+      const expected = fixture.checkouts.find(checkout => checkout.root === repo.root);
+      assert.equal(repo.identity, expected.identity);
+      assert.deepEqual(repo.refs, expected.expectedRefs || []);
+    }
+    const result = f_resolveRepositoryLink({ destination: entry.destination }, {
+      sourcePath: entry.sourcePath, repositories,
+      getTargetType: path => fixture.checkouts.some(checkout =>
+        [checkout.root, "note.md"].filter(Boolean).join("/") === path) ? "file" : null,
+    });
+    for (const [key, value] of Object.entries(entry.expected)) assert.equal(result[key], value, entry.name + ": " + key);
+  }
+});
+
+test("later explicit child moves are not mistaken for an earlier folder's descendant events", async () => {
+  const plugin = new (f_loadPlugin())();
+  const { TFile, TFolder } = require("obsidian");
+  plugin.repositories = [{ root: "", identity: "org/workspace" }];
+  let batch;
+  plugin.f_rewriteRepositoryReferences = async moves => { batch = moves; };
+  plugin.f_queueRepositoryMove(new TFolder("b"), "a");
+  plugin.f_queueRepositoryMove(new TFile("b/child.md"), "a/child.md");
+  plugin.f_queueRepositoryMove(new TFile("a/child.md"), "b/child.md");
+  plugin.f_queueRepositoryMove(new TFile("b/child.md"), "a/child.md");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await plugin._repositoryRename;
+  assert.equal(batch.length, 3);
+  assert.deepEqual(batch[2], { oldPath: "a/child.md", newPath: "b/child.md", isFolder: false });
+});
+
+test("checkout renames wait for fresh discovery and preserve the map from the first event", async () => {
+  const plugin = new (f_loadPlugin())();
+  const { TFolder } = require("obsidian");
+  const before = [{ root: "", identity: "org/workspace" }, { root: "a", identity: "org/a" }];
+  const after = [{ root: "", identity: "org/workspace" }, { root: "renamed", identity: "org/a" }];
+  plugin.repositories = before;
+  let finishRefresh;
+  plugin._repositoryRefresh = new Promise(resolve => { finishRefresh = resolve; });
+  const calls = [];
+  plugin.f_refreshRepositoryIndex = async () => {
+    assert.equal(plugin._repositoryRefresh, null);
+    calls.push("fresh scan");
+    plugin.repositories = after;
+  };
+  plugin.f_rewriteRepositoryReferences = async (moves, prior) => {
+    assert.deepEqual(prior, before);
+    assert.equal(plugin.repositories, after);
+    calls.push("rewrite");
+  };
+  plugin.f_queueRepositoryMove(new TFolder("renamed"), "a");
+  // Another discovery can replace the map before the debounce runs.
+  plugin.repositories = after;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(calls, []);
+  plugin._repositoryRefresh = null;
+  finishRefresh();
+  await plugin._repositoryRename;
+  assert.deepEqual(calls, ["fresh scan", "rewrite"]);
+});
+
+test("failed checkout discovery leaves note text untouched and reports the unverified move", async t => {
+  const notices = [];
+  const plugin = new (f_loadPlugin(true, { Notice: class { constructor(text) { notices.push(text); } } }))();
+  const { TFolder } = require("obsidian");
+  plugin.repositories = [{ root: "", identity: "org/workspace" }, { root: "a", identity: "org/a" }];
+  plugin.f_refreshRepositoryIndex = async () => {}; // Production retains its prior map on failure.
+  let rewrites = 0;
+  plugin.f_rewriteRepositoryReferences = async () => { rewrites++; };
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args));
+  plugin.f_queueRepositoryMove(new TFolder("renamed"), "a");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await plugin._repositoryRename;
+  assert.equal(rewrites, 0);
+  assert.equal(notices.length, 1);
+  assert.match(warnings[0][1].message, /Renamed checkout could not be verified: renamed/);
 });

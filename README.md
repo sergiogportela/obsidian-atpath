@@ -53,18 +53,20 @@ Click a repository link in Live Preview or Reading mode to open the local file, 
 
 Approximate counts appear beside links, visible File Explorer rows, and in the desktop status bar. Folder totals update incrementally; pending or skipped content is identified. Click the status bar to copy the note and its linked content.
 
-The estimate is `ceil(character count / 4)`, marked `~`. **JSON and CSV can require over twice the displayed count.** A broader workspace calibration against `o200k_base` found the following per-file errors (negative means an underestimate):
+The estimate is `ceil(character count / 4)`, marked `~`. **JSON and CSV can require nearly three times the displayed count.** An independent 482-file workspace calibration against `o200k_base` found per-file errors from **−65.7% to +95.8%**, with the combined estimate **19% too low**. Negative errors mean an underestimate:
 
-| Content | Files | Observed error |
-| --- | ---: | ---: |
-| Portuguese Markdown | 40 | −33.7% to +13.9% |
-| Python | 40 | −24.7% to +7.0% |
-| SQL | 28 | −26.4% to +59.3% |
-| YAML | 18 | −42.5% to +57.7% |
-| JSON | 40 | −55.6% to +4.8% |
-| CSV | 13 | −50.4% to −47.3% |
+| Content | Files | Minimum error | Median error | Maximum error |
+| --- | ---: | ---: | ---: | ---: |
+| Markdown | 120 | −40.6% | −9.3% | +95.8% |
+| Python | 120 | −28.3% | −3.8% | +35.2% |
+| JSON | 120 | −55.6% | −25.8% | +50.2% |
+| SQL | 50 | −35.0% | −10.0% | +59.3% |
+| YML | 20 | −42.5% | −18.5% | +57.7% |
+| YAML | 1 | −26.7% | −26.7% | −26.7% |
+| CSV | 30 | −65.7% | −47.1% | +7.8% |
+| JavaScript | 21 | −35.9% | −4.5% | +9.1% |
 
-These are observed samples, not guaranteed bounds for other files or models; Claude tokenizers were not tested. An earlier 62-file Markdown/Python/JavaScript sample had a narrower −20.5% to +17.8% range. Use a model's actual tokenizer for hard context limits. Counts exclude model instructions and message history. Content reads run through a yielding queue, and validated file snapshots persist in device-local IndexedDB rather than synced settings.
+These are observed samples, not guaranteed bounds for other files or models; Claude tokenizers were not tested. At the −65.7% extreme, the actual count is about 2.9 times the estimate. The estimate formula remains unchanged: this sample does not establish a correction that works for every content mix. Use a model's actual tokenizer for hard context limits. Counts exclude model instructions and message history. Content reads run through a yielding queue, and validated file snapshots persist in device-local IndexedDB rather than synced settings.
 
 <p align="center">
   <img src="screenshots/status-bar.png" width="500" alt="Status bar showing total token count with tooltip breakdown" />
@@ -102,13 +104,17 @@ Published pages include collapsible sections, foldable bold list items, inlined 
 
 Desktop discovery builds `repository-map.json` with vault-relative checkout roots and normalized GitHub identities. A mobile device consumes the synchronized map without needing `.git`. Configure the map's Sync coverage separately; excluded content remains unavailable on that device. The map contains no publishing credentials and describes one person's checkout layout.
 
-The map also records known refs to disambiguate GitHub URL paths; it should be excluded from Git. Discovery skips generated and task-data trees. Opening a note in such a tree verifies its Git checkout separately and adds it to the map, without scanning sibling task directories. Unverified desktop sources or unmapped mobile sources report a diagnostic instead of inheriting the wrong repository root.
+The map also records local branches, tags and every remote's branches to disambiguate GitHub URL paths; remote HEAD pointers are omitted. It should be excluded from Git. Discovery skips every dot-directory and `data`, `node_modules`, `venv`, `dist`, `build`, `__pycache__` at every depth, and does not follow directory symlinks. Opening a note in such a tree verifies and adds only that exact checkout, without scanning its excluded descendants or siblings. Unverified desktop sources or unmapped mobile sources report a diagnostic instead of inheriting the wrong repository root.
+
+AtPath retains verified opened checkouts in its personal map. AgentKit's fresh discovery adds only its current prompt source, so previously opened hidden checkouts can make AtPath's map differ from a fresh AgentKit inventory. Shared discovery fixtures cover the normal scan and current explicit source, not this retained history.
 
 Use **Refresh repository map** after changes made outside Obsidian. Authenticated desktop GitHub rename lookup uses `gh` for unresolved names within known workspace organizations; it never downloads file content. URLs with an ambiguous slash-containing revision require a known ref boundary or explicit encoding and produce a diagnostic rather than a guessed path.
 
 ### Auto-Update References
 
 AtPath updates repository links for file/folder moves performed through Obsidian, including source notes moved between repositories. Intentional commit-SHA destinations remain unchanged. Moving an entire checkout updates its map location instead of rewriting canonical references.
+
+Pending moves are processed in order in one vault pass, including chained moves and swaps. Each note is parsed once unless it changes before the atomic update; concurrent edits are preserved. Legacy reference repair shares that pass. A failed note does not prevent other notes from updating, and a persistent notice identifies notes with incomplete updates. Checkout-root moves require a freshly verified repository map before any rewrite.
 
 Only destinations change: existing labels, link titles, reference definitions, autolink syntax and non-main refs are preserved.
 

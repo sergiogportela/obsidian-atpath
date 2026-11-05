@@ -1,5 +1,7 @@
 "use strict";
 
+const TOKEN_ESTIMATE_DISCLOSURE = "Approximate (characters / 4). A workspace sample against o200k_base had errors from −66% to +96% and a total 19% too low. JSON/CSV can need nearly 3× this count. Observed results, not bounds or hard context limits.";
+
 const ESTIMATOR_VERSION = 1;
 const CHECKPOINT_INTERVAL_MS = 5000;
 const EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
@@ -310,4 +312,4 @@ function f_createTokenIndex({
   };
 }
 
-module.exports = { f_createTokenIndex, f_estimateTokens };
+module.exports = { f_createTokenIndex, f_estimateTokens, TOKEN_ESTIMATE_DISCLOSURE };

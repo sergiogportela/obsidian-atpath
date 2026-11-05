@@ -7,6 +7,7 @@ var __commonJS = (cb, mod) => function __require() {
 var require_token_index = __commonJS({
   "src/token-index.js"(exports2, module2) {
     "use strict";
+    var TOKEN_ESTIMATE_DISCLOSURE2 = "Approximate (characters / 4). A workspace sample against o200k_base had errors from \u221266% to +96% and a total 19% too low. JSON/CSV can need nearly 3\xD7 this count. Observed results, not bounds or hard context limits.";
     var ESTIMATOR_VERSION = 1;
     var CHECKPOINT_INTERVAL_MS = 5e3;
     var EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
@@ -313,7 +314,7 @@ var require_token_index = __commonJS({
         }
       };
     }
-    module2.exports = { f_createTokenIndex: f_createTokenIndex2, f_estimateTokens: f_estimateTokens2 };
+    module2.exports = { f_createTokenIndex: f_createTokenIndex2, f_estimateTokens: f_estimateTokens2, TOKEN_ESTIMATE_DISCLOSURE: TOKEN_ESTIMATE_DISCLOSURE2 };
   }
 });
 
@@ -321,6 +322,7 @@ var require_token_index = __commonJS({
 var require_explorer_token_badges = __commonJS({
   "src/explorer-token-badges.js"(exports2, module2) {
     "use strict";
+    var { TOKEN_ESTIMATE_DISCLOSURE: TOKEN_ESTIMATE_DISCLOSURE2 } = require_token_index();
     var ROW = ".nav-file-title[data-path], .nav-folder-title[data-path]";
     var BADGE = "atpath-explorer-token-badge";
     function f_describeTokenBadge(snapshot, formatTokens2) {
@@ -330,7 +332,7 @@ var require_explorer_token_badges = __commonJS({
       const { tokens, counted, pending, skipped } = snapshot;
       const notes = [];
       if (counted || !skipped && !pending) notes.push("About " + tokens.toLocaleString() + " tokens, estimated as characters divided by four");
-      if (counted) notes.push("Sample errors \u221256% to +60%; JSON/CSV may need over twice this count");
+      if (counted) notes.push(TOKEN_ESTIMATE_DISCLOSURE2.replace(/\.$/, ""));
       if (pending) notes.push(counted ? "Some files are still pending" : "Token estimate pending");
       if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
       return {
@@ -5684,11 +5686,27 @@ var require_repository_links = __commonJS({
       const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
       return "[" + label.replace(/([\\\[\]*_`<>&~])/g, "\\$1") + "](" + destination + ")";
     }
-    function f_rewriteRepositoryDestinations2(markdown, { sourcePath, oldPath, newPath, repositories, getTargetType, onError }) {
-      const f_wasMoved = (path) => path === oldPath || path.startsWith(oldPath + "/");
-      const f_move = (path) => f_wasMoved(path) ? newPath + path.slice(oldPath.length) : path;
-      const sourceBefore = sourcePath === newPath || sourcePath.startsWith(newPath + "/") ? oldPath + sourcePath.slice(newPath.length) : sourcePath;
-      const sourceMovedRepo = f_repositoryForPath2(sourcePath, repositories) !== f_repositoryForPath2(sourceBefore, repositories);
+    function f_rewriteRepositoryDestinations2(markdown, {
+      sourcePath,
+      moves,
+      repositories,
+      repositoriesBefore = repositories,
+      getTargetType,
+      onError
+    }) {
+      const f_move = (path) => {
+        for (const { oldPath, newPath } of moves) {
+          if (path === oldPath || path.startsWith(oldPath + "/")) path = newPath + path.slice(oldPath.length);
+        }
+        return path;
+      };
+      let sourceBefore = sourcePath;
+      for (const { oldPath, newPath } of moves.slice().reverse()) {
+        if (sourceBefore === newPath || sourceBefore.startsWith(newPath + "/")) {
+          sourceBefore = oldPath + sourceBefore.slice(newPath.length);
+        }
+      }
+      const sourceMovedRepo = f_repositoryForPath2(sourcePath, repositories)?.root !== f_repositoryForPath2(sourceBefore, repositoriesBefore)?.root;
       const edits = [];
       for (const link of f_scanMarkdownLinks2(markdown, { destinationRanges: true })) {
         if (!link.destinationRange) continue;
@@ -5696,15 +5714,15 @@ var require_repository_links = __commonJS({
         if (!github && (!link.destination.startsWith("/") || link.destination.startsWith("//"))) continue;
         const result = f_resolveRepositoryLink2(link, {
           sourcePath: sourceBefore,
-          repositories,
+          repositories: repositoriesBefore,
           getTargetType: (path) => getTargetType(f_move(path))
         });
         if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref ?? "")) continue;
-        const moved = f_wasMoved(result.vaultPath);
+        const targetPath = f_move(result.vaultPath);
+        const moved = targetPath !== result.vaultPath;
         if (!moved && !sourceMovedRepo) continue;
         if (!moved && github && f_resolveRepositoryLink2(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
-        const targetPath = f_move(result.vaultPath);
-        const targetMovedRepo = f_repositoryForPath2(targetPath, repositories) !== f_repositoryForPath2(result.vaultPath, repositories);
+        const targetMovedRepo = f_repositoryForPath2(targetPath, repositories)?.identity !== f_repositoryForPath2(result.vaultPath, repositoriesBefore)?.identity;
         const url = github ? {
           identity: targetMovedRepo ? void 0 : github[1],
           ref: targetMovedRepo ? encodeURIComponent(result.ref) : result.rawRef
@@ -6003,7 +6021,7 @@ var require_repository_index = __commonJS({
         f_git(cwd, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"])
       ]);
       const identity = origin.status === "fulfilled" ? f_originIdentity(origin.value.stdout) : null;
-      const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n").filter(Boolean).map(
+      const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n").filter((ref) => ref && !/^refs\/remotes\/[^/]+\/HEAD$/.test(ref)).map(
         (ref) => ref.replace(/^refs\/(?:heads\/|tags\/|remotes\/[^/]+\/)/, "")
       ) : [];
       return { root, identity, refs: [...new Set(names)].sort() };
@@ -8094,7 +8112,7 @@ var require_html_app_publish = __commonJS({
 var { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 var { Compartment, Prec } = require("@codemirror/state");
-var { f_createTokenIndex, f_estimateTokens } = require_token_index();
+var { f_createTokenIndex, f_estimateTokens, TOKEN_ESTIMATE_DISCLOSURE } = require_token_index();
 var { f_installExplorerTokenBadges } = require_explorer_token_badges();
 var { f_loadTokenCache, f_saveTokenCache } = require_token_cache_storage();
 var { f_isEligibleLinkedPath } = require_linked_file_policy();
@@ -8331,7 +8349,6 @@ function formatLinkedTargetCount(t) {
 function f_formatFolderTokenCount(value) {
   return value?.overCap ? formatLinkedTargetCount({ overCap: value }) : formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped });
 }
-var READING_TOKEN_TOOLTIP = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count.";
 function f_uniqueLinkedTokenTotal(targets) {
   const folders = targets.filter((target) => target.kind === "folder" && !target.overCap);
   return targets.reduce((total, target) => {
@@ -9205,7 +9222,7 @@ var RepositoryTokenWidget = class extends WidgetType {
     const span = document.createElement("span");
     span.className = "atpath-token-count";
     span.textContent = " (" + this.count + ")";
-    span.title = "Approximate (characters / 4). Sample errors \u221256% to +60%; JSON/CSV may need over twice this count." + (this.skipped ? " " + this.skipped + " files skipped." : "");
+    span.title = TOKEN_ESTIMATE_DISCLOSURE + (this.skipped ? " " + this.skipped + " files skipped." : "");
     return span;
   }
 };
@@ -9455,7 +9472,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new Setting(containerEl).setName("Show token counts").setDesc("Show estimates beside links and explorer rows and in the status bar. Estimates use characters / 4. Sample errors ranged from \u221256% to +60%; JSON/CSV may need over twice the displayed count. These are not hard context limits.").addToggle(
+    new Setting(containerEl).setName("Show token counts").setDesc("Show estimates beside links and explorer rows and in the status bar. " + TOKEN_ESTIMATE_DISCLOSURE).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTokenCounts).onChange(async (value) => {
         this.plugin.settings.showTokenCounts = value;
         await this.plugin.saveSettings();
@@ -10275,7 +10292,7 @@ var AtPathPlugin = class extends Plugin {
       if (hidden) return;
       const { kind, normalizedPath: path } = target;
       let text = "";
-      let title = READING_TOKEN_TOOLTIP;
+      let title = TOKEN_ESTIMATE_DISCLOSURE;
       if (kind === "missing") {
         text = " (unavailable)";
         if (navigation && target.status === "missing" && target.vaultPath && probedPath !== target.vaultPath) {
@@ -11168,44 +11185,79 @@ var AtPathPlugin = class extends Plugin {
   f_queueRepositoryMove(file, oldPath) {
     this._pendingRepositoryMoves ??= [];
     const moves = this._pendingRepositoryMoves;
+    if (!moves.length) this._pendingRepositoryMap = this.repositories.slice();
     const newPath = file.path;
-    if (moves.some((move) => oldPath.startsWith(move.oldPath + "/") && newPath === move.newPath + oldPath.slice(move.oldPath.length))) return;
-    const prior = moves.find((move) => move.newPath === oldPath);
-    if (prior) prior.newPath = newPath;
-    else moves.push({ file, oldPath, newPath });
+    const parentMove = moves[moves.length - 1];
+    if (parentMove?.isFolder && oldPath.startsWith(parentMove.oldPath + "/") && newPath === parentMove.newPath + oldPath.slice(parentMove.oldPath.length)) return;
+    moves.push({ oldPath, newPath, isFolder: file instanceof TFolder });
     clearTimeout(this._repositoryMoveTimer);
     this._repositoryMoveTimer = setTimeout(() => {
+      const repositoriesBefore = this._pendingRepositoryMap;
       this._pendingRepositoryMoves = [];
       this._repositoryRename = (this._repositoryRename ?? Promise.resolve()).then(async () => {
-        for (const move of moves) {
+        if (this._repositoryIndexClosed) return;
+        const movedRoots = [];
+        for (const repo of repositoriesBefore) {
+          if (typeof repo.root !== "string") continue;
+          let root = repo.root;
+          for (const { oldPath: oldPath2, newPath: newPath2 } of moves) {
+            if (root === oldPath2 || root.startsWith(oldPath2 + "/")) root = newPath2 + root.slice(oldPath2.length);
+          }
+          if (root !== repo.root) movedRoots.push({ root, identity: repo.identity });
+        }
+        if (movedRoots.length) {
+          await this._repositoryRefresh;
+          await this.f_refreshRepositoryIndex();
           if (this._repositoryIndexClosed) return;
-          if (this.repositories.some((repo) => repo.root === move.oldPath || repo.root?.startsWith(move.oldPath + "/"))) {
-            await this.f_refreshRepositoryIndex();
-          } else {
-            await this.f_rewriteRepositoryReferences(move.newPath, move.oldPath);
-            await this.updateAtPathReferences(move.file, move.oldPath);
+          for (const repo of movedRoots) {
+            if (!this.repositories.some((current) => current.root === repo.root && current.identity === repo.identity)) {
+              throw new Error("Renamed checkout could not be verified: " + repo.root);
+            }
           }
         }
-      }).catch((error) => console.warn("AtPath could not update links after a rename", error));
+        await this.f_rewriteRepositoryReferences(moves, repositoriesBefore);
+      }).catch((error) => {
+        console.warn("AtPath could not update links after a rename", error);
+        new Notice("AtPath could not update links after a rename. Check the developer console for details.", 0);
+      });
     }, 100);
   }
-  async f_rewriteRepositoryReferences(newPath, oldPath) {
+  async f_rewriteRepositoryReferences(moves, repositoriesBefore = this.repositories) {
     if (this._repositoryIndexClosed || !this.repositories.length) return;
+    const repositories = this.repositories.slice();
+    const failed = /* @__PURE__ */ new Set();
     for (const mdFile of this.app.vault.getMarkdownFiles()) {
       if (this._repositoryIndexClosed) break;
-      const rewrite = (content2) => f_rewriteRepositoryDestinations(content2, {
-        sourcePath: mdFile.path,
-        oldPath,
-        newPath,
-        repositories: this.repositories,
-        getTargetType: (path) => {
-          const target = path ? this.app.vault.getAbstractFileByPath(path) : this.app.vault.getRoot();
-          return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
-        },
-        onError: (error, destination) => console.warn("AtPath could not update repository link", mdFile.path, destination, error)
-      });
-      const content = await this.app.vault.cachedRead(mdFile);
-      if (rewrite(content) !== content) await this.app.vault.process(mdFile, rewrite);
+      const rewrite = (content) => {
+        const updated = f_rewriteRepositoryDestinations(content, {
+          sourcePath: mdFile.path,
+          moves,
+          repositories,
+          repositoriesBefore,
+          getTargetType: (path) => {
+            const target = path ? this.app.vault.getAbstractFileByPath(path) : this.app.vault.getRoot();
+            return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
+          },
+          onError: (error, destination) => {
+            failed.add(mdFile.path);
+            console.warn("AtPath could not update repository link", mdFile.path, destination, error);
+          }
+        });
+        return this.f_rewriteLegacyReferences(updated, mdFile.path, moves);
+      };
+      try {
+        const content = await this.app.vault.cachedRead(mdFile);
+        const updated = rewrite(content);
+        if (updated !== content) {
+          await this.app.vault.process(mdFile, (current) => current === content ? updated : rewrite(current));
+        }
+      } catch (error) {
+        failed.add(mdFile.path);
+        console.warn("AtPath could not update links in", mdFile.path, error);
+      }
+    }
+    if (failed.size) {
+      new Notice("AtPath could not update some links after a rename in " + failed.size + " note(s):\n" + [...failed].join("\n") + "\nCheck the developer console for details.", 0);
     }
   }
   getRepoRoots() {
@@ -11762,99 +11814,47 @@ var AtPathPlugin = class extends Plugin {
     }
     this.updateStatusBar();
   }
-  async updateAtPathReferences(file, oldPath) {
-    const oldRepoRoot = getRepoRoot(oldPath);
-    const newRepoRoot = getRepoRoot(file.path);
-    const oldRel = oldRepoRoot ? toRepoRelative(oldPath, oldRepoRoot) : oldPath;
-    const newRel = newRepoRoot ? toRepoRelative(file.path, newRepoRoot) : file.path;
-    const isFolder = !file.path.includes(".") || file.children !== void 0;
-    const mdFiles = this.app.vault.getMarkdownFiles();
-    if (!isFolder) {
-      for (const mdFile of mdFiles) {
-        const content = await this.app.vault.read(mdFile);
-        const wlRe = new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags);
-        let match;
-        let updated = content;
-        let offset = 0;
-        while ((match = wlRe.exec(content)) !== null) {
-          const linkTarget = match[1];
-          const resolved = this.app.metadataCache.getFirstLinkpathDest(linkTarget, mdFile.path);
-          if (!resolved || resolved.path !== file.path) continue;
-          const refRepoRoot = getRepoRoot(mdFile.path);
-          let correctDisplay;
-          if (newRepoRoot && refRepoRoot === newRepoRoot) {
-            correctDisplay = toRepoRelative(file.path, newRepoRoot);
-          } else if (newRepoRoot) {
-            const repoName = newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1);
-            correctDisplay = repoName + "/" + toRepoRelative(file.path, newRepoRoot);
-          } else {
-            correctDisplay = file.path;
-          }
-          const replacement = "[[" + linkTarget + "|@" + correctDisplay + "]]";
-          const start = match.index + offset;
-          const end = start + match[0].length;
-          updated = updated.substring(0, start) + replacement + updated.substring(end);
-          offset += replacement.length - match[0].length;
-        }
-        if (updated !== content) {
-          await this.app.vault.modify(mdFile, updated);
+  f_rewriteLegacyReferences(content, sourcePath, moves) {
+    if (!content.includes("@")) return content;
+    const sourceRepoRoot = getRepoRoot(sourcePath);
+    let updated = content;
+    for (const { oldPath, newPath, isFolder } of moves) {
+      const oldRepoRoot = getRepoRoot(oldPath);
+      const newRepoRoot = getRepoRoot(newPath);
+      const oldRel = oldRepoRoot ? toRepoRelative(oldPath, oldRepoRoot) : oldPath;
+      const newRel = newRepoRoot ? toRepoRelative(newPath, newRepoRoot) : newPath;
+      const replacements = [];
+      if (sourceRepoRoot === oldRepoRoot && oldRel !== newRel) replacements.push([oldRel, newRel]);
+      if (oldRepoRoot && sourceRepoRoot !== oldRepoRoot) {
+        if (oldPath !== newPath) replacements.push([oldPath, newPath]);
+        if (oldRel !== newRel) {
+          const oldName = oldRepoRoot.split("/").pop();
+          const newName = newRepoRoot?.split("/").pop();
+          replacements.push([oldName + "/" + oldRel, newName ? newName + "/" + newRel : newPath]);
         }
       }
-    }
-    if (oldRel !== newRel) {
-      const escaped = oldRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern = isFolder ? `(?<=(?:^|[\\s(]))@${escaped}/` : `(?<=(?:^|[\\s(]))@${escaped}(?=$|[\\s)\\]},;:!?])`;
-      const re = new RegExp(pattern, "gm");
-      const replacement = isFolder ? "@" + newRel + "/" : "@" + newRel;
-      const scope = oldRepoRoot || "";
-      for (const mdFile of mdFiles) {
-        if (scope && !mdFile.path.startsWith(scope + "/")) continue;
-        if (!scope && getRepoRoot(mdFile.path)) continue;
-        const content = await this.app.vault.read(mdFile);
-        if (!re.test(content)) continue;
-        re.lastIndex = 0;
-        const updated = content.replace(re, replacement);
-        if (updated !== content) {
-          await this.app.vault.modify(mdFile, updated);
-        }
+      for (const [before, after] of replacements) {
+        const escaped = before.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pattern = isFolder ? `(?<=(?:^|[\\s(]))@${escaped}/` : `(?<=(?:^|[\\s(]))@${escaped}(?=$|[\\s)\\]},;:!?])`;
+        updated = updated.replace(new RegExp(pattern, "gm"), "@" + after + (isFolder ? "/" : ""));
       }
     }
-    if (oldRepoRoot && oldPath !== file.path) {
-      const escaped = oldPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern = isFolder ? `(?<=(?:^|[\\s(]))@${escaped}/` : `(?<=(?:^|[\\s(]))@${escaped}(?=$|[\\s)\\]},;:!?])`;
-      const re = new RegExp(pattern, "gm");
-      const replacement = isFolder ? "@" + file.path + "/" : "@" + file.path;
-      for (const mdFile of mdFiles) {
-        if (getRepoRoot(mdFile.path) === oldRepoRoot) continue;
-        const content = await this.app.vault.read(mdFile);
-        if (!re.test(content)) continue;
-        re.lastIndex = 0;
-        const updated = content.replace(re, replacement);
-        if (updated !== content) {
-          await this.app.vault.modify(mdFile, updated);
-        }
+    const renamedFiles = /* @__PURE__ */ new Set();
+    for (let index = 0; index < moves.length; index++) {
+      if (moves[index].isFolder) continue;
+      let path = moves[index].newPath;
+      for (const { oldPath, newPath } of moves.slice(index + 1)) {
+        if (path === oldPath || path.startsWith(oldPath + "/")) path = newPath + path.slice(oldPath.length);
       }
+      renamedFiles.add(path);
     }
-    if (oldRepoRoot && oldRel !== newRel) {
-      const oldRepoName = oldRepoRoot.substring(oldRepoRoot.lastIndexOf("/") + 1);
-      const newRepoName = newRepoRoot ? newRepoRoot.substring(newRepoRoot.lastIndexOf("/") + 1) : "";
-      const oldCrossRef = oldRepoName + "/" + oldRel;
-      const newCrossRef = newRepoName ? newRepoName + "/" + newRel : file.path;
-      const escaped3 = oldCrossRef.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern3 = isFolder ? `(?<=(?:^|[\\s(]))@${escaped3}/` : `(?<=(?:^|[\\s(]))@${escaped3}(?=$|[\\s)\\]},;:!?])`;
-      const re3 = new RegExp(pattern3, "gm");
-      const replacement3 = isFolder ? "@" + newCrossRef + "/" : "@" + newCrossRef;
-      for (const mdFile of mdFiles) {
-        if (getRepoRoot(mdFile.path) === oldRepoRoot) continue;
-        const content = await this.app.vault.read(mdFile);
-        if (!re3.test(content)) continue;
-        re3.lastIndex = 0;
-        const updated = content.replace(re3, replacement3);
-        if (updated !== content) {
-          await this.app.vault.modify(mdFile, updated);
-        }
-      }
-    }
+    return updated.replace(new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags), (match, linkTarget) => {
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
+      if (!resolved || !renamedFiles.has(resolved.path)) return match;
+      const targetRepoRoot = getRepoRoot(resolved.path);
+      const display = !targetRepoRoot ? resolved.path : sourceRepoRoot === targetRepoRoot ? toRepoRelative(resolved.path, targetRepoRoot) : targetRepoRoot.split("/").pop() + "/" + toRepoRelative(resolved.path, targetRepoRoot);
+      return "[[" + linkTarget + "|@" + display + "]]";
+    });
   }
 };
 module.exports = AtPathPlugin;

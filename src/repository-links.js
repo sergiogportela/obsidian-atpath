@@ -319,13 +319,23 @@ function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
   return "[" + label.replace(/([\\\[\]*_`<>&~])/g, "\\$1") + "](" + destination + ")";
 }
 
-function f_rewriteRepositoryDestinations(markdown, { sourcePath, oldPath, newPath, repositories, getTargetType, onError }) {
-  const f_wasMoved = path => path === oldPath || path.startsWith(oldPath + "/");
-  const f_move = path => f_wasMoved(path) ? newPath + path.slice(oldPath.length) : path;
-  const sourceBefore = sourcePath === newPath || sourcePath.startsWith(newPath + "/")
-    ? oldPath + sourcePath.slice(newPath.length)
-    : sourcePath;
-  const sourceMovedRepo = f_repositoryForPath(sourcePath, repositories) !== f_repositoryForPath(sourceBefore, repositories);
+function f_rewriteRepositoryDestinations(markdown, {
+  sourcePath, moves, repositories, repositoriesBefore = repositories, getTargetType, onError,
+}) {
+  const f_move = path => {
+    for (const { oldPath, newPath } of moves) {
+      if (path === oldPath || path.startsWith(oldPath + "/")) path = newPath + path.slice(oldPath.length);
+    }
+    return path;
+  };
+  let sourceBefore = sourcePath;
+  for (const { oldPath, newPath } of moves.slice().reverse()) {
+    if (sourceBefore === newPath || sourceBefore.startsWith(newPath + "/")) {
+      sourceBefore = oldPath + sourceBefore.slice(newPath.length);
+    }
+  }
+  const sourceMovedRepo = f_repositoryForPath(sourcePath, repositories)?.root !==
+    f_repositoryForPath(sourceBefore, repositoriesBefore)?.root;
   const edits = [];
   for (const link of f_scanMarkdownLinks(markdown, { destinationRanges: true })) {
     if (!link.destinationRange) continue;
@@ -333,15 +343,16 @@ function f_rewriteRepositoryDestinations(markdown, { sourcePath, oldPath, newPat
     if (!github && (!link.destination.startsWith("/") || link.destination.startsWith("//"))) continue;
     const result = f_resolveRepositoryLink(link, {
       sourcePath: sourceBefore,
-      repositories,
+      repositories: repositoriesBefore,
       getTargetType: path => getTargetType(f_move(path)),
     });
     if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref ?? "")) continue;
-    const moved = f_wasMoved(result.vaultPath);
+    const targetPath = f_move(result.vaultPath);
+    const moved = targetPath !== result.vaultPath;
     if (!moved && !sourceMovedRepo) continue;
     if (!moved && github && f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
-    const targetPath = f_move(result.vaultPath);
-    const targetMovedRepo = f_repositoryForPath(targetPath, repositories) !== f_repositoryForPath(result.vaultPath, repositories);
+    const targetMovedRepo = f_repositoryForPath(targetPath, repositories)?.identity !==
+      f_repositoryForPath(result.vaultPath, repositoriesBefore)?.identity;
     const url = github ? {
       identity: targetMovedRepo ? undefined : github[1],
       ref: targetMovedRepo ? encodeURIComponent(result.ref) : result.rawRef,

@@ -17,7 +17,8 @@ async function f_readGitCheckout(cwd, root) {
     f_git(cwd, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"]),
   ]);
   const identity = origin.status === "fulfilled" ? f_originIdentity(origin.value.stdout) : null;
-  const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n").filter(Boolean).map(ref =>
+  const names = refs.status === "fulfilled" ? refs.value.stdout.split("\n")
+    .filter(ref => ref && !/^refs\/remotes\/[^/]+\/HEAD$/.test(ref)).map(ref =>
     ref.replace(/^refs\/(?:heads\/|tags\/|remotes\/[^/]+\/)/, "")
   ) : [];
   return { root, identity, refs: [...new Set(names)].sort() };

@@ -11,7 +11,7 @@ const repositories = [
 
 function f_rewrite(markdown, sourcePath, oldPath, newPath, files) {
   return f_rewriteRepositoryDestinations(markdown, {
-    sourcePath, oldPath, newPath, repositories,
+    sourcePath, moves: [{ oldPath, newPath }], repositories,
     getTargetType: path => files[path] ?? null,
   });
 }
@@ -77,4 +77,57 @@ test("nested image labels never supply the parent link's destination range", () 
     "a/old.md": "file",
     "a/renamed.png": "file",
   }), input);
+});
+
+test("a batch rewrites independent encoded destinations, definitions and autolinks together", () => {
+  const input = '[First](/Old%20one.md "Title") [Second][shared]\n\n'
+    + '[shared]: </Old two.md?view=1&amp;mode=2#Heading>\n'
+    + '<https://github.com/Owner/First/blob/feature%2Ftopic/old-three.md#L2>\n'
+    + '[Pinned](https://github.com/Owner/First/blob/123abcd/Old%20one.md)';
+  const output = f_rewriteRepositoryDestinations(input, {
+    sourcePath: "a/note.md", repositories,
+    moves: [
+      { oldPath: "a/Old one.md", newPath: "a/New one.md" },
+      { oldPath: "a/Old two.md", newPath: "a/New two.md" },
+      { oldPath: "a/old-three.md", newPath: "a/new-three.md" },
+    ],
+    getTargetType: path => ["a/New one.md", "a/New two.md", "a/new-three.md"].includes(path) ? "file" : null,
+  });
+  assert.equal(output, input.replace('(/Old%20one.md', '(/New%20one.md')
+    .replace('</Old two.md?', '</New%20two.md?').replace('/old-three.md#', '/new-three.md#'));
+});
+
+test("chained moves and temporary-path swaps retain the original target identities", () => {
+  const moves = [
+    { oldPath: "a/first.md", newPath: "a/temporary.md" },
+    { oldPath: "a/second.md", newPath: "a/first.md" },
+    { oldPath: "a/temporary.md", newPath: "a/second.md" },
+  ];
+  assert.equal(f_rewriteRepositoryDestinations('[A](/first.md) [B](/second.md)', {
+    sourcePath: "a/second.md", repositories, moves,
+    getTargetType: path => ["a/first.md", "a/second.md"].includes(path) ? "file" : null,
+  }), '[A](/second.md) [B](/first.md)');
+});
+
+test("moving a folder, its source and a linked target across checkouts formats final paths once", () => {
+  const input = '[Local](/docs/other.md) [Keep](/outside.md)';
+  assert.equal(f_rewriteRepositoryDestinations(input, {
+    sourcePath: "b/renamed/note.md", repositories,
+    moves: [
+      { oldPath: "a/docs", newPath: "b/docs" },
+      { oldPath: "b/docs", newPath: "b/renamed" },
+      { oldPath: "b/renamed/other.md", newPath: "b/renamed/new.md" },
+    ],
+    getTargetType: path => ["b/renamed/new.md", "a/outside.md"].includes(path) ? "file" : null,
+  }), '[Local](/renamed/new.md) [Keep](https://github.com/owner/first/blob/main/outside.md)');
+});
+
+test("checkout-root moves use before and after maps without changing GitHub identity or refs", () => {
+  const input = '[Local](/old.md) <https://github.com/Owner/First/blob/feature/topic/old.md>';
+  assert.equal(f_rewriteRepositoryDestinations(input, {
+    sourcePath: "renamed/note.md", repositoriesBefore: repositories,
+    repositories: [{ ...repositories[0], root: "renamed" }, repositories[1]],
+    moves: [{ oldPath: "a", newPath: "renamed" }, { oldPath: "renamed/old.md", newPath: "renamed/new.md" }],
+    getTargetType: path => path === "renamed/new.md" ? "file" : null,
+  }), '[Local](/new.md) <https://github.com/Owner/First/blob/feature/topic/new.md>');
 });

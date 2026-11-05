@@ -1,0 +1,68 @@
+{
+  "contract": "Desktop discovery skips every dot-directory and data, node_modules, venv, dist, build, __pycache__ at every depth. Symlinks are not traversed. An explicitly opened source adds only that checkout. Refs include local branches, tags and every remote's branches with the remote name removed; remote HEAD pointers are omitted.",
+  "checkouts": [
+    {
+      "root": "",
+      "identity": "org/workspace",
+      "gitRefs": ["refs/heads/main", "refs/heads/topic/local", "refs/tags/release/v1", "refs/remotes/origin/main", "refs/remotes/upstream/feature/tools", "refs/remotes/upstream/topic/HEAD"],
+      "symbolicRefs": {"refs/remotes/origin/HEAD": "refs/remotes/origin/main"},
+      "expectedRefs": ["feature/tools", "main", "release/v1", "topic/HEAD", "topic/local"]
+    },
+    {"root": "code/lib", "identity": "org/lib"},
+    {"root": "code/lib/nested", "identity": "org/nested"},
+    {"root": ".claude/worktrees/lib", "identity": "org/lib"},
+    {"root": ".claude/worktrees/lib/nested", "identity": "org/hidden-nested"},
+    {"root": ".cache/lib", "identity": "org/lib"},
+    {"root": ".obsidian/lib", "identity": "org/lib"},
+    {"root": ".venv/lib", "identity": "org/lib"},
+    {"root": "data/lib", "identity": "org/lib"},
+    {"root": "node_modules/lib", "identity": "org/lib"},
+    {"root": "venv/lib", "identity": "org/lib"},
+    {"root": "dist/lib", "identity": "org/lib"},
+    {"root": "build/lib", "identity": "org/lib"},
+    {"root": "__pycache__/lib", "identity": "org/lib"},
+    {"root": "code/build/lib", "identity": "org/lib"},
+    {"root": "code/.hidden/lib", "identity": "org/lib"}
+  ],
+  "symlinks": [{"path": "shortcut", "target": "code"}],
+  "cases": [
+    {
+      "name": "hidden and generated duplicate checkouts do not create ambiguity",
+      "expectedRoots": ["", "code/lib", "code/lib/nested"],
+      "sourcePath": "source.md",
+      "destination": "https://github.com/org/lib/blob/main/note.md",
+      "expected": {"status": "resolved", "vaultPath": "code/lib/note.md"}
+    },
+    {
+      "name": "an explicitly opened hidden source adds only that checkout",
+      "sourceRoot": ".claude/worktrees/lib",
+      "expectedRoots": ["", ".claude/worktrees/lib", "code/lib", "code/lib/nested"],
+      "sourcePath": ".claude/worktrees/lib/source.md",
+      "destination": "https://github.com/org/lib/blob/main/note.md",
+      "expected": {"status": "resolved", "vaultPath": ".claude/worktrees/lib/note.md"}
+    },
+    {
+      "name": "an explicitly opened generated source adds only that checkout",
+      "sourceRoot": "data/lib",
+      "expectedRoots": ["", "code/lib", "code/lib/nested", "data/lib"],
+      "sourcePath": "data/lib/source.md",
+      "destination": "https://github.com/org/lib/blob/main/note.md",
+      "expected": {"status": "resolved", "vaultPath": "data/lib/note.md"}
+    },
+    {
+      "name": "an already discovered source is not duplicated",
+      "sourceRoot": "code/lib",
+      "expectedRoots": ["", "code/lib", "code/lib/nested"],
+      "sourcePath": "code/lib/source.md",
+      "destination": "https://github.com/org/lib/blob/main/note.md",
+      "expected": {"status": "resolved", "vaultPath": "code/lib/note.md"}
+    },
+    {
+      "name": "slash-bearing branches from another remote resolve",
+      "expectedRoots": ["", "code/lib", "code/lib/nested"],
+      "sourcePath": "code/lib/source.md",
+      "destination": "https://github.com/org/workspace/blob/feature/tools/note.md",
+      "expected": {"status": "resolved", "vaultPath": "note.md", "ref": "feature/tools"}
+    }
+  ]
+}
