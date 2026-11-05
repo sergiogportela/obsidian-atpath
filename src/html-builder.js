@@ -24,6 +24,43 @@ const MARKDOWN_EXTENSIONS = new Set(["md", "markdown"]);
 
 const mdi = markdownit({ html: true, linkify: true, typographer: true });
 
+// Publishing uses the same destination resolver as opening/counting. Rewrite
+// parsed links only; code examples and the downloadable source remain intact.
+mdi.core.ruler.after("inline", "repository_links", state => {
+  const context = state.env.repositoryLinks;
+  if (!context) return;
+  for (const block of state.tokens) {
+    if (block.type !== "inline") continue;
+    const tokens = block.children;
+    for (let index = 0; index < tokens.length; index++) {
+      const open = tokens[index];
+      if (open.type !== "link_open") continue;
+      const destination = open.attrGet("href");
+      if (!destination || destination.startsWith("#")) continue;
+      const resolved = context.resolveLink(destination, context.sourcePath);
+      if (!resolved || resolved.status === "out-of-scope") continue;
+      let closeIndex = index + 1;
+      while (tokens[closeIndex]?.type !== "link_close") closeIndex++;
+      const slug = !state.env.nestedRepositoryLinks && resolved.status === "resolved"
+        ? context.slugsByPath?.get(resolved.vaultPath) : null;
+      if (slug) {
+        open.attrSet("href", "atpath/" + slug + ".html" + (resolved.fragment || ""));
+        open.attrJoin("class", "atpath-ref");
+        if (state.env.compactLinks) {
+          const label = new open.constructor("text", "", 0);
+          label.content = resolved.vaultPath.split("/").pop();
+          tokens.splice(index + 1, closeIndex - index - 1, label);
+          closeIndex = index + 2;
+        }
+      } else {
+        open.tag = tokens[closeIndex].tag = "span";
+        open.attrs = [["class", "atpath-nested"]];
+      }
+      index = closeIndex;
+    }
+  }
+});
+
 function preprocessObsidianImages(md) {
   return md.replace(
     /!\[([^\]]*?)\|(\d+)\]\(([^)]+)\)/g,
@@ -31,8 +68,8 @@ function preprocessObsidianImages(md) {
   );
 }
 
-function renderMarkdown(md) {
-  return mdi.render(preprocessObsidianImages(md));
+function renderMarkdown(md, context) {
+  return mdi.render(preprocessObsidianImages(md), context);
 }
 
 // ─── Collapsible sections (h2–h4 → <details><summary>) ──────────────
@@ -369,8 +406,8 @@ function replaceNestedAtPaths(md) {
 
 // ─── Pipeline ────────────────────────────────────────────────────────
 
-function processMarkdown(md) {
-  let html = renderMarkdown(md);
+function processMarkdown(md, context) {
+  let html = renderMarkdown(md, context);
   html = wrapSections(html);
   html = foldBoldListItems(html);
   return html;
@@ -384,25 +421,25 @@ function toBase64(str) {
 
 // ─── Exported builders ──────────────────────────────────────────────
 
-function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl) {
+function buildMainPage(title, markdown, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl, repositoryLinks) {
   const mdBase64 = toBase64(markdown);
   const downloadFilename = title + ".md";
 
   // Replace first-level @paths with links before rendering
   let md = replaceAtPathsWithLinks(markdown, atPathSlugs, compactLinks);
 
-  const bodyHtml = processMarkdown(md);
+  const bodyHtml = processMarkdown(md, { repositoryLinks, compactLinks });
   const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
 
   return htmlPage(title, `${buttons}\n<div class="container">\n${bodyHtml}\n</div>`, "", siteIconDataUrl);
 }
 
-function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabel, siteIconDataUrl) {
+function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabel, siteIconDataUrl, repositoryLinks) {
   const mdBase64 = toBase64(markdown);
   const downloadFilename = title.replace(/\//g, "-");
 
   // Wrap non-markdown files in a fenced code block so they render as <pre><code>
-  const ext = (title.match(/\.(\w+)$/) || [])[1]?.toLowerCase();
+  const ext = ((repositoryLinks?.sourcePath || title).match(/\.(\w+)$/) || [])[1]?.toLowerCase();
   let md = markdown;
   if (ext && !MARKDOWN_EXTENSIONS.has(ext)) {
     const fence = makeFence(md);
@@ -412,7 +449,7 @@ function buildAtPathPage(title, markdown, mainPageTitle, contactUrl, contactLabe
   // Replace second-level @paths as inert spans
   md = replaceNestedAtPaths(md);
 
-  const bodyHtml = processMarkdown(md);
+  const bodyHtml = processMarkdown(md, { repositoryLinks, nestedRepositoryLinks: true });
   const buttons = topButtons(mdBase64, downloadFilename, contactUrl, contactLabel);
 
   const backNav = `<div class="back-nav"><a href="../index.html">&larr; Back to ${escapeHtml(mainPageTitle)}</a></div>`;

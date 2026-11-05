@@ -1,10 +1,19 @@
 // obsidian-atpath — Autocomplete and navigate @path/to/file references
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { Compartment, Prec } = require("@codemirror/state");
-const { encode } = require("gpt-tokenizer/model/gpt-4o");
+const { f_createTokenIndex, f_estimateTokens } = require("./token-index");
+const { f_installExplorerTokenBadges } = require("./explorer-token-badges");
+const { f_loadTokenCache, f_saveTokenCache } = require("./token-cache-storage");
+
+const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink } = require("./repository-links");
+const { f_installNativeRepositoryLinks } = require("./native-repository-links");
+const {
+  REPOSITORY_MAP_PATH, f_discoverRepositories, f_lookupRenamedRepository,
+  f_readRepositoryMap, f_writeRepositoryMap,
+} = require("./repository-index");
 
 // ─── ATPATH_PERF — opt-in perf instrumentation, no-op unless enabled ──
 // Enable in devtools console: localStorage.setItem("atpath-perf", "1")
@@ -171,9 +180,9 @@ async function copyToClipboard(text) {
 }
 
 function formatTokens(n) {
-  if (n < 1000) return String(n);
-  if (n < 10000) return (n / 1000).toFixed(1) + "k";
-  return Math.round(n / 1000) + "k";
+  if (n < 1000) return "~" + n;
+  if (n < 10000) return "~" + (n / 1000).toFixed(1) + "k";
+  return "~" + Math.round(n / 1000) + "k";
 }
 
 // Unified renderer for a linked-target row's count cell. Handles the
@@ -181,19 +190,46 @@ function formatTokens(n) {
 // case in one place so every consumer agrees.
 function formatLinkedTargetCount(t) {
   if (!t) return "0";
-  if (t.pending) return "…";
+  if (t.kind === "missing") return "Unavailable";
+  if (t.pending) return (t.tokens ? formatTokens(t.tokens) + "+" : "…") + (t.skipped ? " *" : "");
   if (t.overCap) return "> " + t.overCap.fileCount + " files";
-  return formatTokens(t.tokens || 0);
+  return formatTokens(t.tokens || 0) + (t.skipped ? " *" : "");
 }
 
-const { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath, AT_PATH_RE: HTML_AT_PATH_RE } = require("./html-builder");
+function f_formatFolderTokenCount(value) {
+  return value?.overCap ? formatLinkedTargetCount({ overCap: value }) :
+    formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped });
+}
+
+function f_bindReadingFolderCount(plugin, context, badge, path) {
+  const paint = () => {
+    const count = plugin.f_folderTokenCount(path);
+    const text = " (" + f_formatFolderTokenCount(count) + ")";
+    if (badge.textContent !== text) badge.textContent = text;
+    if (count?.skipped) badge.title = count.skipped + " files skipped. Token estimate from readable text.";
+  };
+  paint();
+  if (typeof context.addChild !== "function" || typeof MarkdownRenderChild !== "function") return;
+  const child = new MarkdownRenderChild(badge);
+  child.register(plugin._tokenIndex.subscribe(paint));
+  context.addChild(child);
+}
+
+function f_uniqueLinkedTokenTotal(targets) {
+  const folders = targets.filter(target => target.kind === "folder" && !target.overCap);
+  return targets.reduce((total, target) => {
+    if (folders.some(folder => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
+    return total + (target.tokens || 0);
+  }, 0);
+}
+
+const { buildMainPage, buildAtPathPage, buildUnpublishedPage, slugifyPath } = require("./html-builder");
 const { deployToVercel, ensureProject, checkProjectAvailability, slugify } = require("./vercel-api");
 const { buildAuthShell } = require("./auth-shell-builder");
 const { buildAuthFunction, buildApproveFunction } = require("./auth-function-template");
 const { applySiteIconToDeployFiles, injectSiteIconIntoHtml } = require("./site-icon");
 const {
   createAtPathCore,
-  REPOS_SEGMENT: CORE_REPOS_SEGMENT,
   getRepoRoot: coreGetRepoRoot,
   toRepoRelative: coreToRepoRelative,
   discoverRepoRoots: coreDiscoverRepoRoots,
@@ -218,11 +254,9 @@ const {
 } = require("./html-app-publish");
 
 const DEFAULT_SETTINGS = {
-  linkFormat: "legacy",
   showTokenCounts: true,
   maxFileSizeMB: 5,
   maxFolderFiles: 500,
-  folderEncodeBatchSize: 1,
   statusBarShowSelection: true,
   suggestFolders: true,
   enableDragDropAtPath: true,
@@ -422,12 +456,7 @@ function revealFolderInExplorer(app, folder) {
       console.warn("[atpath] revealInFolder failed", err);
     }
   }
-  if (!revealed) {
-    const fallback = app.workspace.openLinkText(folder.path, "", false);
-    if (fallback && typeof fallback.catch === "function") {
-      fallback.catch(() => {});
-    }
-  }
+  if (!revealed) new Notice("Could not reveal folder in file explorer: " + folder.path);
 }
 
 function showAtPathFolderMenu(plugin, event, folder) {
@@ -467,7 +496,6 @@ async function openFileByViewState(plugin, resolved) {
 // (file explorer) share one implementation. Local aliases below preserve
 // the unqualified names used throughout this file.
 
-const REPOS_SEGMENT = CORE_REPOS_SEGMENT;
 const getRepoRoot = coreGetRepoRoot;
 const toRepoRelative = coreToRepoRelative;
 const discoverRepoRoots = coreDiscoverRepoRoots;
@@ -480,38 +508,6 @@ function resolveAtPath(relPath, plugin) {
   return resolveAtPathFromSource(relPath, activeFile.path, plugin);
 }
 
-/** Broad resolution for migration only — tries multiple strategies to find the file. */
-function resolveAtPathBroad(relPath, sourceFilePath, plugin) {
-  // 1. Try existing exact resolution
-  const exact = resolveAtPathFromSource(relPath, sourceFilePath, plugin);
-  if (plugin.app.vault.getAbstractFileByPath(exact) instanceof TFile) return exact;
-
-  // 2. Obsidian's link resolver (indexed, handles basename + shortest-unique-path)
-  const linked = plugin.app.metadataCache.getFirstLinkpathDest(relPath, sourceFilePath);
-  if (linked) return linked.path;
-
-  // 3. All-repo scan: try every discovered repo root
-  const sourceRepoRoot = getRepoRoot(sourceFilePath);
-  const allRoots = discoverRepoRoots(plugin);
-  for (const [, root] of allRoots) {
-    if (root === sourceRepoRoot) continue;
-    const candidate = root + "/" + relPath;
-    const file = plugin.app.vault.getAbstractFileByPath(candidate);
-    if (file instanceof TFile) return candidate;
-  }
-
-  // 4. Suffix match (last resort — linear scan, fine for one-time migration)
-  const suffix = "/" + relPath;
-  const matches = plugin.app.vault.getFiles().filter(f => f.path.endsWith(suffix));
-  if (matches.length === 1) return matches[0].path;
-  if (matches.length > 1 && sourceRepoRoot) {
-    const sameRepo = matches.find(f => f.path.startsWith(sourceRepoRoot + "/"));
-    if (sameRepo) return sameRepo.path;
-  }
-  // Ambiguous or not found: return null
-  return null;
-}
-
 // ─── B) EditorSuggest — Autocomplete ─────────────────────────────────
 
 class AtPathSuggest extends EditorSuggest {
@@ -521,22 +517,14 @@ class AtPathSuggest extends EditorSuggest {
   }
 
   onTrigger(cursor, editor, file) {
+    if (!file || !f_repositoryForPath(file.path, this.plugin.repositories)) return null;
     const line = editor.getLine(cursor.line);
-    // Walk backwards from cursor to find @ trigger
-    let start = cursor.ch - 1;
-    while (start >= 0 && !/\s/.test(line[start]) && line[start] !== "@") {
-      start--;
-    }
-    if (start < 0 || line[start] !== "@") return null;
-    // @ must be at start of line or preceded by whitespace
-    if (start > 0 && !/\s/.test(line[start - 1])) return null;
-
-    const query = line.substring(start + 1, cursor.ch);
-    return {
-      start: { line: cursor.line, ch: start },
-      end: cursor,
-      query,
-    };
+    const before = line.slice(0, cursor.ch);
+    const start = before.lastIndexOf("[[");
+    if (start < 0 || /[\[\]]/.test(before.slice(start + 2))
+      || before[start - 1] === "!" || /(^|[^\\])(?:\\\\)*\\$/.test(before.slice(0, start))) return null;
+    if (isInExcludedRange(editor.posToOffset(cursor), buildExcludedRanges(editor.getValue()))) return null;
+    return { start: { line: cursor.line, ch: start }, end: cursor, query: before.slice(start + 2) };
   }
 
   getSuggestions(context) {
@@ -563,27 +551,8 @@ class AtPathSuggest extends EditorSuggest {
     const showFolders = this.plugin.settings.suggestFolders !== false;
     const core = this.plugin.core;
 
-    // Source-aware slash-trigger: @prefix/ → enumerate immediate children
-    // of that folder (same-repo → vault-abs → prefix-match), per §3.4.6.
-    if (showFolders && query.endsWith("/")) {
-      // Slash results bypass narrowing — drop the cache so the next plain
-      // query rebuilds from scratch rather than narrowing a stale base.
-      this._suggestCache = null;
-      const items = core.enumerateFolderCandidates(query, sourcePath);
-      return items.map((item) => ({
-        kind: item.kind,
-        target: item.target,
-        display: item.display,
-        fuzzyResult: null,
-      }));
-    }
-
-    const sourceRepoRoot = getRepoRoot(sourcePath);
-    const tierOf = (path) => {
-      if (sourceRepoRoot && path.startsWith(sourceRepoRoot + "/")) return 0;
-      if (getRepoRoot(path)) return 1;
-      return 2;
-    };
+    const sourceRepo = f_repositoryForPath(sourcePath, this.plugin.repositories);
+    const tierOf = path => f_repositoryForPath(path, this.plugin.repositories) === sourceRepo ? 0 : 1;
 
     // ── Incremental candidate narrowing (autocomplete hot path) ────────
     // Building a display string + running Obsidian's fuzzy scorer for every
@@ -659,7 +628,7 @@ class AtPathSuggest extends EditorSuggest {
       out.push({
         kind: "file",
         target: f,
-        display: core.computeDisplayPath(f.path, sourcePath),
+        display: this.plugin.f_displayLinkedPath(f.path, sourcePath),
         tier: tierOf(f.path),
       });
     }
@@ -668,7 +637,7 @@ class AtPathSuggest extends EditorSuggest {
         out.push({
           kind: "folder",
           target: folder,
-          display: core.computeDisplayPath(folder.path, sourcePath) + "/",
+          display: this.plugin.f_displayLinkedPath(folder.path, sourcePath) + "/",
           tier: tierOf(folder.path),
         });
       }
@@ -690,16 +659,27 @@ class AtPathSuggest extends EditorSuggest {
     }
   }
 
-  selectSuggestion(value, evt) {
-    const { editor } = this.context;
-    const { start, end } = this.context;
-    const sourcePath = this.context.file?.path || "";
-    const mode = this.plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
-    // Wikilink mode + folder = legacy `@folder/` form (formatAtPathInsertion
-    // ignores `mode` for folders, per §3.4.7).
-    const insertion = this.plugin.core.formatAtPathInsertion(value.target, sourcePath, mode);
-    editor.replaceRange(insertion + " ", start, end);
+  selectSuggestion(value) {
+    const { editor, start, end, file } = this.context;
+    try {
+      const insertion = this.plugin.f_formatLinkedTarget(value.target, file.path);
+      const tail = editor.getLine(end.line).slice(end.ch);
+      const replaceEnd = tail.startsWith("]]") ? { ...end, ch: end.ch + 2 } : end;
+      editor.replaceRange(insertion + " ", start, replaceEnd);
+    } catch (error) {
+      new Notice(error.message);
+    }
   }
+}
+
+function f_prioritizeRepositorySuggest(plugin, suggest) {
+  const suggests = plugin.app.workspace.editorSuggest?.suggests;
+  if (!Array.isArray(suggests)) return false;
+  const index = suggests.indexOf(suggest);
+  if (index < 0) return false;
+  suggests.splice(index, 1);
+  suggests.unshift(suggest);
+  return true; // Obsidian's registered cleanup removes this same instance.
 }
 
 // ─── C) CM6 ViewPlugin — Clickable links in Live Preview ─────────────
@@ -859,15 +839,7 @@ function buildAtPathViewPlugin(plugin) {
             sourcePath
           );
           if (resolved.kind === "folder") {
-            const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
-            if (cached == null) {
-              plugin.scheduleFolderTokenFetch(resolved.normalizedPath, view);
-              tokenStr = "…";
-            } else if (cached && typeof cached === "object" && cached.overCap) {
-              tokenStr = formatLinkedTargetCount({ overCap: cached });
-            } else {
-              tokenStr = formatTokens(cached);
-            }
+            tokenStr = f_formatFolderTokenCount(plugin.f_folderTokenCount(resolved.normalizedPath));
           }
         }
 
@@ -1125,7 +1097,7 @@ function buildBufferCountListener(plugin) {
         const kb = text.length / 1024;
         const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
         ATPATH_PERF.inc("buffer.encode.docSize." + bucket);
-        plugin._noteBufferTokens = ATPATH_PERF.time("buffer.encode.doc", () => encode(text).length);
+        plugin._noteBufferTokens = ATPATH_PERF.time("buffer.encode.doc", () => f_estimateTokens(text));
       } catch (err) {
         console.warn("[atpath] buffer token count failed", err);
       }
@@ -1141,7 +1113,7 @@ function buildBufferCountListener(plugin) {
       if (r.empty) continue;
       nonEmpty++;
       try {
-        total += ATPATH_PERF.time("buffer.encode.selection", () => encode(state.sliceDoc(r.from, r.to)).length);
+        total += ATPATH_PERF.time("buffer.encode.selection", () => f_estimateTokens(state.sliceDoc(r.from, r.to)));
       } catch (err) {
         console.warn("[atpath] selection token count failed", err);
         return;
@@ -1215,11 +1187,14 @@ function captureDragRefsFromExplorerDom(plugin, evt) {
 
 function insertAtPathRefs(view, pos, refs, plugin) {
   const sourcePath = plugin.app.workspace.getActiveFile()?.path || "";
-  const mode = plugin.settings.linkFormat === "wikilink" ? "wikilink" : "legacy";
   const parts = [];
-  for (const r of refs) {
-    if (!r || !r.target) continue;
-    parts.push(plugin.core.formatAtPathInsertion(r.target, sourcePath, mode));
+  for (const ref of refs) {
+    if (!ref?.target) continue;
+    try {
+      parts.push(plugin.f_formatLinkedTarget(ref.target, sourcePath));
+    } catch (error) {
+      new Notice(error.message);
+    }
   }
   if (parts.length === 0) return;
   const text = parts.join(" ") + " ";
@@ -1263,12 +1238,154 @@ function buildDragDropExtension(plugin) {
 
 // ─── D) markdownPostProcessor — Clickable links in Reading mode ──────
 
+function f_editorSourcePath(view, plugin) {
+  const source = plugin.app.workspace.getLeavesOfType("markdown")
+    .find(leaf => leaf.view.editor?.cm === view);
+  return source?.view.file?.path || plugin.app.workspace.getActiveFile()?.path;
+}
+
+class RepositoryTokenWidget extends WidgetType {
+  constructor(count, skipped) {
+    super();
+    this.count = count;
+    this.skipped = skipped;
+  }
+  eq(other) { return this.count === other.count && this.skipped === other.skipped; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "atpath-token-count";
+    span.textContent = " (" + this.count + ")";
+    span.title = "Approximate tokens from character count" + (this.skipped ? ". " + this.skipped + " files skipped." : "");
+    return span;
+  }
+}
+
+function f_buildRepositoryLinkView(plugin) {
+  function f_decorate(view, refs, sourcePath) {
+    if (!sourcePath) return Decoration.none;
+    const ranges = [];
+    for (const ref of refs) {
+      if (!view.visibleRanges.some(range => ref.start >= range.from && ref.end <= range.to)) continue;
+      const result = plugin.f_resolveLinkTarget(ref, sourcePath);
+      if (result.kind === "ignored") continue;
+      ranges.push(Decoration.mark({
+        attributes: { "data-atpath-destination": ref.destination, "data-atpath-source": sourcePath,
+          title: result.reason || result.normalizedPath },
+      }).range(ref.start, ref.end));
+      if (!plugin.settings.showTokenCounts) continue;
+      let text;
+      let skipped;
+      if (result.kind === "missing") text = "unavailable";
+      else if (result.kind === "folder") {
+        const count = plugin.f_folderTokenCount(result.normalizedPath);
+        skipped = count?.skipped;
+        text = f_formatFolderTokenCount(count);
+      } else {
+        plugin.f_watchLinkedCount(result.normalizedPath, false);
+        const cached = plugin.tokenCache.get(result.normalizedPath);
+        if (!cached) plugin.scheduleTokenFetch(result.normalizedPath, view);
+        if (cached) text = formatTokens(cached.tokens);
+      }
+      if (text) ranges.push(Decoration.widget({ widget: new RepositoryTokenWidget(text, skipped), side: 1 }).range(ref.end));
+    }
+    return Decoration.set(ranges, true);
+  }
+
+  return ViewPlugin.define(view => {
+    const refs = plugin.f_scanMarkdownRefs(view.state.doc.toString());
+    const sourcePath = f_editorSourcePath(view, plugin);
+    return {
+      refs,
+      sourcePath,
+      generation: plugin._repositoryDecorationGeneration,
+      decorations: f_decorate(view, refs, sourcePath),
+      update(update) {
+        const path = f_editorSourcePath(update.view, plugin);
+        if (update.docChanged) this.refs = plugin.f_scanMarkdownRefs(update.state.doc.toString());
+        if (update.docChanged || update.viewportChanged || path !== this.sourcePath
+          || this.generation !== plugin._repositoryDecorationGeneration) {
+          this.sourcePath = path;
+          this.generation = plugin._repositoryDecorationGeneration;
+          this.decorations = f_decorate(update.view, this.refs, path);
+        }
+      },
+    };
+  }, {
+    decorations: value => value.decorations,
+  });
+}
+
+function f_captureEditorRepositoryLinks(plugin) {
+  const handle = event => {
+    const link = event.target.closest?.("[data-atpath-destination][data-atpath-source]");
+    if (!link || !link.closest(".cm-content")) return;
+    if (event.type !== "contextmenu") {
+      if (event.type === "mousedown" && !(event.button === 1 || Platform.isAndroidApp)) return;
+      if (event.type === "click" && (event.button !== 0 || Platform.isAndroidApp)) return;
+      if (!event.ctrlKey && !event.metaKey && event.button !== 1 && !Platform.isMobile) {
+        if (event.altKey || event.shiftKey || !link.closest(".is-live-preview")
+          || !event.target.closest(".cm-underline, .external-link")) return;
+        if (!link.ownerDocument.getSelection()?.isCollapsed) return;
+      }
+    }
+    f_interceptRepositoryLink(plugin, event, link.dataset.atpathDestination, link.dataset.atpathSource);
+  };
+  for (const type of ["click", "mousedown", "contextmenu"]) plugin.registerDomEvent(document, type, handle, { capture: true });
+}
+
+function f_isCanonicalRepositoryDestination(destination) {
+  return (destination.startsWith("/") && !destination.startsWith("//"))
+    || /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\//i.test(destination);
+}
+
+function f_interceptRepositoryLink(plugin, event, destination, sourcePath) {
+  const resolved = plugin.f_resolveLinkTarget({ destination }, sourcePath);
+  if (resolved.kind === "ignored") return false;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (event.type === "contextmenu") {
+    if (resolved.kind === "folder") showAtPathFolderMenu(plugin, event, resolved.target);
+    if (resolved.kind === "file") showAtPathMenu(plugin, event, resolved.normalizedPath);
+  } else {
+    void plugin.f_resolveLinkTargetAsync({ destination }, sourcePath)
+      .then(result => plugin.f_openRepositoryTarget(result, event.ctrlKey || event.metaKey || event.button === 1))
+      .catch(error => new Notice("Could not open repository link: " + error.message));
+  }
+  return true;
+}
+
 function registerPostProcessor(plugin) {
   plugin.registerMarkdownPostProcessor((el, ctx) => {
+    for (const link of el.querySelectorAll("a[href]")) {
+      const destination = link.dataset.href || link.getAttribute("href");
+      if (!destination || (!f_isCanonicalRepositoryDestination(destination) && !/^\.\.?\//.test(destination))) continue;
+      const result = plugin.f_resolveLinkTarget({ destination }, ctx.sourcePath);
+      if (!f_isCanonicalRepositoryDestination(destination) && result.kind === "missing") continue;
+      if (result.kind === "ignored" && !result.repository) continue;
+      link.addEventListener("click", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
+      link.addEventListener("contextmenu", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
+      if (result.kind === "ignored") continue;
+      link.classList.add("atpath-link");
+      link.title = result.reason || result.normalizedPath;
+      if (!plugin.settings.showTokenCounts) continue;
+      const badge = link.createSpan({ cls: "atpath-token-count" });
+      badge.title = "Approximate tokens from character count";
+      if (result.kind === "folder") f_bindReadingFolderCount(plugin, ctx, badge, result.normalizedPath);
+      else {
+        if (result.kind === "missing") badge.textContent = " (unavailable)";
+        void plugin.f_resolveLinkTargetAsync({ destination }, ctx.sourcePath).then(async resolved => {
+          if (resolved.kind !== "file") return;
+          const count = await plugin.getTokenCount(resolved.normalizedPath);
+          badge.textContent = count == null ? "" : " (" + formatTokens(count) + ")";
+          link.title = resolved.normalizedPath;
+        }).catch(error => console.warn("AtPath could not count linked target", destination, error));
+      }
+    }
+
     // ── Wikilink @path references (rendered as a.internal-link by Obsidian) ──
     const internalLinks = el.querySelectorAll("a.internal-link");
     for (const link of internalLinks) {
-      if (!link.textContent.startsWith("@")) continue;
+      if (link.classList.contains("atpath-link") || !link.textContent.startsWith("@")) continue;
       link.classList.add("atpath-link");
       const rawHref = link.dataset.href || link.getAttribute("href") || "";
       const vaultPath = resolveWikilinkHref(plugin, rawHref, ctx.sourcePath);
@@ -1418,24 +1535,7 @@ function registerPostProcessor(plugin) {
               ctx.sourcePath
             );
             if (resolved.kind === "folder") {
-              const cached = plugin.core.getCachedFolderTokens(resolved.normalizedPath);
-              if (cached == null) {
-                tokenSpan.textContent = " (…)";
-                plugin.core.getFolderTokens(resolved.normalizedPath).then(
-                  (result) => {
-                    if (result && typeof result === "object" && result.overCap) {
-                      tokenSpan.textContent = " (" + formatLinkedTargetCount({ overCap: result }) + ")";
-                    } else {
-                      tokenSpan.textContent = " (" + formatTokens(result || 0) + ")";
-                    }
-                  },
-                  (err) => console.warn("[atpath] folder token count failed", err)
-                );
-              } else if (cached && typeof cached === "object" && cached.overCap) {
-                tokenSpan.textContent = " (" + formatLinkedTargetCount({ overCap: cached }) + ")";
-              } else {
-                tokenSpan.textContent = " (" + formatTokens(cached) + ")";
-              }
+              f_bindReadingFolderCount(plugin, ctx, tokenSpan, resolved.normalizedPath);
             }
           } else {
             const vaultPath = resolveAtPathFromSource(capture, ctx.sourcePath, plugin);
@@ -1476,22 +1576,8 @@ class AtPathSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Preferred insert format")
-      .setDesc("Wikilink format integrates with graph view, backlinks, and rename tracking. Legacy format uses plain @path text.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("legacy", "Legacy (@path)")
-          .addOption("wikilink", "Wikilink ([[path|@path]])")
-          .setValue(this.plugin.settings.linkFormat)
-          .onChange(async (value) => {
-            this.plugin.settings.linkFormat = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Show token counts")
-      .setDesc("Display token count badges next to @path references and a total in the status bar.")
+      .setDesc("Display approximate token counts next to linked targets and in the status bar. Counts use four characters per token.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showTokenCounts).onChange(async (value) => {
           this.plugin.settings.showTokenCounts = value;
@@ -1509,38 +1595,21 @@ class AtPathSettingTab extends PluginSettingTab {
           if (!isNaN(num) && num > 0) {
             this.plugin.settings.maxFileSizeMB = num;
             await this.plugin.saveSettings();
-            this.plugin.core.clearFolderTokenMemo();
-            this.plugin.tokenCacheDirty = true;
-            this.plugin._scheduleRefresh();
+            this.plugin.onTokenSettingsChanged();
           }
         })
       );
 
     new Setting(containerEl)
       .setName("Max files per folder reference")
-      .setDesc("Folder @path references that resolve to more files than this show `> N files` instead of a token count, to avoid freezing Obsidian on huge folders.")
+      .setDesc("Folder references above this limit show a file count and are skipped when copying linked content.")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.maxFolderFiles)).onChange(async (value) => {
           const num = parseInt(value, 10);
           if (!isNaN(num) && num > 0) {
             this.plugin.settings.maxFolderFiles = num;
             await this.plugin.saveSettings();
-            this.plugin.core.clearFolderTokenMemo();
-            this.plugin.tokenCacheDirty = true;
-            this.plugin._scheduleRefresh();
-          }
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Folder encode batch size")
-      .setDesc("Lower = smoother UI but slower folder counts. Raise only if your vault is small.")
-      .addText((text) =>
-        text.setValue(String(this.plugin.settings.folderEncodeBatchSize)).onChange(async (value) => {
-          const num = parseInt(value, 10);
-          if (!isNaN(num) && num > 0) {
-            this.plugin.settings.folderEncodeBatchSize = num;
-            await this.plugin.saveSettings();
+            this.plugin.onTokenSettingsChanged();
           }
         })
       );
@@ -1560,7 +1629,7 @@ class AtPathSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Suggest folders in autocomplete")
-      .setDesc("Include folder candidates in @-autocomplete. Folders always insert as `@folder/` regardless of the wikilink setting (wikilink mode is file-only).")
+      .setDesc("Include folder candidates when you type [[. A folder inserts an ordinary Markdown link.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.suggestFolders !== false)
@@ -1571,8 +1640,8 @@ class AtPathSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Drag-and-drop @path inserts")
-      .setDesc("Dragging a file or folder from the file explorer into the editor inserts an `@path` ref at the drop point. Disable to restore Obsidian's default drag behavior (image embed, link-on-drop, etc.).")
+      .setName("Drag-and-drop repository links")
+      .setDesc("Dragging a file or folder into the editor inserts a Markdown repository link. Disable to restore Obsidian’s default drag behavior.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.enableDragDropAtPath !== false)
@@ -1724,7 +1793,7 @@ class PublishConfirmModal extends Modal {
       }
     } else if (atPathFiles.length > 0) {
       // ── Linked @path notes ──
-      const heading = "Linked @path notes (" + atPathFiles.length + ")";
+      const heading = "Linked files (" + atPathFiles.length + ")";
       if (atPathFiles.length > 5) {
         const details = contentEl.createEl("details");
         details.createEl("summary", { text: heading });
@@ -1820,7 +1889,7 @@ class PublishConfirmModal extends Modal {
     if (!isHtmlAppPublish) {
       // ── Compact toggle ──
       new Setting(contentEl)
-        .setName("Compact @path to file title?")
+        .setName("Use file names for published links?")
         .setDesc("Show just the filename (e.g. helpers.py) instead of the full path")
         .addToggle((toggle) =>
           toggle.setValue(true).onChange((value) => { compactLinks = value; })
@@ -2078,80 +2147,27 @@ class MigrationPreviewModal extends Modal {
 
   async onOpen() {
     const { contentEl } = this;
-    contentEl.createEl("h2", { text: "Migrate @paths to wikilinks" });
+    contentEl.createEl("h2", { text: "Review legacy links for migration" });
 
     const statusEl = contentEl.createEl("p", { text: "Scanning files...", cls: "atpath-migration-status" });
 
-    const mdFiles = this.app.vault.getMarkdownFiles();
-    let totalResolvable = 0;
-    let totalUnresolvable = 0;
-    const fileResults = [];
-
-    for (const mdFile of mdFiles) {
-      const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
-      if (refs.length === 0) continue;
-      let resolvable = 0;
-      let unresolvable = 0;
-      for (const ref of refs) {
-        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this.plugin);
-        if (!vaultPath) { unresolvable++; continue; }
-        const file = this.app.vault.getAbstractFileByPath(vaultPath);
-        if (file instanceof TFile) resolvable++;
-        else unresolvable++;
-      }
-      totalResolvable += resolvable;
-      totalUnresolvable += unresolvable;
-      fileResults.push({ path: mdFile.path, resolvable, unresolvable });
+    const plan = await this.plugin.f_planRepositoryMigration();
+    const resolved = plan.reduce((total, file) => total + file.edits.length, 0);
+    const unresolved = plan.reduce((total, file) => total + file.skipped.length, 0);
+    statusEl.setText(resolved + " proposed replacements and " + unresolved + " unresolved references in " + plan.length + " files.");
+    for (const file of plan) {
+      const details = contentEl.createEl("details");
+      details.createEl("summary", { text: file.file.path });
+      const lines = [];
+      for (const edit of file.edits) lines.push("- " + edit.original, "+ " + edit.replacement);
+      for (const skipped of file.skipped) lines.push("Unresolved: " + skipped);
+      details.createEl("pre", { text: lines.join("\n") });
     }
-
-    const totalRefs = totalResolvable + totalUnresolvable;
-
-    if (totalRefs === 0) {
-      statusEl.setText("No legacy @path references found.");
-      new Setting(contentEl)
-        .addButton((btn) => btn.setButtonText("Close").onClick(() => this.close()));
-      return;
-    }
-
-    statusEl.setText(
-      totalRefs + " legacy @path ref(s) in " + fileResults.length + " file(s) \u2014 " +
-      totalResolvable + " resolvable, " + totalUnresolvable + " unresolvable"
-    );
-
-    // File list
-    const listContainer = contentEl.createDiv({ cls: "atpath-migration-list" });
-    if (fileResults.length > 10) {
-      const details = listContainer.createEl("details");
-      details.createEl("summary", { text: "Show " + fileResults.length + " files" });
-      const ul = details.createEl("ul");
-      for (const f of fileResults) {
-        ul.createEl("li", { text: f.path + " (" + f.resolvable + " resolvable, " + f.unresolvable + " unresolvable)" });
-      }
-    } else {
-      const ul = listContainer.createEl("ul");
-      for (const f of fileResults) {
-        ul.createEl("li", { text: f.path + " (" + f.resolvable + " resolvable, " + f.unresolvable + " unresolvable)" });
-      }
-    }
-
-    if (totalUnresolvable > 0) {
-      contentEl.createEl("p", {
-        text: "Unresolvable references will be skipped.",
-        cls: "atpath-migration-note",
-      });
-    }
-
-    new Setting(contentEl)
-      .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => this.close())
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Convert all").setCta().onClick(async () => {
-          this.close();
-          await this.plugin.migrateToWikilinks();
-        })
-      );
+    new Setting(contentEl).addButton(button => button.setButtonText("Close").onClick(() => this.close()))
+      .addButton(button => button.setButtonText("Apply reviewed replacements").setDisabled(!resolved).setCta().onClick(async () => {
+        this.close();
+        await this.plugin.f_applyRepositoryMigration(plan);
+      }));
   }
 
   onClose() {
@@ -2224,14 +2240,83 @@ class AtPathPlugin extends Plugin {
     await this.loadSettings();
     this.tokenCache = new Map();
     this.tokenCacheDirty = false;
-    this._inFlightTokenFetches = new Set();
-    this._inFlightFolderTokenFetches = new Set();
     this._refreshTimer = null;
     this._lastEditorView = null;
     this._statusBarGen = 0;
     this.core = createAtPathCore(this);
+    this._unindexedTargets = new Map();
+    this._unindexedProbes = new Map();
+    this._linkedCountWatches = new Map();
+    const vault = this.app.vault;
+    const vaultKey = this.app.appId || vault.adapter.getBasePath?.() || vault.getName();
+    this._tokenIndex = f_createTokenIndex({
+      getFiles: () => [...vault.getFiles(), ...this._unindexedTargets.values()],
+      read: file => this.f_readLinkedFile(file),
+      isEligible: file => this.f_eligibleLinkedFile(file),
+      looksBinary,
+      load: () => f_loadTokenCache(vaultKey),
+      save: cache => f_saveTokenCache(vaultKey, cache),
+      tokenCache: this.tokenCache,
+      onError: error => console.warn("AtPath count cache", error),
+    });
+    this.register(this._tokenIndex.subscribe(() => {
+      let changed = false;
+      for (const [key, watch] of this._linkedCountWatches) {
+        const next = this.f_linkedCountSignature(watch.path, watch.folder);
+        if (watch.signature === next) continue;
+        this._linkedCountWatches.set(key, { ...watch, signature: next });
+        changed = true;
+      }
+      if (!changed) return;
+      this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
+      this.tokenCacheDirty = true;
+      this._scheduleRefresh();
+    }));
+    this.app.workspace.onLayoutReady(() => {
+      if (this._repositoryIndexClosed) return;
+      this._explorerTokenBadges = f_installExplorerTokenBadges({
+        workspace: this.app.workspace, index: this._tokenIndex,
+        formatTokens: tokens => formatTokens(tokens).slice(1),
+        isEnabled: () => this.settings.showTokenCounts,
+      });
+      void this._tokenIndex.start().catch(error => console.warn("AtPath could not start token counting", error));
+    });
+    this.register(() => {
+      this._explorerTokenBadges?.dispose();
+      void this._tokenIndex.dispose();
+      clearTimeout(this._refreshTimer);
+      clearTimeout(this._statusBarTimeout);
+    });
 
-    this.registerEditorSuggest(new AtPathSuggest(this));
+    this.repositories = [];
+    this._repositoryAliasAttempts = new Map();
+    const suggest = new AtPathSuggest(this);
+    this.registerEditorSuggest(suggest);
+    if (!f_prioritizeRepositorySuggest(this, suggest)) console.warn("AtPath could not prioritize repository link suggestions");
+    this.register(() => clearTimeout(suggest._suggestDebounceTimer));
+    this.registerEditorExtension(f_buildRepositoryLinkView(this));
+    f_captureEditorRepositoryLinks(this);
+    this.register(() => {
+      this._repositoryIndexClosed = true;
+      clearTimeout(this._repositoryRefreshTimer);
+      clearTimeout(this._repositoryMoveTimer);
+      this._nativeRepositoryLinks?.unload();
+    });
+    this.app.workspace.onLayoutReady(() => this.f_refreshRepositoryIndex());
+    this.registerEvent(this.app.vault.on("raw", path => {
+      if (this._unindexedProbes.delete(path) && this._unindexedTargets.delete(path)) {
+        this._tokenIndex.remove(path);
+        this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
+        this._scheduleRefresh();
+      }
+      if (path === REPOSITORY_MAP_PATH && Platform.isMobile) this.f_queueRepositoryRefresh();
+      else if (!Platform.isMobile && /(?:^|\/)\.git(?:$|\/(?:config|HEAD|packed-refs|refs\/))/.test(path)) this.f_queueRepositoryRefresh();
+    }));
+    this.addCommand({ id: "refresh-repositories", name: "Refresh repository map",
+      callback: () => {
+        this._repositoryAliasAttempts.clear();
+        return this.f_refreshRepositoryIndex();
+      } });
     this.registerEditorExtension(buildAtPathViewPlugin(this));
     this.registerEditorExtension(buildWikilinkViewPlugin(this));
     if (!Platform.isMobile) {
@@ -2276,7 +2361,7 @@ class AtPathPlugin extends Plugin {
 
       // Linked segment spans — built once, text updated in place so the
       // popover child survives between repaints.
-      this._linkedLabelEl = this.linkedBarEl.createSpan({ cls: "atpath-label", text: "@paths" });
+      this._linkedLabelEl = this.linkedBarEl.createSpan({ cls: "atpath-label", text: "Links" });
       this._linkedValueEl = this.linkedBarEl.createSpan({ cls: "atpath-value", text: "" });
       this._linkedCountEl = this.linkedBarEl.createSpan({ cls: "atpath-count", text: "" });
 
@@ -2307,14 +2392,15 @@ class AtPathPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof TFile) {
-          this.tokenCache.delete(file.path);
-          if (this.core) this.core.clearFolderTokenMemo();
+          this._tokenIndex.upsert(file);
         }
         this._debouncedUpdateStatusBar();
       })
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        if (file instanceof TFile) this._tokenIndex.upsert(file);
+        if (file instanceof TFolder) this.f_queueRepositoryRefresh();
         this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
@@ -2325,7 +2411,10 @@ class AtPathPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
-        if (file instanceof TFile) this.tokenCache.delete(file.path);
+        this._tokenIndex.remove(file.path);
+        if (file instanceof TFolder && this.repositories.some(repo => repo.root === file.path || repo.root?.startsWith(file.path + "/"))) {
+          this.f_queueRepositoryRefresh();
+        }
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
           this.core.clearFolderTokenMemo();
@@ -2336,12 +2425,12 @@ class AtPathPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
         this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
-        this.tokenCache.delete(oldPath);
+        this._tokenIndex.rename(file, oldPath);
         if (this.core) {
           if (file instanceof TFolder) this.core.clearFoldersCache();
           this.core.clearFolderTokenMemo();
         }
-        void this.updateAtPathReferences(file, oldPath);
+        this.f_queueRepositoryMove(file, oldPath);
         let movedPublishedState = false;
         // Update publishedPages key if renamed
         if (this.settings.publishedPages[oldPath]) {
@@ -2374,6 +2463,8 @@ class AtPathPlugin extends Plugin {
     // Status bar triggers
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
+        this._linkedCountWatches.clear();
+        this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
         this._noteBufferTokens = 0;
         this._selectionTokens = 0;
         this.updateStatusBar();
@@ -2397,7 +2488,7 @@ class AtPathPlugin extends Plugin {
 
     this.addCommand({
       id: "copy-note-with-atpaths",
-      name: "Copy note with @path contents to clipboard",
+      name: "Copy note with linked files to clipboard",
       editorCallback: () => this.copyNoteWithAtPaths(),
     });
 
@@ -2409,14 +2500,8 @@ class AtPathPlugin extends Plugin {
 
     this.addCommand({
       id: "dry-run-migration",
-      name: "Dry-run: preview @path migration to wikilinks",
+      name: "Preview legacy links for migration",
       callback: () => this.dryRunMigration(),
-    });
-
-    this.addCommand({
-      id: "migrate-to-wikilinks",
-      name: "Migrate @path references to wikilinks",
-      callback: () => this.migrateToWikilinks(),
     });
 
     // Tray menu button in status bar
@@ -2431,7 +2516,7 @@ class AtPathPlugin extends Plugin {
   showTrayMenu(event) {
     const menu = new Menu();
     menu.addItem((item) =>
-      item.setTitle("Migrate @paths to wikilinks").setIcon("replace-all")
+      item.setTitle("Review legacy links for migration").setIcon("replace-all")
         .onClick(() => new MigrationPreviewModal(this.app, this).open())
     );
     menu.addItem((item) =>
@@ -2439,7 +2524,7 @@ class AtPathPlugin extends Plugin {
         .onClick(() => this.publishToVercel())
     );
     menu.addItem((item) =>
-      item.setTitle("Copy with @path contents").setIcon("clipboard-copy")
+      item.setTitle("Copy with linked files").setIcon("clipboard-copy")
         .onClick(() => this.copyNoteWithAtPaths())
     );
     menu.addItem((item) =>
@@ -2479,81 +2564,41 @@ class AtPathPlugin extends Plugin {
     }
   }
 
+  f_linkedCountSignature(path, folder) {
+    const count = this._tokenIndex.get(path, folder);
+    return count ? [count.tokens, count.pending, count.skipped, count.counted].join(":") : "";
+  }
+
+  f_watchLinkedCount(path, folder) {
+    const key = (folder ? "folder:" : "file:") + path;
+    if (this._linkedCountWatches.has(key)) return;
+    if (this._linkedCountWatches.size >= 500) this._linkedCountWatches.delete(this._linkedCountWatches.keys().next().value);
+    this._linkedCountWatches.set(key, { path, folder, signature: this.f_linkedCountSignature(path, folder) });
+  }
+
   async getTokenCount(vaultPath) {
-    ATPATH_PERF.inc("getTokenCount.calls");
-    const file = this.app.vault.getAbstractFileByPath(vaultPath);
-    if (!(file instanceof TFile)) return null;
-    const ext = file.extension.toLowerCase();
-    if (BINARY_EXTENSIONS.has(ext)) return null;
-    if (file.stat.size > this.settings.maxFileSizeMB * 1024 * 1024) return null;
-    const cached = this.tokenCache.get(vaultPath);
-    if (cached && cached.mtime === file.stat.mtime) {
-      ATPATH_PERF.inc("getTokenCount.cacheHit");
-      return cached.tokens;
-    }
-    ATPATH_PERF.inc("getTokenCount.cacheMiss");
-    const content = await ATPATH_PERF.timeAsync("getTokenCount.cachedRead", () => this.app.vault.cachedRead(file));
-    if (looksBinary(content)) {
-      ATPATH_PERF.inc("getTokenCount.sniffedBinary");
-      return null;  // NOT cached: keeps tokenCache numeric-only, so the four render-time readers never paint a badge for a sniffed binary
-    }
-    const kb = content.length / 1024;
-    const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
-    ATPATH_PERF.inc("getTokenCount.encodeSize." + bucket);
-    const tokens = ATPATH_PERF.time("getTokenCount.encode", () => encode(content).length);
-    this.tokenCache.set(vaultPath, { mtime: file.stat.mtime, tokens });
-    return tokens;
+    this.f_watchLinkedCount(vaultPath, false);
+    const file = this.app.vault.getAbstractFileByPath(vaultPath) || this._unindexedTargets.get(vaultPath);
+    return file && (file instanceof TFile || file.localOnly) ? this._tokenIndex.request(file) : null;
+  }
+
+  f_folderTokenCount(path) {
+    this.f_watchLinkedCount(path, true);
+    const total = this._tokenIndex.get(path, true);
+    const limit = this.settings.maxFolderFiles || 500;
+    if (total.counted + total.pending > limit) return { overCap: true, fileCount: total.counted + total.pending };
+    if (total.pending || total.skipped) return { partial: Boolean(total.pending), skipped: total.skipped, tokens: total.tokens };
+    return total.tokens;
   }
 
   scheduleTokenFetch(vaultPath, view) {
-    ATPATH_PERF.inc("scheduleTokenFetch.calls");
     if (!this.settings.showTokenCounts) return;
-    if (this._inFlightTokenFetches.has(vaultPath)) {
-      ATPATH_PERF.inc("scheduleTokenFetch.deduped");
-      return;
-    }
-    ATPATH_PERF.inc("scheduleTokenFetch.dispatched");
-    this._inFlightTokenFetches.add(vaultPath);
-    this._lastEditorView = view;
-    this.getTokenCount(vaultPath).then(
-      (tokens) => {
-        this._inFlightTokenFetches.delete(vaultPath);
-        if (tokens != null) {
-          this.tokenCacheDirty = true;
-          this._scheduleRefresh();
-        }
-      },
-      (err) => {
-        this._inFlightTokenFetches.delete(vaultPath);
-        console.warn("[atpath] token count failed", err);
-      }
-    );
+    if (view) this._lastEditorView = view;
+    void this.getTokenCount(vaultPath).catch(error => console.warn("AtPath could not count", vaultPath, error));
   }
 
-  scheduleFolderTokenFetch(folderPath, view) {
-    ATPATH_PERF.inc("scheduleFolderTokenFetch.calls");
-    if (!this.settings.showTokenCounts) return;
-    // Always refresh _lastEditorView when a live view is provided, even on
-    // a deduped call — otherwise the refresh after the walk completes
-    // dispatches to a stale view and the inline `…` placeholder stays put.
+  scheduleFolderTokenFetch(_folderPath, view) {
     if (view) this._lastEditorView = view;
-    if (this._inFlightFolderTokenFetches.has(folderPath)) {
-      ATPATH_PERF.inc("scheduleFolderTokenFetch.deduped");
-      return;
-    }
-    ATPATH_PERF.inc("scheduleFolderTokenFetch.dispatched");
-    this._inFlightFolderTokenFetches.add(folderPath);
-    this.core.getFolderTokens(folderPath).then(
-      () => {
-        this._inFlightFolderTokenFetches.delete(folderPath);
-        this.tokenCacheDirty = true;
-        this._scheduleRefresh();
-      },
-      (err) => {
-        this._inFlightFolderTokenFetches.delete(folderPath);
-        console.warn("[atpath] folder token count failed", err);
-      }
-    );
   }
 
   _scheduleRefresh() {
@@ -2566,11 +2611,7 @@ class AtPathPlugin extends Plugin {
     this._refreshTimer = window.setTimeout(() => {
       this._refreshTimer = null;
       ATPATH_PERF.inc("scheduleRefresh.fired");
-      if (this._lastEditorView) {
-        try {
-          ATPATH_PERF.time("scheduleRefresh.dispatch", () => this._lastEditorView.dispatch());
-        } catch (e) {}
-      }
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) leaf.view.editor?.cm?.dispatch();
       this.updateStatusBar();
     }, 150);
   }
@@ -2616,12 +2657,12 @@ class AtPathPlugin extends Plugin {
     let noteTokens = this._noteBufferTokens;
     if (!noteTokens) {
       ATPATH_PERF.inc("updateStatusBar.encodeFallback");
-      noteTokens = ATPATH_PERF.time("updateStatusBar.encodeFallback.encode", () => encode(content).length);
+      noteTokens = ATPATH_PERF.time("updateStatusBar.encodeFallback.encode", () => f_estimateTokens(content));
       this._noteBufferTokens = noteTokens;
     }
 
     // Linked tokens — file + folder refs, deduped by normalized path.
-    const refs = ATPATH_PERF.time("updateStatusBar.scanAtPathRefs", () => scanAtPathRefs(content, this.app, activeFile.path));
+    const refs = ATPATH_PERF.time("updateStatusBar.scanAtPathRefs", () => this.f_scanLinkedRefs(content, activeFile.path));
     ATPATH_PERF.inc("updateStatusBar.refs." + (refs.length < 5 ? "lt5" : refs.length < 15 ? "5-15" : refs.length < 30 ? "15-30" : "30+"));
     const seen = new Set();
     const linkedTargets = [];
@@ -2629,14 +2670,23 @@ class AtPathPlugin extends Plugin {
 
     let pendingOrOverCap = false;
     for (const ref of refs) {
-      const resolved = this.core.resolveAtPathTarget(ref, activeFile.path);
-      if (resolved.kind === "missing") continue;
+      const resolved = this.f_resolveLinkTarget(ref, activeFile.path);
+      if (resolved.kind === "missing") {
+        if (resolved.vaultPath && ref.destination) void this.f_probeUnindexedTarget(resolved.vaultPath, resolved.repository);
+        const key = "missing:" + (ref.destination || ref.displayPath);
+        if (!seen.has(key)) {
+          seen.add(key);
+          linkedTargets.push({ kind: "missing", path: key, label: ref.displayPath, reason: resolved.reason, tokens: 0 });
+          pendingOrOverCap = true;
+        }
+        continue;
+      }
       const normalizedPath = resolved.normalizedPath;
       if (seen.has(normalizedPath)) continue;
       seen.add(normalizedPath);
 
       if (resolved.kind === "folder") {
-        const cached = this.core.getCachedFolderTokens(normalizedPath);
+        const cached = this.f_folderTokenCount(normalizedPath);
         if (cached == null) {
           const cm = mdView.editor && mdView.editor.cm ? mdView.editor.cm : this._lastEditorView;
           this.scheduleFolderTokenFetch(normalizedPath, cm);
@@ -2649,19 +2699,21 @@ class AtPathPlugin extends Plugin {
           pendingOrOverCap = true;
           continue;
         }
-        linkedTotal += cached;
-        linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: cached });
+        const pending = Boolean(cached?.partial);
+        const skipped = cached?.skipped;
+        pendingOrOverCap ||= pending || Boolean(skipped);
+        linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: cached?.tokens ?? cached, pending, skipped });
         continue;
       }
 
       const tokens = await this.getTokenCount(normalizedPath);
       if (gen !== this._statusBarGen) return;
       if (tokens != null) {
-        linkedTotal += tokens;
         linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens });
       }
     }
 
+    linkedTotal = f_uniqueLinkedTokenTotal(linkedTargets);
     this._linkedTargets = linkedTargets;
     this._lastLinkedTotal = linkedTotal;
     this._linkedPartial = pendingOrOverCap;
@@ -2720,7 +2772,7 @@ class AtPathPlugin extends Plugin {
     this._linkedCountEl.setText("(" + linkedCount + ")");
     this.linkedBarEl.setAttribute(
       "aria-label",
-      "@paths (" + linkedCount + "): " + formatTokens(linkedTotal) + suffix +
+      "Links (" + linkedCount + "): " + formatTokens(linkedTotal) + suffix +
         (partial ? " — some targets still counting or skipped" : "")
     );
   }
@@ -2811,7 +2863,7 @@ class AtPathPlugin extends Plugin {
       return;
     }
 
-    const isSelectable = (t) => !t.pending && !t.overCap;
+    const isSelectable = (t) => t.kind !== "missing" && !t.pending && !t.overCap;
 
     // Reset checked set when target list identity changes; preserve otherwise.
     if (this._popoverCheckedSig !== this._linkedSig) {
@@ -2851,7 +2903,7 @@ class AtPathPlugin extends Plugin {
       if (this._popoverHeaderEl) {
         const w = targets.length === 1 ? "target" : "targets";
         this._popoverHeaderEl.setText(
-          "Linked @paths · " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix +
+          "Linked references · " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix +
           " tokens · " + targets.length + " " + w
         );
       }
@@ -2892,7 +2944,7 @@ class AtPathPlugin extends Plugin {
     this._popoverHeaderEl = header;
     const targetWord = targets.length === 1 ? "target" : "targets";
     header.setText(
-      "Linked @paths · " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix +
+      "Linked references · " + formatTokens(this._lastLinkedTotal || 0) + totalSuffix +
       " tokens · " + targets.length + " " + targetWord
     );
 
@@ -2918,7 +2970,7 @@ class AtPathPlugin extends Plugin {
       const iconEl = row.createSpan({ cls: "atpath-linked-popover-icon" });
       setIcon(iconEl, t.kind === "folder" ? "folder" : "file-text");
 
-      const displayLabel = this.core.computeDisplayPath(t.path, sourcePath) +
+      const displayLabel = (t.label || this.f_displayLinkedPath(t.path, sourcePath)) +
         (t.kind === "folder" ? "/" : "");
       const pathSpan = row.createSpan({ cls: "atpath-linked-popover-path" });
       // <bdi> keeps the path reading LTR even though the container is
@@ -2926,11 +2978,11 @@ class AtPathPlugin extends Plugin {
       // the filename tail stays visible — see styles.css).
       pathSpan.createEl("bdi", { text: displayLabel });
       const fullPath = t.kind === "folder" ? t.path + "/" : t.path;
-      const rowTitle = t.pending
+      const rowTitle = t.reason || (t.pending
         ? "Still counting…"
         : t.overCap
           ? "Skipped: over the configured max-files limit"
-          : fullPath;
+          : t.skipped ? fullPath + " · " + t.skipped + " files skipped" : fullPath);
       pathSpan.setAttribute("title", rowTitle);
       row.setAttribute("title", rowTitle);
 
@@ -2987,7 +3039,7 @@ class AtPathPlugin extends Plugin {
       text: "Copy selected",
       cls: "atpath-linked-popover-btn",
     });
-    copySelectedBtn.setAttribute("title", "Copy only the contents of selected @paths (no note body)");
+    copySelectedBtn.setAttribute("title", "Copy the contents of selected links");
     copySelectedBtn.addEventListener("click", (evt) => {
       evt.preventDefault();
       const selected = new Set(this._popoverCheckedPaths);
@@ -2998,7 +3050,7 @@ class AtPathPlugin extends Plugin {
       text: "Copy selected + note",
       cls: "atpath-linked-popover-btn atpath-linked-popover-btn--primary",
     });
-    copyWithNoteBtn.setAttribute("title", "Copy the note body plus the contents of selected @paths");
+    copyWithNoteBtn.setAttribute("title", "Copy the note and the contents of selected links");
     copyWithNoteBtn.addEventListener("click", (evt) => {
       evt.preventDefault();
       const selected = new Set(this._popoverCheckedPaths);
@@ -3012,16 +3064,10 @@ class AtPathPlugin extends Plugin {
   _refreshPopoverSelectedTotal() {
     if (!this._popoverSelectedEl) return;
     const targets = this._linkedTargets || [];
-    let total = 0;
-    let count = 0;
-    for (const t of targets) {
-      if (t.pending || t.overCap) continue;
-      if (this._popoverCheckedPaths.has(t.path)) {
-        total += (t.tokens || 0);
-        count += 1;
-      }
-    }
-    const selectableCount = targets.filter((t) => !t.pending && !t.overCap).length;
+    const selected = targets.filter(target => !target.pending && !target.overCap && this._popoverCheckedPaths.has(target.path));
+    const total = f_uniqueLinkedTokenTotal(selected);
+    const count = selected.length;
+    const selectableCount = targets.filter(t => t.kind !== "missing" && !t.pending && !t.overCap).length;
     this._popoverSelectedEl.setText(
       "Selected: " + formatTokens(total) + " tokens" +
       " (" + count + "/" + selectableCount + ")"
@@ -3029,305 +3075,130 @@ class AtPathPlugin extends Plugin {
   }
 
   async copySelectedAtPathsOnly(opts) {
-    const filterPaths = opts && opts.paths instanceof Set ? opts.paths : null;
-    if (!filterPaths || filterPaths.size === 0) {
-      new Notice("No @paths selected.");
+    const paths = opts?.paths;
+    if (!(paths instanceof Set) || !paths.size) {
+      new Notice("No linked targets selected.");
       return;
     }
-    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!mdView) {
-      new Notice("No active note.");
-      return;
-    }
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) {
-      new Notice("No active file.");
-      return;
-    }
-    const content = mdView.editor.getValue();
-    const refs = scanAtPathRefs(content, this.app, activeFile.path);
-    const seen = new Set();
-    const blocks = [];
-    const failed = [];
-    const skippedFolders = [];
-    const sizeCapBytes = this.settings.maxFileSizeMB * 1024 * 1024;
-    const maxFiles = this.settings.maxFolderFiles || 500;
-
-    for (const ref of refs) {
-      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
-      const vaultPath = resolvedRef.normalizedPath;
-      if (!vaultPath || seen.has(vaultPath)) continue;
-      seen.add(vaultPath);
-      if (!filterPaths.has(vaultPath)) continue;
-
-      if (resolvedRef.kind === "folder") {
-        const folderTarget = resolvedRef.target;
-        if (!(folderTarget instanceof TFolder)) {
-          failed.push(ref.displayPath);
-          continue;
-        }
-        const folderFiles = [];
-        let overCap = false;
-        const walk = (node) => {
-          if (overCap) return;
-          for (const c of node.children) {
-            if (overCap) return;
-            if (c instanceof TFolder) {
-              walk(c);
-            } else if (c instanceof TFile) {
-              if (this.core.isIgnored(c.path)) continue;
-              if (c.stat.size > sizeCapBytes) continue;
-              const fext = c.extension.toLowerCase();
-              if (BINARY_EXTENSIONS.has(fext)) continue;
-              folderFiles.push(c);
-              if (folderFiles.length > maxFiles) { overCap = true; return; }
-            }
-          }
-        };
-        walk(folderTarget);
-        if (overCap) {
-          skippedFolders.push(ref.displayPath);
-          continue;
-        }
-
-        let folderTokenTotal = 0;
-        const folderBlocks = [];
-        for (const f of folderFiles) {
-          try {
-            const fc = await this.app.vault.cachedRead(f);
-            const tk = await this.getTokenCount(f.path);
-            if (tk != null) folderTokenTotal += tk;
-            folderBlocks.push({ type: "file", relPath: f.path, content: fc });
-          } catch (_) { /* skip */ }
-        }
-        if (folderBlocks.length > 0) {
-          blocks.push({
-            type: "header",
-            text: "--- @" + ref.displayPath + " (" + folderBlocks.length +
-              (folderBlocks.length === 1 ? " file, " : " files, ") +
-              formatTokens(folderTokenTotal) + " tokens) ---",
-          });
-          for (const fb of folderBlocks) blocks.push(fb);
-        }
-        continue;
-      }
-
-      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) {
-        failed.push(ref.displayPath);
-        continue;
-      }
-      const fileTarget = resolvedRef.target;
-      const fileExt = (fileTarget.extension || "").toLowerCase();
-      if (BINARY_EXTENSIONS.has(fileExt)) continue;
-      if (fileTarget.stat && fileTarget.stat.size > sizeCapBytes) {
-        failed.push(ref.displayPath);
-        continue;
-      }
-      try {
-        const fileContent = await this.app.vault.cachedRead(fileTarget);
-        blocks.push({ type: "file", relPath: ref.displayPath, content: fileContent });
-      } catch (_) {
-        failed.push(ref.displayPath);
-      }
-    }
-
-    if (blocks.length === 0) {
-      new Notice("Nothing to copy — no readable selected @paths.");
-      if (skippedFolders.length > 0) {
-        new Notice(
-          "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " +
-          skippedFolders.join(", "),
-          0
-        );
-      }
-      return;
-    }
-
-    let output = "";
-    for (const b of blocks) {
-      if (b.type === "header") {
-        output += b.text + "\n\n";
-      } else {
-        const fence = makeFence(b.content);
-        output += "## @" + b.relPath + "\n\n" + fence + "\n" + b.content + "\n" + fence + "\n\n---\n\n";
-      }
-    }
-    output = output.replace(/\n+$/, "") + "\n";
-
-    try {
-      await copyToClipboard(output);
-    } catch (e) {
-      new Notice("Failed to copy to clipboard: " + e.message, 0);
-      return;
-    }
-
-    const fileBlockCount = blocks.filter((b) => b.type === "file").length;
-    if (failed.length > 0) {
-      const frag = document.createDocumentFragment();
-      const header = document.createElement("div");
-      header.textContent = "Copied " + fileBlockCount + " file(s), but " + failed.length + " @path(s) failed:";
-      frag.appendChild(header);
-      for (const p of failed) {
-        const line = document.createElement("div");
-        line.textContent = "  • @" + p;
-        frag.appendChild(line);
-      }
-      new Notice(frag, 0);
-    } else {
-      new Notice("Copied " + fileBlockCount + " selected file(s) to clipboard.", 5000);
-    }
-    if (skippedFolders.length > 0) {
-      new Notice(
-        "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " +
-        skippedFolders.join(", "),
-        0
-      );
-    }
+    await this.f_copyLinkedContent(false, paths);
   }
 
   async copyNoteWithAtPaths(opts) {
-    const filterPaths = opts && opts.paths instanceof Set ? opts.paths : null;
-    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!mdView) {
-      new Notice("No active note to copy.");
-      return;
-    }
-    const content = mdView.editor.getValue();
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) {
-      new Notice("No active file.");
-      return;
-    }
+    await this.f_copyLinkedContent(true, opts?.paths);
+  }
 
-    const refs = scanAtPathRefs(content, this.app, activeFile.path);
-    const seen = new Set();
-    const blocks = []; // [{type:"file", relPath, content} | {type:"header", text}]
-    const failed = [];
-    const skippedFolders = [];
-    const sizeCapBytes = this.settings.maxFileSizeMB * 1024 * 1024;
+  async f_copyLinkedContent(includeNote, selectedPaths) {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const sourcePath = view?.file?.path ?? this.app.workspace.getActiveFile()?.path;
+    if (!view || !sourcePath) {
+      new Notice("No active note.");
+      return;
+    }
+    const content = view.editor.getValue();
+    const refs = this.f_scanLinkedRefs(content, sourcePath);
+    const seenTargets = new Set();
+    const includedFiles = new Set();
+    const blocks = [];
+    const skipped = [];
     const maxFiles = this.settings.maxFolderFiles || 500;
 
-    for (const ref of refs) {
-      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
-      const vaultPath = resolvedRef.normalizedPath;
-      if (!vaultPath || seen.has(vaultPath)) continue;
-      seen.add(vaultPath);
-
-      if (filterPaths && !filterPaths.has(vaultPath)) continue;
-
-      if (resolvedRef.kind === "folder") {
-        const folderTarget = resolvedRef.target;
-        if (!(folderTarget instanceof TFolder)) {
-          failed.push(ref.displayPath);
-          continue;
-        }
-
-        const folderFiles = [];
-        let overCap = false;
-        const walk = (node) => {
-          if (overCap) return;
-          for (const c of node.children) {
-            if (overCap) return;
-            if (c instanceof TFolder) {
-              walk(c);
-            } else if (c instanceof TFile) {
-              if (this.core.isIgnored(c.path)) continue;
-              if (c.stat.size > sizeCapBytes) continue;
-              const fext = c.extension.toLowerCase();
-              if (BINARY_EXTENSIONS.has(fext)) continue;
-              folderFiles.push(c);
-              if (folderFiles.length > maxFiles) { overCap = true; return; }
-            }
-          }
-        };
-        walk(folderTarget);
-        if (overCap) {
-          skippedFolders.push(ref.displayPath);
-          continue;
-        }
-
-        let folderTokenTotal = 0;
-        const folderBlocks = [];
-        for (const f of folderFiles) {
-          try {
-            const fc = await this.app.vault.cachedRead(f);
-            const tk = await this.getTokenCount(f.path);
-            if (tk != null) folderTokenTotal += tk;
-            folderBlocks.push({ type: "file", relPath: f.path, content: fc });
-          } catch (_) { /* skip unreadable file inside folder */ }
-        }
-
-        blocks.push({
-          type: "header",
-          text: "--- @" + ref.displayPath + " (" + folderBlocks.length +
-            (folderBlocks.length === 1 ? " file, " : " files, ") +
-            formatTokens(folderTokenTotal) + " tokens) ---",
-        });
-        for (const fb of folderBlocks) blocks.push(fb);
-        continue;
-      }
-
-      // File branch
-      const ext = ref.displayPath.split(".").pop().toLowerCase();
-      if (BINARY_EXTENSIONS.has(ext)) continue;
-
-      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) {
-        failed.push(ref.displayPath);
-        continue;
+    const f_add = async file => {
+      if (includedFiles.has(file.path)) return null;
+      if (!this.f_eligibleLinkedFile(file)) {
+        skipped.push(this.f_displayLinkedPath(file.path, sourcePath) + " (excluded or too large)");
+        return null;
       }
       try {
-        const fileContent = await this.app.vault.cachedRead(resolvedRef.target);
-        blocks.push({ type: "file", relPath: ref.displayPath, content: fileContent });
-      } catch (e) {
-        failed.push(ref.displayPath);
+        const text = await this.f_readLinkedFile(file);
+        if (looksBinary(text)) {
+          skipped.push(this.f_displayLinkedPath(file.path, sourcePath) + " (binary)");
+          return null;
+        }
+        includedFiles.add(file.path);
+        return { path: this.f_displayLinkedPath(file.path, sourcePath), text };
+      } catch {
+        skipped.push(this.f_displayLinkedPath(file.path, sourcePath) + " (unreadable)");
+        return null;
       }
-    }
+    };
 
-    // Strip wikilink syntax for clean clipboard output
-    let output = content.replace(new RegExp(WIKILINK_ATPATH_RE.source, WIKILINK_ATPATH_RE.flags), (_, _target, display) => "@" + display);
-    const fileBlockCount = blocks.filter((b) => b.type === "file").length;
-    if (blocks.length > 0) {
-      output += "\n\n---\n";
-      for (const b of blocks) {
-        if (b.type === "header") {
-          output += "\n" + b.text + "\n";
-        } else {
-          const fence = makeFence(b.content);
-          output += "\n## @" + b.relPath + "\n\n" + fence + "\n" + b.content + "\n" + fence + "\n\n---\n";
+    for (const ref of refs) {
+      const result = await this.f_resolveLinkTargetAsync(ref, sourcePath);
+      const path = result.normalizedPath;
+      if (selectedPaths && !selectedPaths.has(path)) continue;
+      const key = path ?? ref.destination ?? ref.displayPath;
+      if (seenTargets.has(key)) continue;
+      seenTargets.add(key);
+      if (result.kind === "missing") {
+        skipped.push((ref.destination || ref.displayPath) + " (" + (result.reason || "unavailable") + ")");
+      } else if (result.kind === "file") {
+        const block = await f_add(result.target);
+        if (block) blocks.push(block);
+      } else if (result.kind === "folder") {
+        const files = [];
+        let excluded = 0;
+        const pending = [result.target];
+        while (pending.length && files.length <= maxFiles) {
+          const item = pending.pop();
+          if (item instanceof TFolder) {
+            for (let index = item.children.length - 1; index >= 0; index--) pending.push(item.children[index]);
+          } else if (item instanceof TFile && !includedFiles.has(item.path)) {
+            if (this.f_eligibleLinkedFile(item)) files.push(item);
+            else excluded++;
+          }
+        }
+        const label = this.f_displayLinkedPath(path, sourcePath);
+        if (files.length > maxFiles) {
+          skipped.push(label + " (over the " + maxFiles + "-file limit)");
+          continue;
+        }
+        if (excluded) skipped.push(label + " (" + excluded + " excluded or oversized files)");
+        const folderBlocks = [];
+        for (const file of files) {
+          const block = await f_add(file);
+          if (block) folderBlocks.push(block);
+        }
+        if (folderBlocks.length) {
+          const total = folderBlocks.reduce((sum, block) => sum + f_estimateTokens(block.text), 0);
+          blocks.push({ heading: "--- " + label + " (" + folderBlocks.length + " files, " + formatTokens(total) + " tokens) ---" });
+          blocks.push(...folderBlocks);
         }
       }
     }
-
-    try {
-      await copyToClipboard(output);
-    } catch (e) {
-      new Notice("Failed to copy to clipboard: " + e.message, 0);
+    const added = includedFiles.size;
+    if (!includeNote && !added) {
+      new Notice("Nothing to copy." + (skipped.length ? "\n" + skipped.join("\n") : ""), 0);
       return;
     }
-
-    if (failed.length > 0) {
-      const frag = document.createDocumentFragment();
-      const header = document.createElement("div");
-      header.textContent = "Copied note, but " + failed.length + " @path(s) failed to resolve:";
-      frag.appendChild(header);
-      for (const p of failed) {
-        const line = document.createElement("div");
-        line.textContent = "  • @" + p;
-        frag.appendChild(line);
+    let output = includeNote ? content : "";
+    for (const block of blocks) {
+      if (output) output += "\n\n";
+      if (block.heading) output += block.heading;
+      else {
+        const fence = makeFence(block.text);
+        output += "## " + block.path + "\n\n" + fence + "\n" + block.text + "\n" + fence + "\n\n---";
       }
-      new Notice(frag, 0);
-    } else if (fileBlockCount > 0) {
-      new Notice("Copied note + " + fileBlockCount + " file(s) to clipboard.", 5000);
-    } else {
-      new Notice("Copied note to clipboard (no @path references found).", 5000);
     }
-    if (skippedFolders.length > 0) {
-      new Notice(
-        "Skipped " + skippedFolders.length + " folder(s) over the max-files limit: " +
-        skippedFolders.join(", "),
-        0
-      );
+    try {
+      await copyToClipboard(output);
+    } catch (error) {
+      new Notice("Failed to copy to clipboard: " + error.message, 0);
+      return;
     }
+    new Notice("Copied " + (includeNote ? "note" + (added ? " and " : "") : "") +
+      (added ? added + " linked file(s)" : "") + "." +
+      (skipped.length ? "\nSkipped " + skipped.length + " target(s):\n" + skipped.join("\n") : ""), skipped.length ? 0 : 5000);
+  }
+
+  f_eligibleLinkedFile(file) {
+    return !BINARY_EXTENSIONS.has(file.extension.toLowerCase())
+      && file.stat.size <= this.settings.maxFileSizeMB * 1024 * 1024
+      && !this.core.isIgnored(file.path)
+      && !file.path.split("/").some(part => part === this.app.vault.configDir || part === ".git" || part === "node_modules");
+  }
+
+  f_readLinkedFile(file) {
+    return file.localOnly ? this.app.vault.adapter.read(file.path) : this.app.vault.cachedRead(file);
   }
 
   async resolveLocalImages(md, activeFile) {
@@ -3362,34 +3233,337 @@ class AtPathPlugin extends Plugin {
     return result;
   }
 
+  f_queueRepositoryRefresh() {
+    clearTimeout(this._repositoryRefreshTimer);
+    this._repositoryRefreshTimer = setTimeout(() => this.f_refreshRepositoryIndex(), 300);
+  }
+
+  f_repositoryIndexChanged() {
+    this._suggestVaultGen = (this._suggestVaultGen || 0) + 1;
+    this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
+    this.tokenCacheDirty = true;
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) leaf.view.editor?.cm?.dispatch();
+    this._debouncedUpdateStatusBar();
+    if (this._nativeRepositoryLinks) void this._nativeRepositoryLinks.refresh().catch(error =>
+      console.warn("AtPath could not refresh repository backlinks", error));
+  }
+
+  async f_refreshRepositoryIndex() {
+    if (this._repositoryIndexClosed) return;
+    if (this._repositoryRefresh) {
+      this._repositoryRefreshAgain = true;
+      return;
+    }
+    const adapter = this.app.vault.adapter;
+    this._repositoryRefresh = (async () => {
+      const cached = await f_readRepositoryMap(adapter).catch(error => {
+        console.warn("AtPath could not read the repository map", error);
+        return [];
+      });
+      if (this._repositoryIndexClosed) return;
+      if (Platform.isMobile || !this.repositories.length) {
+        this.repositories = cached;
+        this._unindexedProbes.clear();
+        this.f_repositoryIndexChanged();
+      }
+      if (!Platform.isMobile && typeof adapter.getBasePath === "function") {
+        const discovered = await f_discoverRepositories(adapter.getBasePath());
+        if (this._repositoryIndexClosed) return;
+        const prior = [...cached, ...this.repositories];
+        for (const repo of discovered) {
+          const aliases = prior.filter(item => item.identity && item.identity === repo.identity)
+            .flatMap(item => item.aliases || []);
+          if (aliases.length) repo.aliases = [...new Set(aliases)].sort();
+        }
+        for (const repo of prior) {
+          if (repo.identity && !discovered.some(item => item.identity === repo.identity)) {
+            discovered.push({ identity: repo.identity, aliases: repo.aliases });
+          }
+        }
+        this.repositories = discovered;
+        this.f_repositoryIndexChanged();
+        await this.f_persistRepositoryMap();
+      }
+      if (this._repositoryIndexClosed || !this.repositories.length || this._nativeRepositoryLinks) return;
+      this._nativeRepositoryLinks = f_installNativeRepositoryLinks({
+        metadataCache: this.app.metadataCache,
+        vault: this.app.vault,
+        scan: f_scanMarkdownLinks,
+        resolve: (destination, sourcePath) => {
+          if (!f_repositoryForPath(sourcePath, this.repositories)) return null;
+          const result = this.f_resolveLinkTarget({ destination }, sourcePath, false);
+          if (result.kind === "ignored") return null;
+          return { file: result.target instanceof TFile ? result.target : null };
+        },
+      });
+      if (!this._nativeRepositoryLinks) console.warn("AtPath repository backlinks are unavailable in this Obsidian version");
+      else await this._nativeRepositoryLinks.refresh();
+    })().catch(error => console.warn("AtPath could not refresh the repository map", error));
+    try {
+      await this._repositoryRefresh;
+    } finally {
+      this._repositoryRefresh = null;
+      if (this._repositoryRefreshAgain) {
+        this._repositoryRefreshAgain = false;
+        this.f_queueRepositoryRefresh();
+      }
+    }
+  }
+
+  f_persistRepositoryMap() {
+    this._repositoryMapWrite = (this._repositoryMapWrite ?? Promise.resolve()).catch(() => {}).then(() => {
+      if (!this._repositoryIndexClosed) return f_writeRepositoryMap(this.app.vault.adapter, this.repositories);
+    });
+    return this._repositoryMapWrite;
+  }
+
+  f_requestRepositoryAlias(identity) {
+    if (Platform.isMobile || this._repositoryIndexClosed) return;
+    const owner = identity.split("/")[0] + "/";
+    if (!this.repositories.some(repo => repo.identity?.startsWith(owner) || repo.aliases?.some(alias => alias.startsWith(owner)))) return;
+    const lastAttempt = this._repositoryAliasAttempts.get(identity);
+    if (lastAttempt && Date.now() - lastAttempt < 5 * 60 * 1000) return;
+    this._repositoryAliasAttempts.set(identity, Date.now());
+    this._repositoryAliasQueue = (this._repositoryAliasQueue ?? Promise.resolve()).then(async () => {
+      if (this._repositoryIndexClosed) return;
+      const canonical = await f_lookupRenamedRepository(identity);
+      if (this._repositoryIndexClosed || !canonical || canonical === identity) return;
+      const repositories = this.repositories;
+      const matches = repositories.filter(repo => repo.identity === canonical);
+      if (!matches.length) return;
+      const oldAliases = repositories.filter(repo => repo.root === undefined && repo.identity === identity)
+        .flatMap(repo => repo.aliases || []);
+      for (const repo of matches) repo.aliases = [...new Set([...(repo.aliases || []), ...oldAliases, identity])].sort();
+      this.repositories = repositories.filter(repo => repo.root !== undefined || repo.identity !== identity);
+      this.f_repositoryIndexChanged();
+      await this.f_persistRepositoryMap();
+    }).catch(() => { /* Out-of-scope GitHub links stay ordinary external links. */ });
+  }
+
+  f_displayLinkedPath(path, sourcePath) {
+    const repo = f_repositoryForPath(path, this.repositories);
+    if (!repo) return path;
+    const relative = repo.root ? path.slice(repo.root.length + 1) : path;
+    const sourceRepo = f_repositoryForPath(sourcePath, this.repositories);
+    return sourceRepo === repo ? relative || "/" : (repo.identity?.split("/")[1] ?? repo.root.split("/").pop()) + "/" + relative;
+  }
+
+  f_formatLinkedTarget(target, sourcePath) {
+    return f_formatRepositoryLink(target.path === "/" ? "" : target.path, sourcePath, this.repositories,
+      target instanceof TFolder ? "folder" : "file");
+  }
+
+  f_scanMarkdownRefs(content) {
+    return f_scanMarkdownLinks(content).filter(link => link.destination && !link.destination.startsWith("#"))
+      .map(link => ({
+        ...link, format: "markdown", displayPath: link.label || link.destination,
+        start: link.position.start.offset, end: link.position.end.offset,
+      }));
+  }
+
+  f_scanLinkedRefs(content, sourcePath) {
+    const markdown = this.f_scanMarkdownRefs(content);
+    const managed = markdown.filter(ref => this.f_resolveLinkTarget(ref, sourcePath).kind !== "ignored");
+    const legacy = scanAtPathRefs(content, this.app, sourcePath).filter(ref =>
+      !markdown.some(link => ref.start < link.end && ref.end > link.start));
+    return [...managed, ...legacy].sort((left, right) => left.start - right.start);
+  }
+
+  f_resolveLinkTarget(ref, sourcePath, lookupAlias = true) {
+    if (!ref.destination) {
+      const result = this.core.resolveAtPathTarget(ref, sourcePath);
+      if (result.kind !== "missing" || ref.format !== "legacy") return result;
+      const legacy = ref.displayPath?.replace(/\/+$/, "") || "";
+      const sourceRepo = f_repositoryForPath(sourcePath, this.repositories);
+      const [first, ...rest] = legacy.split("/");
+      const matches = this.repositories.filter(repo => typeof repo.root === "string" &&
+        (repo.identity?.split("/")[1] === first || repo.root.split("/").pop() === first));
+      const candidates = [sourceRepo && [sourceRepo.root, legacy].filter(Boolean).join("/"),
+        matches.length === 1 && rest.length && [matches[0].root, ...rest].filter(Boolean).join("/")];
+      for (const path of candidates) {
+        if (!path) continue;
+        const target = this.app.vault.getAbstractFileByPath(path);
+        if (ref.kind === "folder" ? target instanceof TFolder : target instanceof TFile) {
+          return { kind: ref.kind, target, normalizedPath: path };
+        }
+      }
+      return result;
+    }
+    if (ref.destination.startsWith("#")) return { kind: "ignored" };
+    const vault = this.app.vault;
+    let target;
+    const result = f_resolveRepositoryLink(ref, {
+      sourcePath,
+      repositories: this.repositories,
+      getTargetType: path => {
+        target = path ? (vault.getAbstractFileByPath(path) || this._unindexedTargets.get(path)) : vault.getRoot();
+        return target instanceof TFolder ? "folder" : target instanceof TFile || target?.localOnly ? "file" : null;
+      },
+    });
+    if (lookupAlias && result.repository && (result.status === "out-of-scope" ||
+      (result.status === "missing" && result.vaultPath === undefined))) this.f_requestRepositoryAlias(result.repository);
+    if (result.status === "out-of-scope") {
+      return { ...result, kind: "ignored" };
+    }
+    if (result.status !== "resolved" && !f_isCanonicalRepositoryDestination(ref.destination)) {
+      const pathname = ref.destination.split(/[?#]/)[0];
+      if (!pathname.includes("/") && !pathname.includes(".")) return { ...result, status: "out-of-scope", kind: "ignored" };
+      if (!f_repositoryForPath(sourcePath, this.repositories)) return { ...result, kind: "ignored" };
+    }
+    return { ...result, kind: result.status === "resolved" ? result.kind : "missing",
+      target, normalizedPath: target?.path ?? result.vaultPath };
+  }
+
+  async f_resolveLinkTargetAsync(ref, sourcePath) {
+    const result = this.f_resolveLinkTarget(ref, sourcePath);
+    if (ref.destination && result.status === "missing" && result.vaultPath) {
+      await this.f_probeUnindexedTarget(result.vaultPath, result.repository);
+      return this.f_resolveLinkTarget(ref, sourcePath);
+    }
+    return result;
+  }
+
+  f_probeUnindexedTarget(path, identity) {
+    if (this._unindexedProbes.has(path)) return this._unindexedProbes.get(path);
+    if (this._unindexedProbes.size >= 500) this._unindexedProbes.delete(this._unindexedProbes.keys().next().value);
+    const adapter = this.app.vault.adapter;
+    const probe = (async () => {
+      const stat = await adapter.stat(path);
+      if (stat?.type !== "file" || this._repositoryIndexClosed || this.app.vault.getAbstractFileByPath(path)) return;
+      if (!Platform.isMobile && typeof adapter.getBasePath === "function") {
+        const { resolve, relative, sep, isAbsolute } = require("path");
+        const { realpath } = require("fs").promises;
+        const repo = f_repositoryForPath(path, this.repositories);
+        if (!repo || repo.identity !== identity) return;
+        const base = adapter.getBasePath();
+        const [root, target] = await Promise.all([realpath(resolve(base, repo.root)), realpath(resolve(base, path))]);
+        const relativePath = relative(root, target);
+        if (relativePath === ".." || relativePath.startsWith(".." + sep) || isAbsolute(relativePath)) return;
+      }
+      if (this._repositoryIndexClosed) return;
+      const file = { path, extension: path.includes(".") ? path.split(".").pop() : "", stat, localOnly: true };
+      this._unindexedTargets.set(path, file);
+      this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
+      this._scheduleRefresh();
+    })().catch(error => {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") console.warn("AtPath could not inspect linked file", path, error);
+    });
+    this._unindexedProbes.set(path, probe);
+    return probe;
+  }
+
+  async f_openRepositoryTarget(result, newLeaf) {
+    if (result.kind === "folder") {
+      revealFolderInExplorer(this.app, result.target);
+    } else if (result.kind === "file") {
+      if (result.target.localOnly) {
+        if (Platform.isMobile) new Notice("File is available for copy but is outside the Obsidian index: " + result.normalizedPath);
+        else openInDefaultApp(this, result.normalizedPath);
+        return;
+      }
+      const leaf = this.app.workspace.getLeaf(newLeaf);
+      const fragment = result.fragment;
+      await leaf.openFile(result.target, fragment ? { eState: { subpath: fragment } } : {});
+    } else {
+      new Notice(result.reason || "Repository link target is unavailable");
+    }
+  }
+
+  f_queueRepositoryMove(file, oldPath) {
+    this._pendingRepositoryMoves ??= [];
+    const moves = this._pendingRepositoryMoves;
+    const newPath = file.path;
+    // Obsidian emits a folder rename followed by each descendant rename.
+    if (moves.some(move => oldPath.startsWith(move.oldPath + "/") &&
+      newPath === move.newPath + oldPath.slice(move.oldPath.length))) return;
+    const prior = moves.find(move => move.newPath === oldPath);
+    if (prior) prior.newPath = newPath;
+    else moves.push({ file, oldPath, newPath });
+    clearTimeout(this._repositoryMoveTimer);
+    this._repositoryMoveTimer = setTimeout(() => {
+      this._pendingRepositoryMoves = [];
+      this._repositoryRename = (this._repositoryRename ?? Promise.resolve()).then(async () => {
+        for (const move of moves) {
+          if (this._repositoryIndexClosed) return;
+          if (this.repositories.some(repo => repo.root === move.oldPath || repo.root?.startsWith(move.oldPath + "/"))) {
+            await this.f_refreshRepositoryIndex();
+          } else {
+            await this.f_rewriteRepositoryReferences(move.newPath, move.oldPath);
+            await this.updateAtPathReferences(move.file, move.oldPath);
+          }
+        }
+      }).catch(error => console.warn("AtPath could not update links after a rename", error));
+    }, 100);
+  }
+
+  async f_rewriteRepositoryReferences(newPath, oldPath) {
+    if (this._repositoryIndexClosed || !this.repositories.length) return;
+    for (const mdFile of this.app.vault.getMarkdownFiles()) {
+      if (this._repositoryIndexClosed) break;
+      const sourceAfter = mdFile.path;
+      const sourceBefore = sourceAfter === newPath || sourceAfter.startsWith(newPath + "/") ?
+        oldPath + sourceAfter.slice(newPath.length) : sourceAfter;
+      const sourceMovedRepo = f_repositoryForPath(sourceAfter, this.repositories) !== f_repositoryForPath(sourceBefore, this.repositories);
+      const rewrite = content => {
+        let output = content;
+        for (const ref of this.f_scanMarkdownRefs(content).reverse()) {
+          // Obsidian maintains ordinary file-relative links. Only rewrite our canonical links.
+          if (!f_isCanonicalRepositoryDestination(ref.destination)) continue;
+          const result = f_resolveRepositoryLink(ref, {
+            sourcePath: sourceBefore,
+            repositories: this.repositories,
+            getTargetType: path => {
+              const targetPath = path === oldPath || path.startsWith(oldPath + "/") ?
+                newPath + path.slice(oldPath.length) : path;
+              const target = this.app.vault.getAbstractFileByPath(targetPath);
+              return target instanceof TFolder ? "folder" : target instanceof TFile ? "file" : null;
+            },
+          });
+          if (result.status !== "resolved" || /^[\da-f]{7,64}$/i.test(result.ref || "")) continue;
+          const moved = result.vaultPath === oldPath || result.vaultPath.startsWith(oldPath + "/");
+          if (!moved && !sourceMovedRepo) continue;
+          const targetPath = moved ? newPath + result.vaultPath.slice(oldPath.length) : result.vaultPath;
+          let replacement;
+          try {
+            replacement = f_formatRepositoryLink(targetPath, sourceAfter, this.repositories, result.kind);
+          } catch (error) {
+            console.warn("AtPath could not update repository link", mdFile.path, ref.destination, error);
+            continue;
+          }
+          const suffix = ref.destination.match(/\?[^#]*|#.*$/)?.[0] || "";
+          if (suffix) replacement = replacement.slice(0, -1) + suffix + ")";
+          output = output.slice(0, ref.start) + replacement + output.slice(ref.end);
+        }
+        return output;
+      };
+      const content = await this.app.vault.cachedRead(mdFile);
+      if (rewrite(content) !== content) await this.app.vault.process(mdFile, rewrite);
+    }
+  }
+
   getRepoRoots() {
     return discoverRepoRoots(this);
   }
 
   async collectAtPathFiles(content, activeFile) {
-    const refs = scanAtPathRefs(content, this.app, activeFile.path);
     const seen = new Set();
     const atPathFiles = [];
-
-    for (const ref of refs) {
-      if (ref.kind === "folder") continue; // HTML publish inlines files only
-      const relPath = ref.displayPath;
-      const resolvedRef = this.core.resolveAtPathTarget(ref, activeFile.path);
-      const vaultPath = resolvedRef.normalizedPath;
-      if (!vaultPath || seen.has(vaultPath)) continue;
-      seen.add(vaultPath);
-
-      const ext = relPath.split(".").pop().toLowerCase();
-      if (BINARY_EXTENSIONS.has(ext)) continue;
-
-      if (resolvedRef.kind !== "file" || !(resolvedRef.target instanceof TFile)) continue;
-
+    for (const ref of this.f_scanLinkedRefs(content, activeFile.path)) {
+      const result = await this.f_resolveLinkTargetAsync(ref, activeFile.path);
+      if (result.kind !== "file" || seen.has(result.normalizedPath) || !this.f_eligibleLinkedFile(result.target)) continue;
+      seen.add(result.normalizedPath);
       try {
-        const fileContent = await this.app.vault.cachedRead(resolvedRef.target);
-        atPathFiles.push({ relPath, content: fileContent });
-      } catch (_) { /* skip */ }
+        const text = await this.f_readLinkedFile(result.target);
+        if (!looksBinary(text)) atPathFiles.push({
+          relPath: this.f_displayLinkedPath(result.normalizedPath, activeFile.path),
+          legacyLabel: ref.format === "markdown" ? null : ref.displayPath,
+          vaultPath: result.normalizedPath,
+          content: text,
+        });
+      } catch (error) {
+        console.warn("AtPath could not read linked file for publishing", result.normalizedPath, error);
+      }
     }
-
     return atPathFiles;
   }
 
@@ -3547,15 +3721,26 @@ class AtPathPlugin extends Plugin {
 
     try {
       const atPathSlugs = new Map();
-      for (const f of atPathFiles) {
-        atPathSlugs.set(f.relPath, slugifyPath(f.relPath));
+      const slugsByPath = new Map();
+      const usedSlugs = new Set();
+      for (const file of atPathFiles) {
+        const base = slugifyPath(file.relPath) || "linked-file";
+        let slug = base;
+        for (let index = 2; usedSlugs.has(slug); index++) slug = base + "-" + index;
+        usedSlugs.add(slug);
+        slugsByPath.set(file.vaultPath, slug);
+        if (file.legacyLabel) atPathSlugs.set(file.legacyLabel, slug);
       }
+      const repositoryLinks = {
+        sourcePath: notePath,
+        resolveLink: (destination, sourcePath) => this.f_resolveLinkTarget({ destination }, sourcePath, false),
+        slugsByPath,
+      };
 
       let resolvedContent = await this.resolveLocalImages(content, activeFile);
 
       // Build slug map for file:/// HTML bundles and rewrite links
       const fileProtoSlugs = new Map();
-      const usedSlugs = new Set(atPathSlugs.values());
       for (const bundle of fileProtoFiles) {
         let slug = slugifyPath(bundle.dirName);
         if (usedSlugs.has(slug)) slug += "-project";
@@ -3570,14 +3755,14 @@ class AtPathPlugin extends Plugin {
         }
       );
 
-      const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl);
+      const mainHtml = buildMainPage(noteTitle, resolvedContent, atPathSlugs, contactUrl, contactLabel, compactLinks, siteIconDataUrl, repositoryLinks);
 
       const subPages = {};
       const deployFiles = [];
 
       for (const f of atPathFiles) {
-        const slug = atPathSlugs.get(f.relPath);
-        const ext = f.relPath.split(".").pop().toLowerCase();
+        const slug = slugsByPath.get(f.vaultPath);
+        const ext = f.vaultPath.split(".").pop().toLowerCase();
         const isHtmlFile = ext === "html" || ext === "htm";
 
         if (isHtmlFile) {
@@ -3589,9 +3774,10 @@ class AtPathPlugin extends Plugin {
             deployFiles.push({ path: "atpath/" + slug + ".html", content: pageHtml });
           }
         } else {
-          const atContent = await this.resolveLocalImages(f.content, activeFile);
+          const childFile = this.app.vault.getFileByPath(f.vaultPath);
+          const atContent = childFile ? await this.resolveLocalImages(f.content, childFile) : f.content;
           const pageTitle = f.relPath.split("/").pop();
-          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel, siteIconDataUrl);
+          const pageHtml = buildAtPathPage(pageTitle, atContent, noteTitle, contactUrl, contactLabel, siteIconDataUrl, { ...repositoryLinks, sourcePath: f.vaultPath });
           if (isPrivate) {
             subPages["atpath/" + slug] = pageHtml;
           } else {
@@ -3917,83 +4103,66 @@ class AtPathPlugin extends Plugin {
     }
   }
 
-  async dryRunMigration() {
-    const mdFiles = this.app.vault.getMarkdownFiles();
-    let resolvable = 0;
-    let unresolvable = 0;
-    let filesAffected = 0;
-
-    for (const mdFile of mdFiles) {
-      const content = await this.app.vault.cachedRead(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
-      if (refs.length === 0) continue;
-      filesAffected++;
-      for (const ref of refs) {
-        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this);
-        if (!vaultPath) { unresolvable++; continue; }
-        const file = this.app.vault.getAbstractFileByPath(vaultPath);
-        if (file instanceof TFile) {
-          resolvable++;
-        } else {
-          unresolvable++;
-        }
-      }
-    }
-
-    const total = resolvable + unresolvable;
-    new Notice(
-      "Migration preview: " + total + " legacy @path ref(s) in " + filesAffected + " file(s).\n" +
-      resolvable + " resolvable, " + unresolvable + " unresolvable (will be skipped).",
-      0
-    );
+  dryRunMigration() {
+    new MigrationPreviewModal(this.app, this).open();
   }
 
-  async migrateToWikilinks() {
-    const mdFiles = this.app.vault.getMarkdownFiles();
-    let converted = 0;
-    let skipped = 0;
-    let filesModified = 0;
-
-    for (const mdFile of mdFiles) {
-      const content = await this.app.vault.read(mdFile);
-      const refs = scanAtPathRefs(content).filter(r => r.format === "legacy" && r.kind !== "folder");
-      if (refs.length === 0) continue;
-
-      let updated = content;
-      // Process in reverse order so indices stay valid
-      for (let i = refs.length - 1; i >= 0; i--) {
-        const ref = refs[i];
-        const vaultPath = resolveAtPathBroad(ref.displayPath, mdFile.path, this);
-        if (!vaultPath) { skipped++; continue; }
-        const file = this.app.vault.getAbstractFileByPath(vaultPath);
-        if (!(file instanceof TFile)) {
-          skipped++;
+  async f_planRepositoryMigration() {
+    const plan = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (file.path.split("/").some(part => part === "90_archive" || part === "prompts")) continue;
+      const content = await this.app.vault.cachedRead(file);
+      const refs = this.f_scanLinkedRefs(content, file.path).filter(ref => ref.format !== "markdown");
+      const edits = [];
+      const skipped = [];
+      for (const ref of refs) {
+        const result = this.f_resolveLinkTarget(ref, file.path);
+        if (result.kind === "missing") {
+          skipped.push(ref.fullMatch);
           continue;
         }
-        const wikilink = this.app.fileManager.generateMarkdownLink(
-          file, mdFile.path, undefined, "@" + ref.displayPath
-        );
-        updated = updated.substring(0, ref.start) + wikilink + updated.substring(ref.end);
-        converted++;
+        try {
+          edits.push({ start: ref.start, end: ref.end, original: ref.fullMatch,
+            replacement: this.f_formatLinkedTarget(result.target, file.path) });
+        } catch {
+          skipped.push(ref.fullMatch);
+        }
       }
-
-      if (updated !== content) {
-        await this.app.vault.modify(mdFile, updated);
-        filesModified++;
-      }
+      if (edits.length || skipped.length) plan.push({ file, path: file.path, content, edits, skipped });
     }
+    return plan;
+  }
 
-    this.settings.linkFormat = "wikilink";
-    await this.saveSettings();
-
-    new Notice(
-      "Migration complete: converted " + converted + " ref(s) in " + filesModified + " file(s)." +
-      (skipped > 0 ? " Skipped " + skipped + " unresolvable." : ""),
-      0
-    );
+  async f_applyRepositoryMigration(plan) {
+    let replaced = 0;
+    const stale = [];
+    for (const { file, path, content, edits } of plan) {
+      if (!edits.length) continue;
+      if (file.path !== path) {
+        stale.push(path);
+        continue;
+      }
+      await this.app.vault.process(file, current => {
+        if (current !== content) {
+          stale.push(path);
+          return current;
+        }
+        let updated = current;
+        for (const edit of edits.slice().reverse()) {
+          updated = updated.slice(0, edit.start) + edit.replacement + updated.slice(edit.end);
+        }
+        replaced += edits.length;
+        return updated;
+      });
+    }
+    new Notice("Migrated " + replaced + " legacy links." + (stale.length ?
+      "\nSkipped files changed since preview:\n" + stale.join("\n") : ""), stale.length ? 0 : 5000);
   }
 
   onTokenSettingsChanged() {
+    void this._tokenIndex.sync();
+    this._explorerTokenBadges?.refresh();
+    this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
     this.tokenCacheDirty = true;
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (mdView && mdView.editor && mdView.editor.cm) {

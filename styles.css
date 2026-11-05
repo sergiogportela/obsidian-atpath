@@ -268,3 +268,12 @@ a.internal-link.atpath-link[data-tokens]::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.atpath-explorer-token-badge {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  padding-inline-start: 0.5em;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

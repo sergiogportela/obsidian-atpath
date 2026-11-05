@@ -1,40 +1,22 @@
 "use strict";
 
-// looksBinary is the content sniff that gates gpt-tokenizer's encode() in
-// getTokenCount (src/main.js). It mirrors git / grep -I / file(1): a NUL byte
+// looksBinary is the content sniff that gates the token index. It mirrors
+// git / grep -I / file(1): a NUL byte
 // in the leading 4096-char sample is a hard binary signal; otherwise a >10%
 // ratio of U+FFFD (failed UTF-8 decode) or non-whitespace control chars over
-// the sample means binary. Real UTF-8 text/code/data scores ~0 and is never
-// skipped, so token counts for genuine text stay byte-identical.
+// the sample means binary. Real UTF-8 text/code/data generally scores ~0.
 //
 // These tests lock both sides of the 0.1 ratio gate and the NUL early-return,
 // using self-verifying fixture constructions (count/length arithmetic shown in
 // comments) so the gate is provably exercised above and below threshold.
 // Control / NUL / U+FFFD chars are built via String.fromCharCode (never literal
 // bytes) so the fixtures are unambiguous in source and survive transport intact.
-//
-// --- getTokenCount -> null -> no-cache integration invariant (NOTE) ---------
-// Plan 002 (§ "Token-cache invariant") asks to also assert that a binary file
-// makes getTokenCount return null AND leaves no tokenCache entry. That invariant
-// is NOT exercised here, and deliberately so: the real getTokenCount lives in
-// src/main.js, which cannot be required under `node --test` (it pulls in
-// @codemirror/* and gpt-tokenizer, which tests/_setup.js does not fake). The
-// buildPlugin fake in tests/folder-tokens.test.js *replaces* plugin.getTokenCount
-// with a stub returning 10 and never mocks app.vault.cachedRead, so it cannot
-// drive the real read -> sniff -> encode path either. Writing a fake-driven test
-// would secretly test a re-implemented copy of the logic, not the real method —
-// misleading, so it is omitted. Per the plan's own fallback, the invariant is
-// instead covered (a) structurally — looksBinary returns before tokenCache.set,
-// so a sniffed binary is never stored (src/main.js getTokenCount), keeping the
-// cache numeric-only — and (b) by the manual reload check in plan 002 rollout
-// step 4 (re-type the binary @ref, confirm no token badge / never a "null" badge).
-// This file's job is to exhaustively pin looksBinary itself, which is the only
-// piece that is purely unit-testable.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { looksBinary } = require("../src/atpath-core.js");
+const { f_createTokenIndex } = require("../src/token-index.js");
 
 const NUL = String.fromCharCode(0); // U+0000, the hard binary signal
 const CTRL = String.fromCharCode(1); // U+0001: a non-whitespace control char (c < 9)
@@ -230,33 +212,22 @@ test("looksBinary: empty string -> false (length guard)", () => {
   assert.equal(looksBinary(""), false);
 });
 
-// --- Structural guard: sniff gate precedes the cache write (integration) ----
-// The NOTE at the top of this file explains why the getTokenCount -> null ->
-// no-cache invariant cannot be exercised by requiring src/main.js. This test is
-// the (a) structural backstop named there: it reads src/main.js as text and
-// asserts, WITHIN the getTokenCount method body, that the `looksBinary(content)`
-// early-return appears before `this.tokenCache.set(`. That ordering is exactly
-// what keeps a sniffed binary out of the numeric-only cache. A refactor that
-// moved the sniff below the cache write (or dropped it) would fail here.
-
-test("structural: looksBinary gate precedes tokenCache.set in getTokenCount (src/main.js)", () => {
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const src = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
-
-  const start = src.indexOf("async getTokenCount(");
-  assert.notEqual(start, -1, "getTokenCount method not found in src/main.js");
-  // Scope to the method body: end at the next method definition.
-  const end = src.indexOf("scheduleTokenFetch(", start);
-  assert.notEqual(end, -1, "method boundary (scheduleTokenFetch) not found after getTokenCount");
-  const body = src.slice(start, end);
-
-  const sniffAt = body.indexOf("looksBinary(content)");
-  const cacheAt = body.indexOf("this.tokenCache.set(");
-  assert.notEqual(sniffAt, -1, "looksBinary(content) gate missing from getTokenCount");
-  assert.notEqual(cacheAt, -1, "this.tokenCache.set(...) missing from getTokenCount");
-  assert.ok(
-    sniffAt < cacheAt,
-    "looksBinary gate must precede tokenCache.set so a sniffed binary is never cached"
-  );
+test("token index excludes sniffed binary from the numeric rendering cache", async () => {
+  const file = { path: "looks-like-text.txt", stat: { mtime: 1, size: 5 } };
+  const tokenCache = new Map();
+  const index = f_createTokenIndex({
+    getFiles: () => [file],
+    read: async () => "ab" + NUL + "cd",
+    isEligible: () => true,
+    looksBinary,
+    tokenCache,
+  });
+  try {
+    await index.start();
+    assert.equal(await index.request(file), null);
+    assert.equal(index.get(file.path).skipped, 1);
+    assert.equal(tokenCache.has(file.path), false);
+  } finally {
+    await index.dispose();
+  }
 });

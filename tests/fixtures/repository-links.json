@@ -1,0 +1,440 @@
+{
+  "version": 1,
+  "repositories": [
+    {
+      "root": "",
+      "identity": "org/workspace"
+    },
+    {
+      "root": "projects/one",
+      "identity": "org/alpha",
+      "aliases": [
+        "org/old-alpha"
+      ],
+      "refs": [
+        "releases/current",
+        "dev"
+      ]
+    },
+    {
+      "root": "projects/one/nested",
+      "identity": null
+    },
+    {
+      "root": "moved/beta-checkout",
+      "identity": "other/beta",
+      "refs": [
+        "feature/tools",
+        "feature/tools/review"
+      ]
+    },
+    {
+      "root": "clones/beta",
+      "identity": "other/beta"
+    },
+    {
+      "root": "third",
+      "identity": "org/beta"
+    },
+    {
+      "root": null,
+      "identity": "org/offline"
+    }
+  ],
+  "targets": {
+    "": "folder",
+    "AGENTS.md": "file",
+    "projects/one/AGENTS.md": "file",
+    "projects/one/dir/source.md": "file",
+    "projects/one/dir/space (x).md": "file",
+    "projects/one/docs": "folder",
+    "projects/one/docs/file.md": "file",
+    "projects/one/x%20y.md": "file",
+    "projects/one/odd#hash.md": "file",
+    "projects/one/nested/AGENTS.md": "file",
+    "moved/beta-checkout/AGENTS.md": "file",
+    "third/AGENTS.md": "file"
+  },
+  "cases": [
+    {
+      "name": "root relative starts at source checkout",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/AGENTS.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/AGENTS.md",
+        "repository": "org/alpha",
+        "kind": "file"
+      }
+    },
+    {
+      "name": "innermost checkout has no origin",
+      "sourcePath": "projects/one/nested/note.md",
+      "destination": "/AGENTS.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/nested/AGENTS.md",
+        "repository": null
+      }
+    },
+    {
+      "name": "relative path starts from note",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "space%20%28x%29.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/dir/space (x).md"
+      }
+    },
+    {
+      "name": "relative parent remains in repository",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "../docs/",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/docs",
+        "kind": "folder"
+      }
+    },
+    {
+      "name": "fragment-only stays in source",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "#A%20heading",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/dir/source.md",
+        "fragment": "#A%20heading"
+      }
+    },
+    {
+      "name": "decode percent once",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/x%2520y.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/x%20y.md"
+      }
+    },
+    {
+      "name": "hash in path remains separate from fragment",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/odd%23hash.md#Heading",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/odd#hash.md",
+        "fragment": "#Heading"
+      }
+    },
+    {
+      "name": "encoded slash is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/docs%2Ffile.md",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "encoded backslash is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/docs%5Cfile.md",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "malformed percent escape is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/%e3%80",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "root-relative escape is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/%2e%2e/AGENTS.md",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "relative escape is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "../../AGENTS.md",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "raw GitHub traversal is validated",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/main/%2e%2e/AGENTS.md",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "GitHub origin casing and full owner identity",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/Org/Beta/blob/main/AGENTS.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "third/AGENTS.md"
+      }
+    },
+    {
+      "name": "renamed GitHub repository uses cached alias",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/old-alpha/blob/main/docs/file.md",
+      "expected": {
+        "status": "resolved",
+        "repository": "org/alpha",
+        "vaultPath": "projects/one/docs/file.md"
+      }
+    },
+    {
+      "name": "unknown single segment when boundary is clear",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/unfetched-branch/AGENTS.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/AGENTS.md",
+        "ref": "unfetched-branch"
+      }
+    },
+    {
+      "name": "SHA need not exist locally",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/a121fe9/docs/file.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/docs/file.md",
+        "ref": "a121fe9"
+      }
+    },
+    {
+      "name": "known branch can have nested path",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/dev/docs/file.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/docs/file.md",
+        "ref": "dev"
+      }
+    },
+    {
+      "name": "known slash branch",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/releases/current/docs/file.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/docs/file.md",
+        "ref": "releases/current"
+      }
+    },
+    {
+      "name": "explicit encoded slash branch",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/topic%2Funtested/docs/file.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "projects/one/docs/file.md",
+        "ref": "topic/untested"
+      }
+    },
+    {
+      "name": "unknown slash boundary is ambiguous even when candidate exists",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/unfetched-branch/docs/file.md",
+      "expected": {
+        "status": "ambiguous"
+      }
+    },
+    {
+      "name": "multiple known slash boundaries",
+      "sourcePath": "moved/beta-checkout/note.md",
+      "destination": "https://github.com/other/beta/blob/feature/tools/review/AGENTS.md",
+      "expected": {
+        "status": "ambiguous"
+      }
+    },
+    {
+      "name": "source checkout wins duplicate origins",
+      "sourcePath": "moved/beta-checkout/note.md",
+      "destination": "https://github.com/other/beta/blob/main/AGENTS.md",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "moved/beta-checkout/AGENTS.md"
+      }
+    },
+    {
+      "name": "multiple other checkouts are ambiguous",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/other/beta/blob/main/AGENTS.md",
+      "expected": {
+        "status": "ambiguous"
+      }
+    },
+    {
+      "name": "workspace checkout unavailable",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/offline/blob/main/AGENTS.md",
+      "expected": {
+        "status": "missing"
+      }
+    },
+    {
+      "name": "unrecognized owner is outside scope",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/unrelated/alpha/blob/main/AGENTS.md",
+      "expected": {
+        "status": "out-of-scope"
+      }
+    },
+    {
+      "name": "external link is outside scope",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://example.com/docs",
+      "expected": {
+        "status": "out-of-scope"
+      }
+    },
+    {
+      "name": "protocol-relative URL is outside scope",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "//example.com/docs",
+      "expected": {
+        "status": "out-of-scope"
+      }
+    },
+    {
+      "name": "missing target has local destination",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "/unavailable.md",
+      "expected": {
+        "status": "missing",
+        "vaultPath": "projects/one/unavailable.md"
+      }
+    },
+    {
+      "name": "folder target for blob is invalid",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/blob/main/docs",
+      "expected": {
+        "status": "invalid"
+      }
+    },
+    {
+      "name": "repository root folder",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/workspace/tree/main/",
+      "expected": {
+        "status": "resolved",
+        "vaultPath": "",
+        "kind": "folder"
+      }
+    },
+    {
+      "name": "http GitHub blob URL is outside scope",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "http://github.com/org/alpha/blob/main/AGENTS.md",
+      "expected": {
+        "status": "out-of-scope"
+      }
+    },
+    {
+      "name": "https GitHub raw URL is outside scope",
+      "sourcePath": "projects/one/dir/source.md",
+      "destination": "https://github.com/org/alpha/raw/main/AGENTS.md",
+      "expected": {
+        "status": "out-of-scope"
+      }
+    }
+  ],
+  "markdownCases": [
+    {
+      "name": "ordinary Markdown destinations and reference styles",
+      "markdown": "[Wrong label](/AGENTS.md) [*space*](<dir/space (x).md> \"title\")\n[Full][id] [id][] [id]\n\n[id]: /docs/file.md#section\n",
+      "expected": [
+        {
+          "destination": "/AGENTS.md",
+          "label": "Wrong label",
+          "raw": "[Wrong label](/AGENTS.md)"
+        },
+        {
+          "destination": "dir/space (x).md",
+          "label": "space",
+          "raw": "[*space*](<dir/space (x).md> \"title\")"
+        },
+        {
+          "destination": "/docs/file.md#section",
+          "label": "Full",
+          "raw": "[Full][id]"
+        },
+        {
+          "destination": "/docs/file.md#section",
+          "label": "id",
+          "raw": "[id][]"
+        },
+        {
+          "destination": "/docs/file.md#section",
+          "label": "id",
+          "raw": "[id]"
+        }
+      ]
+    },
+    {
+      "name": "code, escaping and embeds",
+      "markdown": "`[code](/ignored)`\n\n    [indented](/ignored)\n\n```md\n[fenced](/ignored)\n```\n\n![image](/ignored) ![[embed]] \\[escaped](/ignored) <!-- [comment](/ignored) -->\n[A \\[label\\]](/odd%23hash.md)\n",
+      "expected": [
+        {
+          "destination": "/odd%23hash.md",
+          "label": "A [label]",
+          "raw": "[A \\[label\\]](/odd%23hash.md)"
+        }
+      ]
+    },
+    {
+      "name": "positions inside nested blocks and tables",
+      "markdown": "> - 😀 [one](/AGENTS.md)\r\n>   [two\r\n>    lines](/docs/)\r\n\r\n| [a\\|b](/AGENTS.md) | [a\\|b](/AGENTS.md) |\r\n| --- | --- |",
+      "expected": [
+        {
+          "destination": "/AGENTS.md",
+          "label": "one",
+          "raw": "[one](/AGENTS.md)"
+        },
+        {
+          "destination": "/docs/",
+          "label": "two\nlines",
+          "raw": "[two\r\n>    lines](/docs/)"
+        },
+        {
+          "destination": "/AGENTS.md",
+          "label": "a|b",
+          "raw": "[a\\|b](/AGENTS.md)"
+        },
+        {
+          "destination": "/AGENTS.md",
+          "label": "a|b",
+          "raw": "[a\\|b](/AGENTS.md)"
+        }
+      ]
+    },
+    {
+      "name": "leading YAML properties are separate from Markdown body links",
+      "markdown": "---\r\nproperty: \"[yaml](/ignored.md)\"\r\n---\r\n\r\n[body](/AGENTS.md)\r\n\r\n---\r\n[after a rule](/docs/file.md)",
+      "expected": [
+        {
+          "destination": "/AGENTS.md",
+          "label": "body",
+          "raw": "[body](/AGENTS.md)"
+        },
+        {
+          "destination": "/docs/file.md",
+          "label": "after a rule",
+          "raw": "[after a rule](/docs/file.md)"
+        }
+      ]
+    }
+  ]
+}
