@@ -6,6 +6,7 @@
 
 const Module = require("node:module");
 const path = require("node:path");
+globalThis.crypto ??= require("node:crypto").webcrypto;
 
 const FAKE = path.resolve(__dirname, "_fakes/obsidian.js");
 

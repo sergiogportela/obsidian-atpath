@@ -1,23 +1,23 @@
 "use strict";
 
-const { TOKEN_ESTIMATE_DISCLOSURE } = require("./token-index");
+const { TOKEN_COUNT_DISCLOSURE } = require("./token-contract");
 
 const ROW = ".nav-file-title[data-path], .nav-folder-title[data-path]";
 const BADGE = "atpath-explorer-token-badge";
 
 function f_describeTokenBadge(snapshot, formatTokens) {
   if (!snapshot) {
-    return { text: "…", title: "Token estimate pending" };
+    return { text: "…", title: "Token count pending" };
   }
   const { tokens, counted, pending, skipped } = snapshot;
   const notes = [];
-  if (counted || (!skipped && !pending)) notes.push("About " + tokens.toLocaleString() + " tokens, estimated as characters divided by four");
-  if (counted) notes.push(TOKEN_ESTIMATE_DISCLOSURE.replace(/\.$/, ""));
-  if (pending) notes.push(counted ? "Some files are still pending" : "Token estimate pending");
+  if (counted || (!skipped && !pending)) notes.push(tokens.toLocaleString() + " o200k_base text tokens");
+  if (counted) notes.push(TOKEN_COUNT_DISCLOSURE.replace(/\.$/, ""));
+  if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
   if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
   return {
     text: !counted && pending ? "…" : !counted && skipped ? "—"
-      : "~" + formatTokens(tokens) + (pending ? " …" : skipped ? " *" : ""),
+      : formatTokens(tokens) + (pending ? " …" : skipped ? " *" : ""),
     title: notes.join(". "),
   };
 }
@@ -81,7 +81,9 @@ function f_installExplorerTokenBadges({ workspace, index, formatTokens, isEnable
         const folder = row.classList.contains("nav-folder-title");
         const snapshot = index.get(path, folder);
         if (!folder && snapshot?.pending) index.prioritize(path);
-        visible.set(row, f_describeTokenBadge(snapshot, formatTokens));
+        const badge = f_describeTokenBadge(snapshot, formatTokens);
+        if (folder) badge.title += ". Configured folder exclusions apply to descendants";
+        visible.set(row, badge);
       }
     }
 

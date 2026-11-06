@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { f_createTokenIndex, f_estimateTokens } = require("../src/token-index");
+const { f_createTokenIndex } = require("../src/token-index");
 const { f_describeTokenBadge, f_installExplorerTokenBadges } = require("../src/explorer-token-badges");
 
 function f_file(path, text, mtime = 1) {
@@ -17,6 +17,8 @@ function f_deferred() {
 
 function f_index(files, overrides = {}) {
   return f_createTokenIndex({
+    // Deterministic counter double: tokenizer correctness is tested separately.
+    count: async text => Math.ceil(text.length / 4),
     getFiles: () => files,
     read: async file => file.text,
     isEligible: file => !file.path.endsWith(".png"),
@@ -25,7 +27,7 @@ function f_index(files, overrides = {}) {
   });
 }
 
-test("folder totals distinguish pending, skipped and estimated files", async () => {
+test("folder totals distinguish pending, skipped and counted files", async () => {
   const plain = f_file("top/plain.md", "abcdefghijkl");
   const unicode = f_file("top/deep/unicode.md", "Olá, 🦉");
   const binary = f_file("top/deep/false-text.md", "\0abc");
@@ -42,7 +44,7 @@ test("folder totals distinguish pending, skipped and estimated files", async () 
     assert.ok(inProgress.pending > 0);
     assert.equal(inProgress.candidates, 3);
     const pendingBadge = f_describeTokenBadge(inProgress, String);
-    assert.equal(pendingBadge.text, "~3 …");
+    assert.equal(pendingBadge.text, "3 …");
     assert.match(pendingBadge.title, /still pending/);
     pending.resolve(unicode.text);
     assert.equal(await index.request(unicode), 2);
@@ -57,7 +59,7 @@ test("folder totals distinguish pending, skipped and estimated files", async () 
   }
 });
 
-test("explicit unindexed targets have direct estimates and no folder contribution", async () => {
+test("explicit unindexed targets have direct counts and no folder contribution", async () => {
   const indexed = f_file("folder/native.md", "abcd");
   const explicit = { ...f_file("folder/unindexed.md", "abcdefgh"), localOnly: true };
   const index = f_index([indexed, explicit]);
@@ -74,7 +76,7 @@ test("explicit unindexed targets have direct estimates and no folder contributio
   }
 });
 
-test("disabled counts do not read content and queued estimates resume when enabled", async () => {
+test("disabled counts do not read content and queued counts resume when enabled", async () => {
   const first = f_file("first.md", "abcd");
   const next = f_file("next.md", "abcdefgh");
   const started = f_deferred();
@@ -144,7 +146,7 @@ test("cache checkpoints preserve completed work despite continuous queue progres
   }
 });
 
-test("restart reuses warm counts only for matching estimator version, mtime and size", async () => {
+test("restart reuses warm counts only for matching tokenizer identity and verified content", async () => {
   const note = f_file("note.md", "12345678");
   const binary = f_file("sniffed.md", "\0");
   const skipped = f_file("file.png", "x");
@@ -162,7 +164,8 @@ test("restart reuses warm counts only for matching estimator version, mtime and 
   await warm.start();
   assert.equal(await warm.request(note), 2);
   assert.equal(await warm.request(binary), null);
-  assert.deepEqual(reads, []);
+  assert.deepEqual(reads, ["note.md", "sniffed.md"]);
+  reads.length = 0;
   note.text = "123456789012";
   note.stat = { ...note.stat, size: 12 };
   warm.upsert(note);
@@ -236,10 +239,178 @@ test("folder-first native rename events wait for descendant paths to update", as
   }
 });
 
-test("estimator counts decoded characters and explorer degrades when the native workspace shape is absent", () => {
-  assert.equal(f_estimateTokens(""), 0);
-  assert.equal(f_estimateTokens("🦉🐈a"), 2);
+test("explorer degrades when the native workspace shape is absent", () => {
   assert.equal(f_describeTokenBadge(null, String).text, "…");
   assert.equal(f_describeTokenBadge({ tokens: 0, counted: 0, pending: 0, skipped: 1 }, String).text, "—");
   assert.equal(f_installExplorerTokenBadges({ workspace: {}, index: {}, formatTokens: String }), null);
+});
+
+test("warm cache verifies content and detects offline and live edits with identical metadata", async () => {
+  const file = f_file("note.md", "aaaa");
+  let saved;
+  let encodes = 0;
+  const count = async text => { encodes++; return text === "aaaa" ? 1 : 2; };
+  const cold = f_index([file], { count, save: async value => { saved = value; } });
+  await cold.start();
+  assert.equal(await cold.request(file), 1);
+  await cold.dispose();
+  const warm = f_index([file], { count, load: async () => saved });
+  await warm.start();
+  assert.equal(warm.get(file.path).pending, 1, "persisted values are not displayed before validation");
+  assert.equal(await warm.request(file), 1);
+  assert.equal(encodes, 1, "verified text bypasses tokenization");
+  file.text = "bbbb";
+  warm.upsert(file);
+  assert.equal(warm.get(file.path).pending, 1);
+  assert.equal(await warm.request(file), 2);
+  await warm.dispose();
+  const offline = f_index([file], { count, load: async () => saved });
+  await offline.start();
+  assert.equal(await offline.request(file), 2);
+  assert.equal(encodes, 3);
+  await offline.dispose();
+  for (const corrupt of [{ ...saved, tokenizer: "other" }, { ...saved, version: 1 },
+    { ...saved, files: { "note.md": { ...saved.files["note.md"], digest: null } } }]) {
+    const index = f_index([file], { count, load: async () => corrupt });
+    await index.start();
+    await index.request(file);
+    await index.dispose();
+  }
+  assert.equal(encodes, 6, "old, mismatched and malformed cache entries cannot be reused");
+});
+
+test("late worker results cannot overwrite edits, renames, deletes or disposal", async () => {
+  for (const operation of ["modify", "rename", "delete", "dispose", "stat"]) {
+    const file = f_file("old.md", "aaaa");
+    const started = f_deferred();
+    const release = f_deferred();
+    let first = true;
+    const index = f_index([file], { count: async () => {
+      if (!first) return 2;
+      first = false;
+      started.resolve();
+      return release.promise;
+    } });
+    await index.start();
+    const old = index.request(file);
+    await started.promise;
+    if (operation === "modify") { file.text = "bbbb"; index.upsert(file); }
+    else if (operation === "stat") file.stat.mtime++;
+    else if (operation === "rename") { file.path = "new.md"; index.rename(file, "old.md"); }
+    else if (operation === "delete") index.remove("old.md");
+    else await index.dispose();
+    release.resolve(999);
+    assert.equal(await old, null);
+    if (["modify", "rename", "stat"].includes(operation)) assert.equal(await index.request(file), 2);
+    assert.notEqual(index.get(file.path)?.tokens, 999);
+    await index.dispose();
+  }
+});
+
+test("failed checkpoint retries without another modification and persists deletion", async t => {
+  try { t.mock.timers.enable({ apis: ["setTimeout"] }); }
+  catch (error) { if (error.code !== "ERR_INVALID_ARG_TYPE") throw error; t.mock.timers.enable(["setTimeout"]); }
+  const file = f_file("note.md", "aaaa");
+  let attempts = 0;
+  let saved;
+  const failures = [];
+  const index = f_index([file], {
+    save: async value => { attempts++; if (attempts === 1) throw new Error("quota"); saved = value; },
+    onError: error => failures.push(error.message),
+  });
+  await index.start();
+  const request = index.request(file);
+  t.mock.timers.tick(0);
+  await request;
+  t.mock.timers.tick(5000);
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  assert.deepEqual(failures, ["quota"]);
+  assert.equal(attempts, 1);
+  t.mock.timers.tick(5000);
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  assert.equal(attempts, 2);
+  assert.equal(saved.files["note.md"].tokens, 1);
+  index.remove("note.md");
+  t.mock.timers.reset();
+  await index.dispose();
+  assert.deepEqual(saved.files, {});
+});
+
+test("folder boundaries stop ancestor totals while retaining direct and nested counts", async () => {
+  const files = [f_file("work/active.md", "aaaa"), f_file("work/90_archive/old.md", "aaaaaaaa"),
+    f_file("work/90_archive/deep/nested.md", "aaaa"), f_file("work/90_archive/deep/90_archive/older.md", "aaaaaaaaaaaa"),
+    f_file("work/scratch/draft.md", "aaaa")];
+  let encodes = 0;
+  const index = f_index(files, { folderExclusions: ["90_archive", "work/scratch"], count: async text => { encodes++; return text.length / 4; } });
+  try {
+    await index.start();
+    await Promise.all(files.map(file => index.request(file)));
+    assert.equal(index.get("work", true).tokens, 1);
+    assert.equal(index.get("/", true).tokens, 1);
+    assert.equal(index.get("work/90_archive", true).tokens, 3);
+    assert.equal(index.get("work/90_archive/deep", true).tokens, 1);
+    assert.equal(index.get(files[3].path).tokens, 3);
+    assert.equal(index.get("work", true).candidates, 1);
+    index.setFolderExclusions([]);
+    assert.equal(index.get("work", true).tokens, 8);
+    assert.equal(encodes, 5, "settings rebuild aggregates without encoding files again");
+    index.setFolderExclusions(["90_archive"]);
+    const moved = files[1];
+    const oldPath = moved.path;
+    moved.path = "work/restored.md";
+    index.rename(moved, oldPath);
+    await index.request(moved);
+    assert.equal(index.get("work", true).tokens, 4);
+    assert.equal(index.get("work/90_archive", true).tokens, 1);
+  } finally { await index.dispose(); }
+});
+
+test("warm checkpoints and early unload preserve saved candidates awaiting verification", async t => {
+  const files = [f_file("first.md", "aaaa"), f_file("slow.md", "bbbb")];
+  let saved;
+  const save = async value => { saved = value; };
+  const cold = f_index(files, { save });
+  await cold.start();
+  await Promise.all(files.map(file => cold.request(file)));
+  await cold.dispose();
+  try { t.mock.timers.enable({ apis: ["setTimeout"] }); }
+  catch (error) { if (error.code !== "ERR_INVALID_ARG_TYPE") throw error; t.mock.timers.enable(["setTimeout"]); }
+  const release = f_deferred();
+  const warm = f_index(files, { load: async () => saved, save,
+    read: file => file === files[1] ? release.promise : Promise.resolve(file.text),
+    count: async () => { throw new Error("unchanged text must reuse the saved count"); },
+  });
+  await warm.start();
+  const first = warm.request(files[0]);
+  t.mock.timers.tick(0);
+  await first;
+  const slow = warm.request(files[1]);
+  t.mock.timers.tick(5000);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.deepEqual(Object.keys(saved.files).sort(), ["first.md", "slow.md"]);
+  assert.equal(warm.get("slow.md").pending, 1);
+  t.mock.timers.reset();
+  await warm.dispose();
+  assert.equal(await slow, null);
+  release.resolve(files[1].text);
+  const restart = f_index(files, { load: async () => saved,
+    count: async () => { throw new Error("early unload must preserve the candidate"); },
+  });
+  await restart.start();
+  assert.deepEqual(await Promise.all(files.map(file => restart.request(file))), [1, 1]);
+  await restart.dispose();
+
+  try { t.mock.timers.enable({ apis: ["setTimeout"] }); }
+  catch (error) { if (error.code !== "ERR_INVALID_ARG_TYPE") throw error; t.mock.timers.enable(["setTimeout"]); }
+  const blocked = f_deferred();
+  const deleting = f_index(files, { load: async () => saved, save, read: () => blocked.promise });
+  await deleting.start();
+  t.mock.timers.tick(5000);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.ok(saved.files["slow.md"]);
+  deleting.remove("slow.md");
+  t.mock.timers.reset();
+  await deleting.dispose();
+  assert.equal(saved.files["slow.md"], undefined, "deletion removes a checkpointed candidate still awaiting verification");
+  blocked.resolve("");
 });

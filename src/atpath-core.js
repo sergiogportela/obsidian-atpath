@@ -1,6 +1,7 @@
 "use strict";
 
 const { TFile, TFolder } = require("obsidian");
+const { f_isFolderCountBoundary, f_parseFolderCountExclusions } = require("./folder-count-policy");
 
 const REPOS_SEGMENT = "_repos/";
 
@@ -216,6 +217,7 @@ function createAtPathCore(plugin) {
       const maxFiles = settings.maxFolderFiles || 500;
       const batchSize = settings.folderEncodeBatchSize || 1;
       const startEpoch = folderTokenEpoch;
+      const boundaries = f_parseFolderCountExclusions(settings.folderCountExclusions);
 
       const paths = [];
       let overCap = false;
@@ -224,7 +226,7 @@ function createAtPathCore(plugin) {
         for (const c of node.children) {
           if (overCap) return;
           if (c instanceof TFolder) {
-            walk(c);
+            if (!f_isFolderCountBoundary(c.path, boundaries)) walk(c);
           } else if (c instanceof TFile && !isIgnored(c.path)) {
             perf.inc("getFolderTokens.walkedFiles");
             if (c.stat.size > sizeCapBytes) {

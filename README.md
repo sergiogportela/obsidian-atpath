@@ -2,7 +2,7 @@
 
 # AtPath
 
-**Write repository-aware Markdown links, open the local checkout, and see approximate context sizes beside links and files.**
+**Write repository-aware Markdown links, open the local checkout, and see exact o200k_base text counts beside links and files.**
 
 Autocomplete, click-to-open, token counting, one-click publish to the web, and cross-repo support.
 
@@ -51,22 +51,13 @@ Click a repository link in Live Preview or Reading mode to open the local file, 
 
 ### Token Counts
 
-Approximate counts appear beside links, visible File Explorer rows, and in the desktop status bar. Folder totals update incrementally; pending or skipped content is identified. Click the status bar to copy the note and its linked content.
+Exact **o200k_base text-token** counts appear beside links, visible File Explorer rows, and in the desktop status bar. A lazy background worker uses pinned `gpt-tokenizer 4.1.0` with a bounded 10,000-piece merge cache. Counting stays local. Pending counts show `…`; partial folder totals and skipped files remain identified. Compact `k` labels are rounded for display; explorer/status tooltips show the full count. Explorer counts use faint text at 50% opacity.
 
-The estimate is `ceil(character count / 4)`, marked `~`. **JSON and CSV can require nearly three times the displayed count.** An independent 482-file workspace calibration against `o200k_base` found per-file errors from **−65.7% to +95.8%**, with the combined estimate **19% too low**. Negative errors mean an underestimate:
+A count describes the decoded text using this specific encoding. It is not an exact Claude count or a complete model request: message formatting, tools, instructions and history add tokens. Folder and linked totals sum individual file counts, with overlapping references deduplicated. They do not claim to count the assembled clipboard text, whose headings, fences and boundaries differ.
 
-| Content | Files | Minimum error | Median error | Maximum error |
-| --- | ---: | ---: | ---: | ---: |
-| Markdown | 120 | −40.6% | −9.3% | +95.8% |
-| Python | 120 | −28.3% | −3.8% | +35.2% |
-| JSON | 120 | −55.6% | −25.8% | +50.2% |
-| SQL | 50 | −35.0% | −10.0% | +59.3% |
-| YML | 20 | −42.5% | −18.5% | +57.7% |
-| YAML | 1 | −26.7% | −26.7% | −26.7% |
-| CSV | 30 | −65.7% | −47.1% | +7.8% |
-| JavaScript | 21 | −35.9% | −4.5% | +9.1% |
+The persistent cache lives in device-local IndexedDB, separate from synced settings. Its schema includes the pinned tokenizer identity and a SHA-256 digest of the decoded text. At startup, every eligible file is read and hashed before its saved count is displayed; unchanged text avoids tokenization. Modification events invalidate counts even when size and timestamp stay unchanged. Pending reads/counts are discarded after edits, moves, deletion or unload. Failed checkpoints retry; older heuristic caches are discarded. Worker failures leave counts unavailable, with a notice, until plugin reload.
 
-These are observed samples, not guaranteed bounds for other files or models; Claude tokenizers were not tested. At the −65.7% extreme, the actual count is about 2.9 times the estimate. The estimate formula remains unchanged: this sample does not establish a correction that works for every content mix. Use a model's actual tokenizer for hard context limits. Counts exclude model instructions and message history. Content reads run through a yielding queue, and validated file snapshots persist in device-local IndexedDB rather than synced settings.
+**Exclude folders from parent totals** accepts one folder name or vault-relative path per line, with `90_archive` as the default. A name matches anywhere; `project/scratch` matches only that path. No glob syntax is needed. Matching folders are excluded from outside ancestor totals and copied folder expansions. They keep their own totals, and direct links to their files/folders still count and copy them. Nested matching folders form another boundary. Blank settings include all otherwise eligible folders. Changing this setting rebuilds totals without re-tokenizing files.
 
 <p align="center">
   <img src="screenshots/status-bar.png" width="500" alt="Status bar showing total token count with tooltip breakdown" />
@@ -76,7 +67,7 @@ These are observed samples, not guaranteed bounds for other files or models; Cla
 
 Copy the current editor buffer with referenced text files appended in fenced blocks. Folder references expand recursively, with file-size/count limits and skipped-file reporting. Overlapping file and folder references are deduplicated by local target path.
 
-Counting, copy and linked-page collection exclude generated directories, Git/plugin metadata, binary content and sensitive filenames such as `.env`, private keys and `credentials.json`. Native indexed descendants define folder scope; explicitly linked eligible files outside the index are handled individually. AtPath's configurable defaults are 5 MB per file and 500 candidates per folder. AgentKit uses stricter dispatch limits of 1 MB per file, 100 files and 10 MB total; an AtPath estimate does not override those limits.
+Counting, copy and linked-page collection exclude generated directories, Git/plugin metadata, binary content and sensitive filenames such as `.env`, private keys and `credentials.json`. Native indexed descendants define folder scope; explicitly linked eligible files outside the index are handled individually. AtPath's configurable defaults are 5 MB per file and 500 candidates per folder. The folder-boundary setting is an AtPath preference; AgentKit does not read it. AgentKit uses stricter dispatch limits of 1 MB per file, 100 files and 10 MB total; an AtPath count does not override those limits.
 
 ### Publish to Vercel
 
@@ -122,9 +113,10 @@ Only destinations change: existing labels, link titles, reference definitions, a
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Show token counts | On | Approximate inline, explorer and status-bar counts |
+| Show token counts | On | Exact o200k_base text counts in links, explorer and status bar |
 | Max file size (MB) | 5 | Skip larger linked files when counting, copying or publishing |
-| Max files per folder reference | 500 | Limit recursive folder expansion and its estimate by the number of indexed candidates before reading content |
+| Max files per folder reference | 500 | Limit recursive folder expansion and its count by the number of indexed candidates before reading content |
+| Exclude folders from parent totals | `90_archive` | One folder name or vault-relative path per line; excluded from ancestor totals and folder copying, still available directly |
 | Show selection tokens in status bar | On | When text is selected, status bar shows `Sel: <selected> / <total>` |
 | Suggest folders in autocomplete | On | Include folders in `[[` suggestions |
 | Drag-and-drop link inserts | On | Insert a canonical Markdown link when dragging a file/folder |

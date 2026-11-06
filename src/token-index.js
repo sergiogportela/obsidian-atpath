@@ -1,20 +1,17 @@
 "use strict";
 
-const TOKEN_ESTIMATE_DISCLOSURE = "Approximate (characters / 4). A workspace sample against o200k_base had errors from −66% to +96% and a total 19% too low. JSON/CSV can need nearly 3× this count. Observed results, not bounds or hard context limits.";
-
-const ESTIMATOR_VERSION = 1;
+const { TOKEN_CACHE_IDENTITY, TOKEN_CACHE_VERSION, f_hashTokenText } = require("./token-contract");
+const { f_isFolderCountBoundary } = require("./folder-count-policy");
 const CHECKPOINT_INTERVAL_MS = 5000;
 const EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
 const EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
 
-function f_estimateTokens(text) {
-  return Math.ceil(text.length / 4);
-}
-
 function f_createTokenIndex({
-  getFiles, read, isEligible, looksBinary, load, save, enabled = true,
+  getFiles, read, count, isEligible, looksBinary, load, save, enabled = true,
+  hash = f_hashTokenText, folderExclusions = [],
   tokenCache = new Map(), onError = () => {},
 }) {
+  if (typeof count !== "function") throw new TypeError("An asynchronous exact token counter is required");
   const entries = new Map();
   const folders = new Map();
   const background = new Set();
@@ -52,6 +49,7 @@ function f_createTokenIndex({
       total.tokens += direction * (entry.tokens ?? 0);
       if (total.pending || total.counted || total.skipped) folders.set(folder, total);
       else folders.delete(folder);
+      if (f_isFolderCountBoundary(folder, folderExclusions)) break;
     } while (folder);
   }
 
@@ -62,16 +60,27 @@ function f_createTokenIndex({
       while (dirty) {
         dirty = false;
         const files = new Map(persisted);
-        for (const { path, mtime, size, tokens, cacheable } of entries.values()) {
-          if (cacheable) files.set(path, { mtime, size, tokens });
+        for (const entry of entries.values()) {
+          // Keep unverified candidates across a checkpoint or early unload.
+          // They will still require a content-hash match on the next startup.
+          const record = entry.cacheable ? entry : entry.eligible ? entry.saved : null;
+          if (record) {
+            const { mtime, size, tokens, digest } = record;
+            files.set(entry.path, { mtime, size, tokens, digest });
+          }
         }
         try {
-          await save({ version: ESTIMATOR_VERSION, files: Object.fromEntries(files) });
+          await save({ version: TOKEN_CACHE_VERSION, tokenizer: TOKEN_CACHE_IDENTITY, files: Object.fromEntries(files) });
         } catch (error) {
+          dirty = true;
           onError(error);
+          break; // Retry on the next checkpoint, never spin on a failed store.
         }
       }
-    })().finally(() => { saving = null; });
+    })().finally(() => {
+      saving = null;
+      if (dirty && !disposed) f_scheduleSave();
+    });
     return saving;
   }
 
@@ -94,7 +103,7 @@ function f_createTokenIndex({
     priority.delete(entry);
     f_adjust(entry, -1);
     entry.resolve?.(null);
-    if (entry.cacheable) f_scheduleSave();
+    if (entry.cacheable || entry.saved) f_scheduleSave();
     f_notify();
   }
 
@@ -118,6 +127,11 @@ function f_createTokenIndex({
     }, 0);
   }
 
+  function f_isCurrent(entry) {
+    return !disposed && entries.get(entry.path) === entry && entry.file.path === entry.path
+      && entry.file.stat.mtime === entry.mtime && entry.file.stat.size === entry.size;
+  }
+
   async function f_readNext() {
     const queue = priority.size ? priority : background;
     const entry = queue.values().next().value;
@@ -126,37 +140,50 @@ function f_createTokenIndex({
     reading = true;
     try {
       const text = await read(entry.file);
-      if (!disposed && entries.get(entry.path) === entry && entry.file.path === entry.path) {
-        f_finish(entry, looksBinary(text) ? null : f_estimateTokens(text), true);
-      }
+      if (!f_isCurrent(entry)) return;
+      const digest = await hash(text);
+      if (!f_isCurrent(entry)) return;
+      // A persisted count is only a candidate until the current text matches.
+      // This also catches offline edits preserving both size and timestamp.
+      const cached = entry.saved;
+      const tokens = cached?.digest === digest ? cached.tokens : looksBinary(text) ? null : await count(text);
+      if (!f_isCurrent(entry)) return;
+      if (tokens !== null && (!Number.isSafeInteger(tokens) || tokens < 0)) throw new Error("Invalid exact token count for " + entry.path);
+      entry.digest = digest;
+      entry.saved = null;
+      f_finish(entry, tokens, true);
     } catch (error) {
-      if (!disposed && entries.get(entry.path) === entry && entry.file.path === entry.path) {
+      if (f_isCurrent(entry)) {
         f_finish(entry, null, false);
         onError(error, entry.path);
       }
     } finally {
+      if (!disposed && entries.get(entry.path) === entry && !f_isCurrent(entry)) {
+        // Cover metadata changes observed before the adapter delivers its event.
+        f_drop(entry.path);
+        f_upsert(entry.file, true);
+      }
       reading = false;
       f_queueRead();
     }
   }
 
-  function f_upsert(file, isEvent = false, moved) {
+  function f_upsert(file, isEvent = false, moved, invalidate = false) {
     if (disposed || !file?.stat) return;
     const { path, stat: { mtime, size } } = file;
     if (isEvent) touched?.add(path);
     const eligible = !!isEligible(file);
     const current = entries.get(path);
-    if (current?.file === file && current.mtime === mtime && current.size === size
+    if (!invalidate && current?.file === file && current.mtime === mtime && current.size === size
       && current.eligible === eligible) return current;
+    const cached = moved?.cacheable ? moved : current?.cacheable ? current : persisted.get(path);
     f_drop(path);
-    const cached = moved?.cacheable ? moved : persisted.get(path);
     persisted.delete(path);
-    const useCache = eligible && cached && cached.mtime === mtime && cached.size === size;
-    if (cached && !useCache) f_scheduleSave();
-    const entry = { file, path, mtime, size, eligible, state: "pending", tokens: null, cacheable: false };
+    if (cached) f_scheduleSave();
+    const entry = { file, path, mtime, size, eligible, state: "pending", tokens: null, cacheable: false, saved: cached };
     entries.set(path, entry);
     f_adjust(entry, 1);
-    if (!eligible || useCache) f_finish(entry, useCache ? cached.tokens : null, !!useCache, !!moved?.cacheable);
+    if (!eligible) f_finish(entry, null, false, false);
     else {
       background.add(entry);
       f_queueRead();
@@ -167,12 +194,15 @@ function f_createTokenIndex({
 
   function f_remove(path) {
     touched?.add(path);
-    persisted.delete(path);
+    if (persisted.delete(path)) f_scheduleSave();
     const knownFile = entries.has(path);
     f_drop(path);
     if (knownFile) return;
     const prefix = path + "/";
     touched?.add(prefix);
+    for (const savedPath of persisted.keys()) {
+      if (savedPath.startsWith(prefix)) { persisted.delete(savedPath); f_scheduleSave(); }
+    }
     for (const current of entries.keys()) {
       if (current.startsWith(prefix)) {
         touched?.add(current);
@@ -223,6 +253,12 @@ function f_createTokenIndex({
   }
 
   return {
+    setFolderExclusions(rules) {
+      folderExclusions = rules;
+      folders.clear();
+      for (const entry of entries.values()) f_adjust(entry, 1);
+      f_notify();
+    },
     setEnabled(value) {
       if (enabled === value) return;
       enabled = value;
@@ -243,9 +279,12 @@ function f_createTokenIndex({
       if (!initialization) initialization = (async () => {
         try {
           const saved = await load?.();
-          if (saved?.version === ESTIMATOR_VERSION && saved.files && typeof saved.files === "object") {
+          if (disposed) return;
+          if (saved?.version === TOKEN_CACHE_VERSION && saved.tokenizer === TOKEN_CACHE_IDENTITY
+            && saved.files && typeof saved.files === "object") {
             persisted = new Map(Object.entries(saved.files).filter(([, entry]) =>
               Number.isFinite(entry?.mtime) && Number.isFinite(entry?.size)
+              && typeof entry.digest === "string" && /^[a-f0-9]{64}$/.test(entry.digest)
               && (entry.tokens === null || Number.isSafeInteger(entry.tokens) && entry.tokens >= 0)));
           }
         } catch (error) {
@@ -256,7 +295,7 @@ function f_createTokenIndex({
       return initialization;
     },
     sync: f_sync,
-    upsert(file) { f_upsert(file, true); },
+    upsert(file) { f_upsert(file, true, undefined, true); },
     remove: f_remove,
     rename(file, oldPath) {
       if (file.stat) {
@@ -312,4 +351,4 @@ function f_createTokenIndex({
   };
 }
 
-module.exports = { f_createTokenIndex, f_estimateTokens, TOKEN_ESTIMATE_DISCLOSURE };
+module.exports = { f_createTokenIndex };

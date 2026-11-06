@@ -141,6 +141,7 @@ test("open Reading badges and all editor panes react to count changes and settin
   const file = { path: "a/file.md", stat: { size: 4, mtime: 1 }, text: "1234" };
   let reads = 0;
   const index = f_createTokenIndex({
+    count: async text => Math.ceil(text.length / 4),
     enabled: false,
     getFiles: () => [file],
     read: async file => { reads++; return file.text; },
@@ -171,7 +172,7 @@ test("open Reading badges and all editor panes react to count changes and settin
     assert.deepEqual([fileBadge.hidden, folderBadge.hidden, reads], [true, true, 0]);
 
     async function f_waitForBadges(count) {
-      const expected = " (~" + count + ")";
+      const expected = " (" + count + ")";
       const deadline = Date.now() + 1000;
       while ((fileBadge.textContent !== expected || folderBadge.textContent !== expected) && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 10));
@@ -237,7 +238,7 @@ test("Reading badges recover when the repository map becomes ready and recheck m
   assert.equal(badge.textContent, " (unavailable)");
   plugin.repositories = [{ root: "a", identity: "owner/repo" }];
   plugin.f_repositoryIndexChanged();
-  assert.equal(badge.textContent, " (~3)");
+  assert.equal(badge.textContent, " (3)");
 
   exists = false;
   plugin._suggestVaultGen++;
@@ -251,7 +252,7 @@ test("Reading badges recover when the repository map becomes ready and recheck m
   exists = true;
   plugin._suggestVaultGen++;
   notify();
-  assert.equal(badge.textContent, " (~3)");
+  assert.equal(badge.textContent, " (3)");
   child.unload();
   assert.equal(notify, null);
 });
@@ -551,6 +552,7 @@ test("canonical linked copy and publishing collection trust destination and dedu
   plugin._linkedCountWatches = new Map();
   const { f_createTokenIndex } = require("../src/token-index");
   const index = f_createTokenIndex({
+    count: async text => Math.ceil(text.length / 4),
     getFiles: () => [target, second, localOnly],
     read: file => plugin.f_readLinkedFile(file),
     isEligible: file => plugin.f_eligibleLinkedFile(file),
@@ -562,6 +564,7 @@ test("canonical linked copy and publishing collection trust destination and dedu
   plugin.noteBarEl = {};
   plugin.linkedBarEl = {};
   plugin._statusBarGen = 0;
+  plugin._bufferTokenCounts = { update() {} };
   plugin._renderStatusBarSegments = () => {};
   plugin._renderLinkedPopover = () => {};
   await index.start();
@@ -574,6 +577,33 @@ test("canonical linked copy and publishing collection trust destination and dedu
   await plugin.copyNoteWithAtPaths();
   assert.equal(clipboard.split("ACTUAL FILE").length, 3);
   assert.match(clipboard, /## docs\/direct\.md\n\n```\n12345678/);
+
+  // Internal folders count independently and remain selectable alongside
+  // an outside ancestor, without leaking into that ancestor's copy expansion.
+  const archived = new TFile("checkout/docs/90_archive/old.md");
+  const archive = new TFolder("checkout/docs/90_archive", [archived]);
+  docs.children.push(archive);
+  files.set(archive.path, archive);
+  files.set(archived.path, archived);
+  plugin._folderCountExclusions = ["90_archive"];
+  index.setFolderExclusions(plugin._folderCountExclusions);
+  index.upsert(archived);
+  await index.request(archived);
+  assert.equal(plugin.f_folderTokenCount(docs.path), 6);
+  assert.equal(plugin.f_folderTokenCount(archive.path), 3);
+  note = "[parent](/docs/)";
+  await plugin.copyNoteWithAtPaths();
+  assert.doesNotMatch(clipboard, /## docs\/90_archive\/old\.md/);
+  for (const markdown of [
+    "[parent](/docs/) [archive](/docs/90_archive/) [old](/docs/90_archive/old.md)",
+    "[old](/docs/90_archive/old.md) [archive](/docs/90_archive/) [parent](/docs/)",
+  ]) {
+    note = markdown;
+    await plugin.updateStatusBar();
+    assert.equal(plugin._lastLinkedTotal, 9);
+    await plugin.copyNoteWithAtPaths();
+    assert.equal(clipboard.split("## docs/90_archive/old.md").length, 2);
+  }
 });
 
 test("repository rename rewrites local targets while preserving query, fragment and historical SHA", async () => {

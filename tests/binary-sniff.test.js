@@ -216,6 +216,7 @@ test("token index excludes sniffed binary from the numeric rendering cache", asy
   const file = { path: "looks-like-text.txt", stat: { mtime: 1, size: 5 } };
   const tokenCache = new Map();
   const index = f_createTokenIndex({
+    count: async text => Math.ceil(text.length / 4),
     getFiles: () => [file],
     read: async () => "ab" + NUL + "cd",
     isEligible: () => true,

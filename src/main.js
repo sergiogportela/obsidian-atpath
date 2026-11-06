@@ -4,7 +4,11 @@
 const { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
 const { Compartment, Prec } = require("@codemirror/state");
-const { f_createTokenIndex, f_estimateTokens, TOKEN_ESTIMATE_DISCLOSURE } = require("./token-index");
+const { f_createTokenIndex } = require("./token-index");
+const { TOKEN_COUNT_DISCLOSURE } = require("./token-contract");
+const { f_createTokenCounter } = require("./token-counter");
+const { f_createBufferTokenCounts } = require("./buffer-token-counts");
+const { DEFAULT_FOLDER_COUNT_EXCLUSIONS, f_parseFolderCountExclusions, f_isFolderCountBoundary, f_folderCountIncludes } = require("./folder-count-policy");
 const { f_installExplorerTokenBadges } = require("./explorer-token-badges");
 const { f_loadTokenCache, f_saveTokenCache } = require("./token-cache-storage");
 const { f_isEligibleLinkedPath } = require("./linked-file-policy");
@@ -182,9 +186,10 @@ async function copyToClipboard(text) {
 }
 
 function formatTokens(n) {
-  if (n < 1000) return "~" + n;
-  if (n < 10000) return "~" + (n / 1000).toFixed(1) + "k";
-  return "~" + Math.round(n / 1000) + "k";
+  if (n == null) return "…";
+  if (n < 1000) return String(n);
+  if (n < 10000) return (n / 1000).toFixed(1) + "k";
+  return Math.round(n / 1000) + "k";
 }
 
 // Unified renderer for a linked-target row's count cell. Handles the
@@ -203,10 +208,10 @@ function f_formatFolderTokenCount(value) {
     formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped });
 }
 
-function f_uniqueLinkedTokenTotal(targets) {
+function f_uniqueLinkedTokenTotal(targets, rules = []) {
   const folders = targets.filter(target => target.kind === "folder" && !target.overCap);
   return targets.reduce((total, target) => {
-    if (!target.localOnly && folders.some(folder => folder !== target && (folder.path === "/" || target.path.startsWith(folder.path + "/")))) return total;
+    if (!target.localOnly && folders.some(folder => folder !== target && f_folderCountIncludes(folder.path, target.path, rules, target.kind === "folder"))) return total;
     return total + (target.tokens || 0);
   }, 0);
 }
@@ -245,6 +250,7 @@ const DEFAULT_SETTINGS = {
   showTokenCounts: true,
   maxFileSizeMB: 5,
   maxFolderFiles: 500,
+  folderCountExclusions: DEFAULT_FOLDER_COUNT_EXCLUSIONS,
   statusBarShowSelection: true,
   suggestFolders: true,
   enableDragDropAtPath: true,
@@ -1080,60 +1086,8 @@ function buildWikilinkViewPlugin(plugin) {
 // ─── C3) CM6 update listener — live note + selection token counts ────
 
 function buildBufferCountListener(plugin) {
-  let pendingTimer = null;
-  let lastDoc = null;
-
-  function scheduleDocRetoken(view) {
-    if (pendingTimer) return;
-    ATPATH_PERF.inc("buffer.scheduleDocRetoken.scheduled");
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      try {
-        const text = view.state.doc.toString();
-        // Bucket doc size: <1KB, 1-5KB, 5-20KB, 20-100KB, 100KB+
-        const kb = text.length / 1024;
-        const bucket = kb < 1 ? "lt1k" : kb < 5 ? "1-5k" : kb < 20 ? "5-20k" : kb < 100 ? "20-100k" : "100k+";
-        ATPATH_PERF.inc("buffer.encode.docSize." + bucket);
-        plugin._noteBufferTokens = ATPATH_PERF.time("buffer.encode.doc", () => f_estimateTokens(text));
-      } catch (err) {
-        console.warn("[atpath] buffer token count failed", err);
-      }
-      plugin._repaintStatusBarFromBuffer();
-    }, 80);
-  }
-
-  function recomputeSelection(state) {
-    ATPATH_PERF.inc("buffer.recomputeSelection.calls");
-    let total = 0;
-    let nonEmpty = 0;
-    for (const r of state.selection.ranges) {
-      if (r.empty) continue;
-      nonEmpty++;
-      try {
-        total += ATPATH_PERF.time("buffer.encode.selection", () => f_estimateTokens(state.sliceDoc(r.from, r.to)));
-      } catch (err) {
-        console.warn("[atpath] selection token count failed", err);
-        return;
-      }
-    }
-    if (nonEmpty > 0) ATPATH_PERF.inc("buffer.recomputeSelection.nonEmpty");
-    plugin._selectionTokens = total;
-    plugin._repaintStatusBarFromBuffer();
-  }
-
-  return EditorView.updateListener.of((update) => {
-    ATPATH_PERF.inc("buffer.updateListener.calls");
-    if (update.docChanged) {
-      ATPATH_PERF.inc("buffer.updateListener.docChanged");
-      if (lastDoc !== update.state.doc) {
-        lastDoc = update.state.doc;
-        scheduleDocRetoken(update.view);
-      }
-    }
-    if (update.selectionSet) {
-      ATPATH_PERF.inc("buffer.updateListener.selectionSet");
-      recomputeSelection(update.state);
-    }
+  return EditorView.updateListener.of(update => {
+    if (update.docChanged || update.selectionSet) plugin.f_updateBufferTokenCounts();
   });
 }
 
@@ -1250,7 +1204,7 @@ class RepositoryTokenWidget extends WidgetType {
     const span = document.createElement("span");
     span.className = "atpath-token-count";
     span.textContent = " (" + this.count + ")";
-    span.title = TOKEN_ESTIMATE_DISCLOSURE + (this.skipped ? " " + this.skipped + " files skipped." : "");
+    span.title = TOKEN_COUNT_DISCLOSURE + (this.skipped ? " " + this.skipped + " files skipped." : "");
     return span;
   }
 }
@@ -1533,7 +1487,7 @@ class AtPathSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Show token counts")
-      .setDesc("Show estimates beside links and explorer rows and in the status bar. " + TOKEN_ESTIMATE_DISCLOSURE)
+      .setDesc("Show local counts beside links and explorer rows and in the status bar. " + TOKEN_COUNT_DISCLOSURE)
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.showTokenCounts).onChange(async (value) => {
           this.plugin.settings.showTokenCounts = value;
@@ -1569,6 +1523,20 @@ class AtPathSettingTab extends PluginSettingTab {
           }
         })
       );
+
+    new Setting(containerEl)
+      .setName("Exclude folders from parent totals")
+      .setDesc("One folder name or vault-relative path per line; no wildcards. These folders are left out of totals and copied content for folders above them. Direct links to the folder or its files still work. Leave empty to include all folders.")
+      .addTextArea(text => text
+        .setPlaceholder("90_archive\nproject/scratch")
+        .setValue(this.plugin.settings.folderCountExclusions)
+        .onChange(async value => {
+          try { f_parseFolderCountExclusions(value); }
+          catch (error) { new Notice(error.message); return; }
+          this.plugin.settings.folderCountExclusions = value;
+          await this.plugin.saveSettings();
+          this.plugin.onTokenSettingsChanged();
+        }));
 
     new Setting(containerEl)
       .setName("Show selection tokens in status bar")
@@ -2204,18 +2172,40 @@ class AtPathPlugin extends Plugin {
     this._unindexedProbes = new Map();
     this._linkedCountWatches = new Map();
     this._readingTokenRefreshes = new Set();
+    this._folderCountExclusions = f_parseFolderCountExclusions(this.settings.folderCountExclusions);
+    this._tokenCounter = f_createTokenCounter();
+    const f_reportCountError = error => {
+      if (this._countFailureShown) return;
+      this._countFailureShown = true;
+      console.warn("AtPath exact token counting", error);
+      new Notice("Exact token counting failed. Reload AtPath to retry. " + error.message, 0);
+    };
+    this._bufferTokenCounts = f_createBufferTokenCounts({
+      count: (text, options) => this._tokenCounter.count(text, options),
+      onChange: (note, selection) => {
+        this._noteBufferTokens = note;
+        this._selectionTokens = selection;
+        this._repaintStatusBarFromBuffer();
+      },
+      onError: f_reportCountError,
+    });
     const vault = this.app.vault;
     const vaultKey = this.app.appId || vault.adapter.getBasePath?.() || vault.getName();
     this._tokenIndex = f_createTokenIndex({
       enabled: this.settings.showTokenCounts,
       getFiles: () => [...vault.getFiles(), ...this._unindexedTargets.values()],
-      read: file => this.f_readLinkedFile(file),
+      read: file => file.localOnly ? this.f_readLinkedFile(file) : vault.read(file),
+      count: text => this._tokenCounter.count(text),
+      folderExclusions: this._folderCountExclusions,
       isEligible: file => this.f_eligibleLinkedFile(file),
       looksBinary,
       load: () => f_loadTokenCache(vaultKey),
       save: cache => f_saveTokenCache(vaultKey, cache),
       tokenCache: this.tokenCache,
-      onError: error => console.warn("AtPath count cache", error),
+      onError: (error, path) => {
+        if (path) f_reportCountError(error);
+        else console.warn("AtPath could not persist or load its device-local token cache", error);
+      },
     });
     this.register(this._tokenIndex.subscribe(() => {
       let changed = false;
@@ -2234,7 +2224,7 @@ class AtPathPlugin extends Plugin {
       if (this._repositoryIndexClosed) return;
       this._explorerTokenBadges = f_installExplorerTokenBadges({
         workspace: this.app.workspace, index: this._tokenIndex,
-        formatTokens: tokens => formatTokens(tokens).slice(1),
+        formatTokens,
         isEnabled: () => this.settings.showTokenCounts,
       });
       if (this.settings.showTokenCounts) {
@@ -2244,6 +2234,8 @@ class AtPathPlugin extends Plugin {
     this.register(() => {
       this._explorerTokenBadges?.dispose();
       void this._tokenIndex.dispose();
+      this._bufferTokenCounts.dispose();
+      this._tokenCounter.dispose();
       this._readingTokenRefreshes.clear();
       clearTimeout(this._refreshTimer);
       clearTimeout(this._statusBarTimeout);
@@ -2345,7 +2337,7 @@ class AtPathPlugin extends Plugin {
       this._wireLinkedPopoverEvents();
 
       // Buffer-aware live counts (selection + active doc) — step 5.
-      this._noteBufferTokens = 0;
+      this._noteBufferTokens = null;
       this._selectionTokens = 0;
 
       this.updateStatusBar();
@@ -2428,7 +2420,7 @@ class AtPathPlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", () => {
         this._linkedCountWatches.clear();
         this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
-        this._noteBufferTokens = 0;
+        this._noteBufferTokens = null;
         this._selectionTokens = 0;
         this.updateStatusBar();
       })
@@ -2436,7 +2428,7 @@ class AtPathPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("file-open", file => {
         if (file?.extension === "md") void this.f_discoverOpenedSource(file.path);
-        this._noteBufferTokens = 0;
+        this._noteBufferTokens = null;
         this._selectionTokens = 0;
         if (this.core) this.core.clearFolderTokenMemo();
         this.updateStatusBar();
@@ -2547,6 +2539,14 @@ class AtPathPlugin extends Plugin {
     return file && (file instanceof TFile || file.localOnly) ? this._tokenIndex.request(file) : null;
   }
 
+  f_updateBufferTokenCounts(view = this.app.workspace.getActiveViewOfType(MarkdownView), content) {
+    if (!this.settings.showTokenCounts || !view) return;
+    const state = view.editor.cm?.state;
+    const selections = state ? state.selection.ranges.filter(range => !range.empty)
+      .map(range => state.sliceDoc(range.from, range.to)) : [view.editor.getSelection?.() || ""].filter(Boolean);
+    this._bufferTokenCounts.update(content ?? view.editor.getValue(), selections);
+  }
+
   f_folderTokenCount(path) {
     this.f_watchLinkedCount(path, true);
     const total = this._tokenIndex.get(path, true);
@@ -2576,7 +2576,7 @@ class AtPathPlugin extends Plugin {
       if (hidden) return;
       const { kind, normalizedPath: path } = target;
       let text = "";
-      let title = TOKEN_ESTIMATE_DISCLOSURE;
+      let title = TOKEN_COUNT_DISCLOSURE;
       if (kind === "missing") {
         text = " (unavailable)";
         if (navigation && target.status === "missing" && target.vaultPath && probedPath !== target.vaultPath) {
@@ -2655,6 +2655,7 @@ class AtPathPlugin extends Plugin {
     const _usbT0 = ATPATH_PERF.enabled ? performance.now() : 0;
     if (!this.noteBarEl || !this.linkedBarEl) return; // mobile or pre-init
 
+    const gen = ++this._statusBarGen;
     const clearBars = () => {
       this.noteBarEl.empty();
       this.noteBarEl.removeAttribute("aria-label");
@@ -2671,8 +2672,6 @@ class AtPathPlugin extends Plugin {
       return;
     }
 
-    const gen = ++this._statusBarGen;
-
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!mdView) { clearBars(); return; }
 
@@ -2681,14 +2680,7 @@ class AtPathPlugin extends Plugin {
 
     const content = mdView.editor.getValue();
 
-    // Note tokens — prefer the live buffer count (step 5 maintains it).
-    // Fallback to encoding here if the listener hasn't ticked yet.
-    let noteTokens = this._noteBufferTokens;
-    if (!noteTokens) {
-      ATPATH_PERF.inc("updateStatusBar.encodeFallback");
-      noteTokens = ATPATH_PERF.time("updateStatusBar.encodeFallback.encode", () => f_estimateTokens(content));
-      this._noteBufferTokens = noteTokens;
-    }
+    this.f_updateBufferTokenCounts(mdView, content);
 
     // Linked tokens — file + folder refs, deduped by normalized path.
     const refs = ATPATH_PERF.time("updateStatusBar.scanAtPathRefs", () => this.f_scanLinkedRefs(content, activeFile.path));
@@ -2742,13 +2734,13 @@ class AtPathPlugin extends Plugin {
       }
     }
 
-    linkedTotal = f_uniqueLinkedTokenTotal(linkedTargets);
+    linkedTotal = f_uniqueLinkedTokenTotal(linkedTargets, this._folderCountExclusions);
     this._linkedTargets = linkedTargets;
     this._lastLinkedTotal = linkedTotal;
     this._linkedPartial = pendingOrOverCap;
     this._linkedSig = linkedTargets.map((t) => t.kind + ":" + t.path).sort().join("|");
 
-    this._renderStatusBarSegments(noteTokens, linkedTotal, linkedTargets.length, pendingOrOverCap);
+    this._renderStatusBarSegments(this._noteBufferTokens, linkedTotal, linkedTargets.length, pendingOrOverCap);
     this._renderLinkedPopover();
     if (ATPATH_PERF.enabled) {
       ATPATH_PERF.record("updateStatusBar.totalMs", performance.now() - _usbT0);
@@ -2758,9 +2750,10 @@ class AtPathPlugin extends Plugin {
   _repaintStatusBarFromBuffer() {
     if (!this.noteBarEl || !this.linkedBarEl) return;
     if (!this.settings.showTokenCounts) return;
+    if (!this.app.workspace.getActiveViewOfType(MarkdownView)) return;
     const linkedCount = (this._linkedTargets || []).length;
     this._renderStatusBarSegments(
-      this._noteBufferTokens || 0,
+      this._noteBufferTokens,
       this._lastLinkedTotal || 0,
       linkedCount,
       !!this._linkedPartial
@@ -2773,20 +2766,20 @@ class AtPathPlugin extends Plugin {
     this.noteBarEl.empty();
     const noteLabel = this.noteBarEl.createSpan({ cls: "atpath-label" });
     const noteValue = this.noteBarEl.createSpan({ cls: "atpath-value" });
-    const sel = this._selectionTokens || 0;
-    if (sel > 0 && this.settings.statusBarShowSelection !== false) {
+    const sel = this._selectionTokens;
+    if ((sel == null || sel > 0) && this.settings.statusBarShowSelection !== false) {
       this.noteBarEl.addClass("atpath-status-has-selection");
       noteLabel.setText("Sel");
       noteValue.setText(formatTokens(sel) + " / " + formatTokens(noteTokens));
       this.noteBarEl.setAttribute(
         "aria-label",
-        "Selection: " + formatTokens(sel) + "\nNote: " + formatTokens(noteTokens)
+        "Selection: " + (sel ?? "pending") + "\nNote: " + (noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE
       );
     } else {
       this.noteBarEl.removeClass("atpath-status-has-selection");
       noteLabel.setText("Note");
       noteValue.setText(formatTokens(noteTokens));
-      this.noteBarEl.setAttribute("aria-label", "Note: " + formatTokens(noteTokens));
+      this.noteBarEl.setAttribute("aria-label", "Note: " + (noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE);
     }
 
     if (linkedCount === 0) {
@@ -2801,7 +2794,7 @@ class AtPathPlugin extends Plugin {
     this._linkedCountEl.setText("(" + linkedCount + ")");
     this.linkedBarEl.setAttribute(
       "aria-label",
-      "Links (" + linkedCount + "): " + formatTokens(linkedTotal) + suffix +
+      "Links (" + linkedCount + "): " + linkedTotal.toLocaleString() + suffix + "\n" + TOKEN_COUNT_DISCLOSURE +
         (partial ? " — some targets still counting or skipped" : "")
     );
   }
@@ -3094,7 +3087,7 @@ class AtPathPlugin extends Plugin {
     if (!this._popoverSelectedEl) return;
     const targets = this._linkedTargets || [];
     const selected = targets.filter(target => !target.pending && !target.overCap && this._popoverCheckedPaths.has(target.path));
-    const total = f_uniqueLinkedTokenTotal(selected);
+    const total = f_uniqueLinkedTokenTotal(selected, this._folderCountExclusions);
     const count = selected.length;
     const selectableCount = targets.filter(t => t.kind !== "missing" && !t.pending && !t.overCap).length;
     this._popoverSelectedEl.setText(
@@ -3170,6 +3163,7 @@ class AtPathPlugin extends Plugin {
         while (pending.length && files.length <= maxFiles) {
           const item = pending.pop();
           if (item instanceof TFolder) {
+            if (item !== result.target && f_isFolderCountBoundary(item.path, this._folderCountExclusions ?? [])) continue;
             for (let index = item.children.length - 1; index >= 0; index--) pending.push(item.children[index]);
           } else if (item instanceof TFile) {
             if (this.f_eligibleLinkedFile(item)) files.push(item);
@@ -3188,8 +3182,7 @@ class AtPathPlugin extends Plugin {
           if (block) folderBlocks.push(block);
         }
         if (folderBlocks.length) {
-          const total = folderBlocks.reduce((sum, block) => sum + f_estimateTokens(block.text), 0);
-          blocks.push({ heading: "--- " + label + " (" + folderBlocks.length + " files, " + formatTokens(total) + " tokens) ---" });
+          blocks.push({ heading: "--- " + label + " (" + folderBlocks.length + " files) ---" });
           blocks.push(...folderBlocks);
         }
       }
@@ -4280,6 +4273,9 @@ class AtPathPlugin extends Plugin {
 
   onTokenSettingsChanged() {
     const enabled = this.settings.showTokenCounts;
+    this._folderCountExclusions = f_parseFolderCountExclusions(this.settings.folderCountExclusions);
+    this._tokenIndex.setFolderExclusions(this._folderCountExclusions);
+    this.core?.clearFolderTokenMemo();
     this._tokenIndex.setEnabled(enabled);
     if (enabled) {
       void this._tokenIndex.start().then(() => {
