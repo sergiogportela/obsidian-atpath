@@ -10,6 +10,7 @@ const { f_createTokenCounter } = require("./token-counter");
 const { f_createBufferTokenCounts } = require("./buffer-token-counts");
 const { DEFAULT_FOLDER_COUNT_EXCLUSIONS, f_parseFolderCountExclusions, f_isFolderCountBoundary, f_folderCountIncludes } = require("./folder-count-policy");
 const { f_installExplorerTokenBadges } = require("./explorer-token-badges");
+const { f_installExplorerSymlinkShortcuts } = require("./explorer-symlink-shortcuts");
 const { f_loadTokenCache, f_saveTokenCache } = require("./token-cache-storage");
 const { f_isEligibleLinkedPath } = require("./linked-file-policy");
 
@@ -424,7 +425,7 @@ function openInDefaultApp(plugin, vaultPath) {
   require("electron").shell.openPath(absolutePath);
 }
 
-function showAtPathMenu(plugin, event, vaultPath, result) {
+function showAtPathMenu(plugin, event, vaultPath, result, openTarget) {
   result ??= { kind: "file", normalizedPath: vaultPath, target: plugin.app.vault.getAbstractFileByPath(vaultPath) };
   if (!result.target) return;
   const menu = new Menu();
@@ -436,7 +437,7 @@ function showAtPathMenu(plugin, event, vaultPath, result) {
       ...(!Platform.isMobile ? [["Open in new window", "picture-in-picture-2", "window"]] : []),
     ]) {
       menu.addItem(item => item.setTitle(title).setIcon(icon).onClick(() =>
-        plugin.f_openRepositoryTarget(result, pane)
+        (openTarget ? openTarget(pane) : plugin.f_openRepositoryTarget(result, pane))
           .catch(error => new Notice("Could not open link: " + error.message))));
     }
     menu.addSeparator();
@@ -2279,6 +2280,21 @@ class AtPathPlugin extends Plugin {
     }));
     this.app.workspace.onLayoutReady(() => {
       if (this._repositoryIndexClosed) return;
+      if (!Platform.isMobile) {
+        this._explorerSymlinkShortcuts = f_installExplorerSymlinkShortcuts({
+          app: this.app, setIcon,
+          open: (target, pane) => this.f_openRepositoryTarget({ kind: "file", target }, pane),
+          menu: (event, alias, openTarget) => {
+            const target = vault.getAbstractFileByPath(alias.targetPath);
+            if (!target) { new Notice("Shortcut target is no longer available: " + alias.path); return; }
+            showAtPathMenu(this, event, alias.path, { kind: "file", target }, openTarget);
+          },
+          onError: (error, fromAction) => {
+            console.warn("AtPath file shortcut unavailable", error);
+            if (fromAction) new Notice(error.message);
+          },
+        });
+      }
       this._explorerTokenBadges = f_installExplorerTokenBadges({
         workspace: this.app.workspace, index: this._tokenIndex,
         formatTokens,
@@ -2290,6 +2306,7 @@ class AtPathPlugin extends Plugin {
     });
     this.register(() => {
       this._explorerTokenBadges?.dispose();
+      this._explorerSymlinkShortcuts?.dispose();
       void this._tokenIndex.dispose();
       this._bufferTokenCounts.dispose();
       this._tokenCounter.dispose();

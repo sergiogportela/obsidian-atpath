@@ -286,3 +286,20 @@ a.internal-link.atpath-link[data-tokens]::after {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+.atpath-symlink-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-inline-end: 5px;
+  color: var(--text-muted);
+}
+
+.atpath-symlink-icon .svg-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.atpath-symlink-shortcut:focus-visible {
+  outline: 1px solid var(--interactive-accent);
+  outline-offset: -1px;
+}

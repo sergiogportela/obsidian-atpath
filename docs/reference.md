@@ -30,6 +30,14 @@ File/folder moves through Obsidian update links, including notes moved between r
 
 Queued moves, chained moves, swaps and legacy repair share one chronological vault pass. Each note is parsed once unless it changes before the atomic update; concurrent edits are preserved. Failed notes do not stop others, and a persistent notice identifies incomplete updates. Only destinations change: labels, titles, reference definitions, autolink syntax and non-main refs are preserved.
 
+## File-symlink shortcuts
+
+On desktop, AtPath shows file symlinks in the explorer as arrow-marked shortcuts when their resolved targets are already indexed inside the vault. Hover to see the alias and full target path. Click, Enter or Space opens the original file; Ctrl/Cmd-click and the context menu offer other opening modes. Explorer search matches the alias name. Dragging a shortcut references its original target. Rename/delete selection is disabled for these shortcut rows; manage the symlink itself in your filesystem tools.
+
+Shortcuts are virtual explorer items, never extra vault files or metadata entries. Their badges reuse the target's count; ancestor totals do not count the alias again. Directory symlinks, broken/cyclic links, outside-vault targets and targets excluded from Obsidian's index do not get virtual shortcut rows. Native files that Obsidian already indexes are left to Obsidian.
+
+The adapter checks the root and visible folders every three seconds and after explorer changes, reading directory metadata rather than file contents. Retargeting is resolved again when opening a shortcut. Nested shortcuts appear when their folder is expanded. Explorer virtualization, sorting, row identities and search use guarded internal APIs; disabling/reloading AtPath restores native behavior. This is a desktop display feature; it does not add symlink support to mobile or Sync.
+
 ## Counts, cache and exclusions
 
 Counts use pinned `gpt-tokenizer 4.1.0`, **o200k_base ordinary text**, in a lazy local browser worker with a bounded 10,000-piece merge cache. They describe decoded text, not an exact Claude count or a full model request with messages, tools, instructions and history. Folder/linked totals sum individual file counts and deduplicate overlapping references; clipboard headings, fences and text boundaries are not included. Compact `k` labels are rounded; explorer/status tooltips show full counts. Explorer badges use faint text at 75% opacity.
@@ -76,6 +84,6 @@ Enable **Require login to view** and configure Clerk plus approved emails for pr
 
 **Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, and **Drag-and-drop repository links** default on. Turning off drag/drop restores Obsidian's normal drag behavior. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
 
-Automated coverage includes 188 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
+Automated coverage includes 191 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
 
 Registered drag/drop tests and six injected DOM drop cases pass. Physical drag/drop was not established by automation, which failed to deliver the drop event. Mobile/Sync and live publication need their respective environments. Historical implementation and review documents remain available in Git history before this documentation cleanup.

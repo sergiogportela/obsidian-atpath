@@ -30,6 +30,8 @@ Files in the note's repository rank first. Dragging files or folders from the ex
 
 Click a link to open its **current local file**, even when the GitHub URL says `main` and your checkout is on another branch. Folder links reveal the folder. Right-click for **new tab**, **right split**, **new window**, **reveal**, **copy path**, or **open in default app**; desktop-only actions appear on desktop.
 
+**File symlinks on desktop** appear as arrow-marked shortcuts, such as `CLAUDE.md → AGENTS.md`. They open the original indexed file and share its count without adding duplicate tokens to folder totals.
+
 Backlinks and graph use the resolved local targets. Moves made through Obsidian update references. Existing `@path` links still work; your notes are not automatically converted.
 
 ## See and control token counts
