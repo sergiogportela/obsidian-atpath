@@ -16,21 +16,14 @@
 - `styles.css` — plugin styles
 - `STATUS.md` — living snapshot of shipped plans, environment, open follow-ups. Update on every plan ship or research land.
 - `tests/` — unit tests (Node `node --test`)
-- `_work_units/` — plans, reviews, research (see below)
+- `docs/reference.md` — detailed behavior, limits and compatibility
 - `.github/workflows/release.yml` — automated release workflow
 
 `CLAUDE.md` is a **symlink** to this file. Edit `AGENTS.md` only — the symlink keeps Codex and Claude Code on the same instructions.
 
-### `_work_units/` layout
-
-- `improvements/plans/` — implementation plans (`00N_*.md`).
-- `improvements/prompts/` — prompt/feedback docs that seed plans.
-- `0_llm/research/` — LLM-driven research notes.
-- `0_llm/reviews/` — codex review prompts and outputs.
-
 ### STATUS.md contract
 
-Single repo-root status file. First line: `Updated at YYYY-MM-DD HH:MM` local time. Factual snapshot only — current reality from WU docs, Git, source files, and explicit user requirements. ~30 lines max; link out instead of expanding. Start with 1-3 sentences describing current state. List open work only when it comes from active plans/docs/user requests — never add recommended next steps, priorities, or strategy. Verify carried-forward claims before keeping them; drop closed detail to linked plans/findings/commits.
+Single repo-root status file. First line: `Updated at YYYY-MM-DD HH:MM` local time. Factual snapshot only — current reality from Git, source files, documentation, and explicit user requirements. ~30 lines max; link out instead of expanding. Start with 1-3 sentences describing current state. List open work only when it comes from active plans/docs/user requests — never add recommended next steps, priorities, or strategy. Verify carried-forward claims before keeping them; drop closed detail to linked plans/findings/commits.
 
 ## Building
 
@@ -89,7 +82,7 @@ For UI/runtime issues, use the **official Obsidian CLI** (shipped Feb 2026, in 1
 2. **DIY in-plugin logger** — dev-build-flag gated, derive paths from `this.app.vault.configDir` (never hardcode `.obsidian`), don't ship console monkey-patching to reviewers.
 3. `--remote-debugging-port=9222` + CDP via Playwright `chromium.connectOverCDP` — version-agnostic; requires relaunching Obsidian with the flag.
 
-Full rationale: `_work_units/0_llm/research/2026-05-15_obsidian_log_and_cli_access.md`. **No full E2E framework** (e.g. `wdio-obsidian-service`) — unit tests + CLI loop covers ~80% of bug surface at a fraction of the maintenance cost; revisit only if manual regressions become recurrent.
+Historical diagnosis research is available in Git history before the documentation cleanup. **No full E2E framework** (e.g. `wdio-obsidian-service`) — unit tests + CLI loop covers ~80% of bug surface at a fraction of the maintenance cost; revisit only if manual regressions become recurrent.
 
 ## Releasing a new version
 
@@ -112,7 +105,7 @@ Full rationale: `_work_units/0_llm/research/2026-05-15_obsidian_log_and_cli_acce
 
 ## Obsidian Community Plugin compliance
 
-This plugin is listed in the Obsidian Community Plugin directory (`id: atpath`); manual review by Obsidian staff is still pending.
+As of 2026-11-06, `atpath` is absent from the [official community plugin directory](https://github.com/obsidianmd/obsidian-releases/blob/master/community-plugins.json). Do not document Community Plugins browsing as an install route until the entry is present.
 All code changes **must** follow these rules to pass the automated review bot and human review.
 
 See `COMMUNITY_PLUGINS.md` for the full reference. Key rules summarized here:
