@@ -34,12 +34,17 @@ function f_createBufferTokenCounts({ count, onChange, onError, delay = 80 }) {
   }
 
   return {
-    invalidate(documentChanged) {
+    invalidate(documentChanged, hasSelection = true) {
       for (const part of documentChanged ? [doc, selection] : [selection]) {
         part.generation++;
         clearTimeout(part.timer);
         part.texts = null;
         part.tokens = null;
+      }
+      // Empty ranges are known immediately; they need no tokenizer job.
+      if (!hasSelection) {
+        selection.texts = [];
+        selection.tokens = 0;
       }
       onChange(doc.tokens, selection.tokens);
     },

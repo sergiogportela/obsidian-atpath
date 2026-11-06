@@ -15,9 +15,9 @@ function f_describeTokenBadge(snapshot, formatTokens) {
   if (counted) notes.push(TOKEN_COUNT_DISCLOSURE.replace(/\.$/, ""));
   if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
   if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
-  if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete");
+  if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete. Reload AtPath to retry");
   return {
-    text: (!counted && pending ? "…" : !counted && failed ? "" : !counted && skipped ? "—"
+    text: (!counted && pending ? "…" : !counted && skipped ? "—" : !counted && failed ? ""
       : formatTokens(tokens) + (pending ? " …" : skipped ? " *" : "")) + (failed ? (counted || pending || skipped ? " !" : "!") : ""),
     title: notes.join(". "),
   };

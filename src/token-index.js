@@ -166,7 +166,7 @@ function f_createTokenIndex({
       if (!disposed && entries.get(entry.path) === entry && !f_isCurrent(entry)) {
         // Cover metadata changes observed before the adapter delivers its event.
         f_drop(entry.path);
-        f_upsert(entry.file, true);
+        f_upsert(entry.file, true, entry);
       }
       reading = false;
       f_queueRead();

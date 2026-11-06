@@ -117,6 +117,36 @@ test("editor invalidation discards earlier jobs before debounced text reads, and
   counter.dispose();
 });
 
+test("empty cursor ranges stay at zero and cleared selections cannot publish late counts", async t => {
+  const jobs = [];
+  const values = [];
+  const buffer = f_createBufferTokenCounts({ delay: 0,
+    count: text => new Promise(resolve => jobs.push({ text, resolve })),
+    onChange: (note, selection) => values.push([note, selection]), onError: error => { throw error; } });
+  t.after(() => buffer.dispose());
+  const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+  buffer.update("note");
+  await tick();
+  jobs[0].resolve(5);
+  await tick();
+  buffer.invalidate(false, false);
+  assert.deepEqual(values.at(-1), [5, 0]);
+  buffer.update("note", ["selection"]);
+  await tick();
+  buffer.invalidate(false, false);
+  jobs[1].resolve(999);
+  await tick();
+  assert.deepEqual(values.at(-1), [5, 0]);
+  buffer.invalidate(true, false);
+  assert.deepEqual(values.at(-1), [null, 0]);
+  buffer.update("edited");
+  await tick();
+  jobs[2].resolve(6);
+  await tick();
+  assert.deepEqual(values.at(-1), [6, 0]);
+  assert.ok(!values.some(([, selection]) => selection === 999));
+});
+
 test("editor count generations discard stale results, cache zero and count selections separately", async t => {
   const jobs = [];
   const outputs = [];

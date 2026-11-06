@@ -1,6 +1,6 @@
-Updated at 2026-11-05 21:43
+Updated at 2026-11-05 21:52
 
-Repository-link migration is installed as an unreleased 1.9.0 in Sergio's `colm-workspace` Obsidian 1.15.0 vault, following explicit installation and desktop-test authorization. Code remains on `codex/repository-link-migration`; `main` is unchanged. All 185 Node tests pass. Claude found no cache-correctness blocker; failure handling and configuration findings were addressed and retested. A follow-up review is pending. Two independent Claude reviews are complete; accepted findings and the subsequent code-principles review fixes are addressed. No tag, release, deployment or Sync upload occurred.
+Repository-link migration is installed as an unreleased 1.9.0 in Sergio's `colm-workspace` Obsidian 1.15.0 vault, following explicit installation and desktop-test authorization. Code remains on `codex/repository-link-migration`; `main` is unchanged. All 186 Node tests pass. Two exact-token Claude reviews found no cache-correctness blocker. Accepted findings, including empty-selection status flicker and a remaining warm-cache reuse path, are fixed and retested. The earlier migration reviews and code-principles fixes are also addressed. No tag, release, deployment or Sync upload occurred.
 
 ## Implemented
 
@@ -24,6 +24,6 @@ Repository-link migration is installed as an unreleased 1.9.0 in Sergio's `colm-
 ## Acceptance remaining
 
 - Real-device mobile and Sync acceptance require that environment; desktop is not equivalent evidence. OS-level drag/drop still needs a manual check. Live publication was not exercised.
-- Keep migration changes off `main` until authorized. The merged AgentKit checkout passes 124 focused tests, approved parser dependencies are installed, and its task worktree was removed. Exact-token implementation is installed on the task branch; a follow-up Claude review is pending. Real-device mobile remains untested.
+- Keep migration changes off `main` until authorized. The merged AgentKit checkout passes 124 focused tests, approved parser dependencies are installed, and its task worktree was removed. Exact-token implementation is installed on the task branch; final review corrections pass automated tests and actual keyboard/settings checks. Real-device mobile remains untested.
 
 Prior released state and shelved explorer implementation are documented in Git history at `d636fe5`. Legacy references remain readable; the migration preview makes no automatic vault-wide changes. See [README.md](/README.md) for the new contract and limitations.

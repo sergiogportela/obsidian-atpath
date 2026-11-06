@@ -1095,7 +1095,7 @@ function buildBufferCountListener(plugin) {
     if (plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.cm !== update.view) return;
     clearTimeout(plugin._bufferReadTimer);
     plugin._bufferReadTimer = setTimeout(() => plugin.f_updateBufferTokenCounts(), 80);
-    plugin._bufferTokenCounts.invalidate(update.docChanged);
+    plugin._bufferTokenCounts.invalidate(update.docChanged, update.state.selection.ranges.some(range => !range.empty));
   });
 }
 
@@ -1552,6 +1552,7 @@ class AtPathSettingTab extends PluginSettingTab {
           this.plugin.settings.folderCountExclusions = value;
           await this.plugin.saveSettings();
           this.plugin.onTokenSettingsChanged();
+          new Notice("Folder exclusions applied.");
         }));
 
     new Setting(containerEl)
@@ -2827,7 +2828,7 @@ class AtPathPlugin extends Plugin {
     this.linkedBarEl.setAttribute(
       "aria-label",
       "Links (" + linkedCount + "): " + linkedTotal.toLocaleString() + suffix + "\n" + TOKEN_COUNT_DISCLOSURE +
-        (partial ? " — some targets still counting or skipped" : "")
+        (partial ? " — some targets still counting, skipped, failed or over the folder limit" : "")
     );
   }
 

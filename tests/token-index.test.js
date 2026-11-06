@@ -243,6 +243,9 @@ test("explorer degrades when the native workspace shape is absent", () => {
   assert.equal(f_describeTokenBadge(null, String).text, "…");
   assert.equal(f_describeTokenBadge({ tokens: 0, counted: 0, pending: 0, skipped: 1 }, String).text, "—");
   assert.equal(f_installExplorerTokenBadges({ workspace: {}, index: {}, formatTokens: String }), null);
+  const failed = f_describeTokenBadge({ tokens: 0, counted: 0, pending: 0, skipped: 1, failed: 1 }, String);
+  assert.equal(failed.text, "— !");
+  assert.match(failed.title, /Reload AtPath to retry/);
 });
 
 test("warm cache verifies content and detects offline and live edits with identical metadata", async () => {
@@ -437,8 +440,8 @@ test("read and tokenizer errors are distinct failed entries and leave other file
   await index.dispose();
 });
 
-test("touches and renames retain saved candidates while verification is in flight", async () => {
-  for (const operation of ["modify", "rename"]) {
+test("touches, renames and stat changes retain saved candidates while verification is in flight", async () => {
+  for (const operation of ["modify", "rename", "stat"]) {
     const file = f_file("note.md", "aaaa");
     let saved;
     let encodes = 0;
@@ -450,6 +453,7 @@ test("touches and renames retain saved candidates while verification is in fligh
       read: async () => { if (first) { first = false; started.resolve(); return release.promise; } return file.text; } });
     await warm.start();const old = warm.request(file);await started.promise;
     if (operation === "modify") warm.upsert(file);
+    else if (operation === "stat") file.stat.mtime++;
     else { file.path = "renamed.md"; warm.rename(file, "note.md"); }
     release.resolve(file.text);assert.equal(await old, null);
     assert.equal(await warm.request(file), 1);assert.equal(encodes, 1);

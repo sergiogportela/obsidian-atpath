@@ -366,7 +366,7 @@ var require_token_index = __commonJS({
         } finally {
           if (!disposed && entries.get(entry.path) === entry && !f_isCurrent(entry)) {
             f_drop(entry.path);
-            f_upsert(entry.file, true);
+            f_upsert(entry.file, true, entry);
           }
           reading = false;
           f_queueRead();
@@ -693,12 +693,16 @@ var require_buffer_token_counts = __commonJS({
         }, delay);
       }
       return {
-        invalidate(documentChanged) {
+        invalidate(documentChanged, hasSelection = true) {
           for (const part of documentChanged ? [doc, selection] : [selection]) {
             part.generation++;
             clearTimeout(part.timer);
             part.texts = null;
             part.tokens = null;
+          }
+          if (!hasSelection) {
+            selection.texts = [];
+            selection.tokens = 0;
           }
           onChange(doc.tokens, selection.tokens);
         },
@@ -736,9 +740,9 @@ var require_explorer_token_badges = __commonJS({
       if (counted) notes.push(TOKEN_COUNT_DISCLOSURE2.replace(/\.$/, ""));
       if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
       if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
-      if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete");
+      if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete. Reload AtPath to retry");
       return {
-        text: (!counted && pending ? "\u2026" : !counted && failed ? "" : !counted && skipped ? "\u2014" : formatTokens2(tokens) + (pending ? " \u2026" : skipped ? " *" : "")) + (failed ? counted || pending || skipped ? " !" : "!" : ""),
+        text: (!counted && pending ? "\u2026" : !counted && skipped ? "\u2014" : !counted && failed ? "" : formatTokens2(tokens) + (pending ? " \u2026" : skipped ? " *" : "")) + (failed ? counted || pending || skipped ? " !" : "!" : ""),
         title: notes.join(". ")
       };
     }
@@ -9494,7 +9498,7 @@ function buildBufferCountListener(plugin) {
     if (plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.cm !== update.view) return;
     clearTimeout(plugin._bufferReadTimer);
     plugin._bufferReadTimer = setTimeout(() => plugin.f_updateBufferTokenCounts(), 80);
-    plugin._bufferTokenCounts.invalidate(update.docChanged);
+    plugin._bufferTokenCounts.invalidate(update.docChanged, update.state.selection.ranges.some((range) => !range.empty));
   });
 }
 function extractDraggedVaultPaths(dataTransfer, plugin, sourcePath) {
@@ -9894,6 +9898,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
       this.plugin.settings.folderCountExclusions = value;
       await this.plugin.saveSettings();
       this.plugin.onTokenSettingsChanged();
+      new Notice("Folder exclusions applied.");
     }));
     new Setting(containerEl).setName("Show selection tokens in status bar").setDesc("When you select text, the note segment shows `Sel: <selected> / <total>`. Disable to always show the note total only.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.statusBarShowSelection !== false).onChange(async (value) => {
@@ -10936,7 +10941,7 @@ var AtPathPlugin = class extends Plugin {
     this._linkedCountEl.setText("(" + linkedCount + ")");
     this.linkedBarEl.setAttribute(
       "aria-label",
-      "Links (" + linkedCount + "): " + linkedTotal.toLocaleString() + suffix + "\n" + TOKEN_COUNT_DISCLOSURE + (partial ? " \u2014 some targets still counting or skipped" : "")
+      "Links (" + linkedCount + "): " + linkedTotal.toLocaleString() + suffix + "\n" + TOKEN_COUNT_DISCLOSURE + (partial ? " \u2014 some targets still counting, skipped, failed or over the folder limit" : "")
     );
   }
   _hideLinkedSegment() {
