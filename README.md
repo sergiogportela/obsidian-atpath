@@ -51,7 +51,7 @@ Click a repository link in Live Preview or Reading mode to open the local file, 
 
 ### Token Counts
 
-Exact **o200k_base text-token** counts appear beside links, visible File Explorer rows, and in the desktop status bar. A lazy background worker uses pinned `gpt-tokenizer 4.1.0` with a bounded 10,000-piece merge cache. Counting stays local. Pending counts show `…`; partial folder totals and skipped files remain identified. Compact `k` labels are rounded for display; explorer/status tooltips show the full count. Explorer counts use faint text at 50% opacity.
+Exact **o200k_base text-token** counts appear beside links, visible File Explorer rows, and in the desktop status bar. A lazy background worker uses pinned `gpt-tokenizer 4.1.0` with a bounded 10,000-piece merge cache. Counting stays local. Pending counts show `…`; partial folder totals and skipped files remain identified. Compact `k` labels are rounded for display; explorer/status tooltips show the full count. Explorer counts use faint text at 75% opacity.
 
 A count describes the decoded text using this specific encoding. It is not an exact Claude count or a complete model request: message formatting, tools, instructions and history add tokens. Folder and linked totals sum individual file counts, with overlapping references deduplicated. They do not claim to count the assembled clipboard text, whose headings, fences and boundaries differ.
 
