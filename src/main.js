@@ -187,6 +187,7 @@ async function copyToClipboard(text) {
 
 function formatTokens(n) {
   if (n == null) return "…";
+  if (Number.isNaN(n)) return "!";
   if (n < 1000) return String(n);
   if (n < 10000) return (n / 1000).toFixed(1) + "k";
   return Math.round(n / 1000) + "k";
@@ -198,14 +199,15 @@ function formatTokens(n) {
 function formatLinkedTargetCount(t) {
   if (!t) return "0";
   if (t.kind === "missing") return "Unavailable";
-  if (t.pending) return (t.tokens ? formatTokens(t.tokens) + "+" : "…") + (t.skipped ? " *" : "");
+  if (t.failed && !t.tokens && !t.pending) return "!";
+  if (t.pending) return (t.tokens ? formatTokens(t.tokens) + "+" : "…") + (t.skipped ? " *" : "") + (t.failed ? " !" : "");
   if (t.overCap) return "> " + t.overCap.limit + " files";
-  return formatTokens(t.tokens || 0) + (t.skipped ? " *" : "");
+  return formatTokens(t.tokens || 0) + (t.skipped ? " *" : "") + (t.failed ? " !" : "");
 }
 
 function f_formatFolderTokenCount(value) {
   return value?.overCap ? formatLinkedTargetCount({ overCap: value }) :
-    formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped });
+    formatLinkedTargetCount({ tokens: value?.tokens ?? value, pending: value?.partial, skipped: value?.skipped, failed: value?.failed });
 }
 
 function f_uniqueLinkedTokenTotal(targets, rules = []) {
@@ -887,6 +889,7 @@ function buildAtPathViewPlugin(plugin) {
           const vaultPath = resolveAtPath(relPath, plugin);
           const cached = plugin.tokenCache.get(vaultPath);
           if (cached) tokenStr = formatTokens(cached.tokens);
+          else if (plugin._tokenIndex.get(vaultPath)?.failed) tokenStr = "!";
           else plugin.scheduleTokenFetch(vaultPath, view);
         }
 
@@ -1026,6 +1029,7 @@ function buildWikilinkViewPlugin(plugin) {
       if (plugin.settings.showTokenCounts) {
         const cached = plugin.tokenCache.get(vaultPath);
         if (cached) tokenStr = formatTokens(cached.tokens);
+        else if (plugin._tokenIndex.get(vaultPath)?.failed) tokenStr = "!";
         else plugin.scheduleTokenFetch(vaultPath, view);
       }
 
@@ -1087,7 +1091,11 @@ function buildWikilinkViewPlugin(plugin) {
 
 function buildBufferCountListener(plugin) {
   return EditorView.updateListener.of(update => {
-    if (update.docChanged || update.selectionSet) plugin.f_updateBufferTokenCounts();
+    if (!update.docChanged && !update.selectionSet) return;
+    if (plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.cm !== update.view) return;
+    clearTimeout(plugin._bufferReadTimer);
+    plugin._bufferReadTimer = setTimeout(() => plugin.f_updateBufferTokenCounts(), 80);
+    plugin._bufferTokenCounts.invalidate(update.docChanged);
   });
 }
 
@@ -1194,17 +1202,19 @@ function f_editorSourcePath(view, plugin) {
 }
 
 class RepositoryTokenWidget extends WidgetType {
-  constructor(count, skipped) {
+  constructor(count, skipped, failed) {
     super();
     this.count = count;
     this.skipped = skipped;
+    this.failed = failed;
   }
-  eq(other) { return this.count === other.count && this.skipped === other.skipped; }
+  eq(other) { return this.count === other.count && this.skipped === other.skipped && this.failed === other.failed; }
   toDOM() {
     const span = document.createElement("span");
     span.className = "atpath-token-count";
     span.textContent = " (" + this.count + ")";
     span.title = TOKEN_COUNT_DISCLOSURE + (this.skipped ? " " + this.skipped + " files skipped." : "");
+    if (this.failed) span.title += " " + this.failed + " files failed to count; total is incomplete.";
     return span;
   }
 }
@@ -1224,18 +1234,21 @@ function f_buildRepositoryLinkView(plugin) {
       if (!plugin.settings.showTokenCounts) continue;
       let text;
       let skipped;
+      let failed;
       if (result.kind === "missing") text = "unavailable";
       else if (result.kind === "folder") {
         const count = plugin.f_folderTokenCount(result.normalizedPath);
         skipped = count?.skipped;
+        failed = count?.failed;
         text = f_formatFolderTokenCount(count);
       } else {
         plugin.f_watchLinkedCount(result.normalizedPath, false);
         const cached = plugin.tokenCache.get(result.normalizedPath);
         if (!cached) plugin.scheduleTokenFetch(result.normalizedPath, view);
         if (cached) text = formatTokens(cached.tokens);
+        else if (plugin._tokenIndex.get(result.normalizedPath)?.failed) { text = "!"; failed = 1; }
       }
-      if (text) ranges.push(Decoration.widget({ widget: new RepositoryTokenWidget(text, skipped), side: 1 }).range(ref.end));
+      if (text) ranges.push(Decoration.widget({ widget: new RepositoryTokenWidget(text, skipped, failed), side: 1 }).range(ref.end));
     }
     return Decoration.set(ranges, true);
   }
@@ -1524,13 +1537,16 @@ class AtPathSettingTab extends PluginSettingTab {
         })
       );
 
+    let folderExclusionsInput;
     new Setting(containerEl)
       .setName("Exclude folders from parent totals")
-      .setDesc("One folder name or vault-relative path per line; no wildcards. These folders are left out of totals and copied content for folders above them. Direct links to the folder or its files still work. Leave empty to include all folders.")
-      .addTextArea(text => text
-        .setPlaceholder("90_archive\nproject/scratch")
-        .setValue(this.plugin.settings.folderCountExclusions)
-        .onChange(async value => {
+      .setDesc("One folder name or vault-relative path per line; no wildcards. These folders are left out of totals and copied content for folders above them. Direct links to the folder or its files still work. Leave empty to include all folders, then select Apply.")
+      .addTextArea(text => {
+        folderExclusionsInput = text;
+        text.setPlaceholder("90_archive\nproject/scratch").setValue(this.plugin.settings.folderCountExclusions);
+      })
+      .addButton(button => button.setButtonText("Apply").onClick(async () => {
+          const value = folderExclusionsInput.getValue();
           try { f_parseFolderCountExclusions(value); }
           catch (error) { new Notice(error.message); return; }
           this.plugin.settings.folderCountExclusions = value;
@@ -2174,11 +2190,13 @@ class AtPathPlugin extends Plugin {
     this._readingTokenRefreshes = new Set();
     this._folderCountExclusions = f_parseFolderCountExclusions(this.settings.folderCountExclusions);
     this._tokenCounter = f_createTokenCounter();
-    const f_reportCountError = error => {
-      if (this._countFailureShown) return;
-      this._countFailureShown = true;
-      console.warn("AtPath exact token counting", error);
-      new Notice("Exact token counting failed. Reload AtPath to retry. " + error.message, 0);
+    const f_reportCountError = (error, path = "editor buffer") => {
+      if (error.tokenCounterUnavailable && this._countFailureShown) return;
+      if (error.tokenCounterUnavailable) this._countFailureShown = true;
+      console.warn("AtPath could not count " + path, error);
+      new Notice(error.tokenCounterUnavailable
+        ? "The token worker could not recover. Unavailable counts show !. Reload AtPath to retry."
+        : "Could not count " + path + ". Its count shows !; other files will continue.", 0);
     };
     this._bufferTokenCounts = f_createBufferTokenCounts({
       count: (text, options) => this._tokenCounter.count(text, options),
@@ -2202,9 +2220,10 @@ class AtPathPlugin extends Plugin {
       load: () => f_loadTokenCache(vaultKey),
       save: cache => f_saveTokenCache(vaultKey, cache),
       tokenCache: this.tokenCache,
-      onError: (error, path) => {
-        if (path) f_reportCountError(error);
-        else console.warn("AtPath could not persist or load its device-local token cache", error);
+      onError: (error, path, stage) => {
+        if (stage === "count") f_reportCountError(error, path);
+        else if (path) console.warn("AtPath could not " + stage + " " + path, error);
+        else console.warn("AtPath device-local token cache unavailable; writes retry with backoff", error);
       },
     });
     this.register(this._tokenIndex.subscribe(() => {
@@ -2239,6 +2258,7 @@ class AtPathPlugin extends Plugin {
       this._readingTokenRefreshes.clear();
       clearTimeout(this._refreshTimer);
       clearTimeout(this._statusBarTimeout);
+      clearTimeout(this._bufferReadTimer);
     });
 
     this.repositories = [];
@@ -2495,6 +2515,12 @@ class AtPathPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    try { f_parseFolderCountExclusions(this.settings.folderCountExclusions); }
+    catch (error) {
+      console.warn("AtPath invalid folder exclusions; using the default", error);
+      this.settings.folderCountExclusions = DEFAULT_FOLDER_COUNT_EXCLUSIONS;
+      new Notice("Invalid folder exclusions. Using 90_archive; edit the list in AtPath settings.");
+    }
   }
 
   async saveSettings() {
@@ -2522,7 +2548,7 @@ class AtPathPlugin extends Plugin {
 
   f_linkedCountSignature(path, folder) {
     const count = this._tokenIndex.get(path, folder);
-    return count ? [count.tokens, count.pending, count.skipped, count.counted, count.candidates].join(":") : "";
+    return count ? [count.tokens, count.pending, count.skipped, count.failed, count.counted, count.candidates].join(":") : "";
   }
 
   f_watchLinkedCount(path, folder) {
@@ -2552,7 +2578,7 @@ class AtPathPlugin extends Plugin {
     const total = this._tokenIndex.get(path, true);
     const limit = this.settings.maxFolderFiles || 500;
     if (total.candidates > limit) return { overCap: true, fileCount: total.candidates, limit };
-    if (total.pending || total.skipped) return { partial: Boolean(total.pending), skipped: total.skipped, tokens: total.tokens };
+    if (total.pending || total.skipped || total.failed) return { partial: Boolean(total.pending), skipped: total.skipped, failed: total.failed, tokens: total.tokens };
     return total.tokens;
   }
 
@@ -2593,9 +2619,11 @@ class AtPathPlugin extends Plugin {
         const count = this.f_folderTokenCount(path);
         text = " (" + f_formatFolderTokenCount(count) + ")";
         if (count?.skipped) title = count.skipped + " files skipped. " + title;
+        if (count?.failed) title = count.failed + " files failed to count; total is incomplete. " + title;
       } else if (kind === "file" && path != null) {
         const snapshot = this._tokenIndex.get(path);
         if (snapshot?.counted) text = " (" + formatTokens(snapshot.tokens) + ")";
+        else if (snapshot?.failed) { text = " (!)"; title = "File failed to count. " + title; }
         else if (snapshot?.pending) {
           text = " (…)";
           this._tokenIndex.prioritize(path);
@@ -2722,8 +2750,9 @@ class AtPathPlugin extends Plugin {
         }
         const pending = Boolean(cached?.partial);
         const skipped = cached?.skipped;
-        pendingOrOverCap ||= pending || Boolean(skipped);
-        linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: cached?.tokens ?? cached, pending, skipped });
+        const failed = cached?.failed;
+        pendingOrOverCap ||= pending || Boolean(skipped) || Boolean(failed);
+        linkedTargets.push({ kind: "folder", path: normalizedPath, tokens: cached?.tokens ?? cached, pending, skipped, failed });
         continue;
       }
 
@@ -2731,6 +2760,9 @@ class AtPathPlugin extends Plugin {
       if (gen !== this._statusBarGen) return;
       if (tokens != null) {
         linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens, localOnly: resolved.target?.localOnly });
+      } else if (this._tokenIndex.get(normalizedPath)?.failed) {
+        linkedTargets.push({ kind: resolved.kind, path: normalizedPath, tokens: 0, failed: 1 });
+        pendingOrOverCap = true;
       }
     }
 
@@ -2767,19 +2799,19 @@ class AtPathPlugin extends Plugin {
     const noteLabel = this.noteBarEl.createSpan({ cls: "atpath-label" });
     const noteValue = this.noteBarEl.createSpan({ cls: "atpath-value" });
     const sel = this._selectionTokens;
-    if ((sel == null || sel > 0) && this.settings.statusBarShowSelection !== false) {
+    if ((sel == null || sel > 0 || Number.isNaN(sel)) && this.settings.statusBarShowSelection !== false) {
       this.noteBarEl.addClass("atpath-status-has-selection");
       noteLabel.setText("Sel");
       noteValue.setText(formatTokens(sel) + " / " + formatTokens(noteTokens));
       this.noteBarEl.setAttribute(
         "aria-label",
-        "Selection: " + (sel ?? "pending") + "\nNote: " + (noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE
+        "Selection: " + (Number.isNaN(sel) ? "failed" : sel ?? "pending") + "\nNote: " + (Number.isNaN(noteTokens) ? "failed" : noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE
       );
     } else {
       this.noteBarEl.removeClass("atpath-status-has-selection");
       noteLabel.setText("Note");
       noteValue.setText(formatTokens(noteTokens));
-      this.noteBarEl.setAttribute("aria-label", "Note: " + (noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE);
+      this.noteBarEl.setAttribute("aria-label", "Note: " + (Number.isNaN(noteTokens) ? "failed" : noteTokens ?? "pending") + "\n" + TOKEN_COUNT_DISCLOSURE);
     }
 
     if (linkedCount === 0) {

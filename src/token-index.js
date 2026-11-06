@@ -3,7 +3,7 @@
 const { TOKEN_CACHE_IDENTITY, TOKEN_CACHE_VERSION, f_hashTokenText } = require("./token-contract");
 const { f_isFolderCountBoundary } = require("./folder-count-policy");
 const CHECKPOINT_INTERVAL_MS = 5000;
-const EMPTY = { tokens: 0, pending: 0, skipped: 0, counted: 0 };
+const EMPTY = { tokens: 0, pending: 0, skipped: 0, failed: 0, counted: 0 };
 const EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
 
 function f_createTokenIndex({
@@ -29,6 +29,7 @@ function f_createTokenIndex({
   let saveTimer;
   let saving;
   let dirty = false;
+  let saveFailures = 0;
 
   function f_notify() {
     if (disposed || notifyTimer != null) return;
@@ -47,7 +48,7 @@ function f_createTokenIndex({
       total[entry.state] += direction;
       if (entry.eligible) total.candidates += direction;
       total.tokens += direction * (entry.tokens ?? 0);
-      if (total.pending || total.counted || total.skipped) folders.set(folder, total);
+      if (total.pending || total.counted || total.skipped || total.failed) folders.set(folder, total);
       else folders.delete(folder);
       if (f_isFolderCountBoundary(folder, folderExclusions)) break;
     } while (folder);
@@ -65,15 +66,16 @@ function f_createTokenIndex({
           // They will still require a content-hash match on the next startup.
           const record = entry.cacheable ? entry : entry.eligible ? entry.saved : null;
           if (record) {
-            const { mtime, size, tokens, digest } = record;
-            files.set(entry.path, { mtime, size, tokens, digest });
+            const { tokens, digest } = record;
+            files.set(entry.path, { tokens, digest });
           }
         }
         try {
           await save({ version: TOKEN_CACHE_VERSION, tokenizer: TOKEN_CACHE_IDENTITY, files: Object.fromEntries(files) });
+          saveFailures = 0;
         } catch (error) {
           dirty = true;
-          onError(error);
+          if (++saveFailures === 1) onError(error);
           break; // Retry on the next checkpoint, never spin on a failed store.
         }
       }
@@ -91,7 +93,7 @@ function f_createTokenIndex({
     saveTimer = setTimeout(() => {
       saveTimer = null;
       void f_flush();
-    }, CHECKPOINT_INTERVAL_MS);
+    }, Math.min(300000, CHECKPOINT_INTERVAL_MS * 2 ** Math.min(6, Math.max(0, saveFailures - 1))));
   }
 
   function f_drop(path) {
@@ -107,10 +109,10 @@ function f_createTokenIndex({
     f_notify();
   }
 
-  function f_finish(entry, tokens, cacheable, persist = cacheable) {
+  function f_finish(entry, tokens, cacheable, persist = cacheable, failed = false) {
     f_adjust(entry, -1);
     entry.tokens = tokens;
-    entry.state = tokens == null ? "skipped" : "counted";
+    entry.state = failed ? "failed" : tokens == null ? "skipped" : "counted";
     entry.cacheable = cacheable;
     if (tokens != null) tokenCache.set(entry.path, { mtime: entry.mtime, size: entry.size, tokens });
     f_adjust(entry, 1);
@@ -138,14 +140,17 @@ function f_createTokenIndex({
     if (!entry || disposed || !enabled) return;
     queue.delete(entry);
     reading = true;
+    let stage = "read";
     try {
       const text = await read(entry.file);
       if (!f_isCurrent(entry)) return;
+      stage = "hash";
       const digest = await hash(text);
       if (!f_isCurrent(entry)) return;
       // A persisted count is only a candidate until the current text matches.
       // This also catches offline edits preserving both size and timestamp.
       const cached = entry.saved;
+      stage = "count";
       const tokens = cached?.digest === digest ? cached.tokens : looksBinary(text) ? null : await count(text);
       if (!f_isCurrent(entry)) return;
       if (tokens !== null && (!Number.isSafeInteger(tokens) || tokens < 0)) throw new Error("Invalid exact token count for " + entry.path);
@@ -154,8 +159,8 @@ function f_createTokenIndex({
       f_finish(entry, tokens, true);
     } catch (error) {
       if (f_isCurrent(entry)) {
-        f_finish(entry, null, false);
-        onError(error, entry.path);
+        f_finish(entry, null, false, false, true);
+        onError(error, entry.path, stage);
       }
     } finally {
       if (!disposed && entries.get(entry.path) === entry && !f_isCurrent(entry)) {
@@ -176,7 +181,8 @@ function f_createTokenIndex({
     const current = entries.get(path);
     if (!invalidate && current?.file === file && current.mtime === mtime && current.size === size
       && current.eligible === eligible) return current;
-    const cached = moved?.cacheable ? moved : current?.cacheable ? current : persisted.get(path);
+    const cached = (moved?.cacheable ? moved : moved?.saved)
+      ?? (current?.cacheable ? current : current?.saved) ?? persisted.get(path);
     f_drop(path);
     persisted.delete(path);
     if (cached) f_scheduleSave();
@@ -283,8 +289,7 @@ function f_createTokenIndex({
           if (saved?.version === TOKEN_CACHE_VERSION && saved.tokenizer === TOKEN_CACHE_IDENTITY
             && saved.files && typeof saved.files === "object") {
             persisted = new Map(Object.entries(saved.files).filter(([, entry]) =>
-              Number.isFinite(entry?.mtime) && Number.isFinite(entry?.size)
-              && typeof entry.digest === "string" && /^[a-f0-9]{64}$/.test(entry.digest)
+              typeof entry?.digest === "string" && /^[a-f0-9]{64}$/.test(entry.digest)
               && (entry.tokens === null || Number.isSafeInteger(entry.tokens) && entry.tokens >= 0)));
           }
         } catch (error) {

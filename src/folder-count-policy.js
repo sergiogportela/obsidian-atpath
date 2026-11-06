@@ -5,6 +5,7 @@ const DEFAULT_FOLDER_COUNT_EXCLUSIONS = "90_archive";
 // A bare name matches that folder anywhere; a slash selects one vault-relative
 // folder. These are boundaries, not file exclusions: count inside, stop outside.
 function f_parseFolderCountExclusions(text = DEFAULT_FOLDER_COUNT_EXCLUSIONS) {
+  if (typeof text !== "string") throw new TypeError("Folder exclusions must be one name or path per line");
   const rules = new Set();
   for (const line of text.split(/\r?\n/)) {
     const rule = line.trim().replace(/^\/+|\/+$/g, "");

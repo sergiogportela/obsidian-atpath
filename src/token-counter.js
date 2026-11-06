@@ -5,28 +5,48 @@ function f_createBrowserTokenWorker() {
   // main.js/manifest.json/styles.css assets. No runtime network or Node access.
   const url = URL.createObjectURL(new Blob([ATPATH_TOKEN_WORKER_SOURCE], { type: "text/javascript" }));
   try {
-    return new Worker(url);
-  } finally {
+    const worker = new Worker(url);
+    // Retain the URL until startup has actually succeeded, including WebKit.
+    const revoke = () => URL.revokeObjectURL(url);
+    worker.addEventListener("message", revoke, { once: true });
+    worker.addEventListener("error", revoke, { once: true });
+    const terminate = worker.terminate.bind(worker);
+    worker.terminate = () => { revoke(); terminate(); };
+    return worker;
+  } catch (error) {
     URL.revokeObjectURL(url);
+    throw error;
   }
 }
 
-function f_createTokenCounter({ createWorker = f_createBrowserTokenWorker, timeoutMs = 30000 } = {}) {
+function f_createTokenCounter({ createWorker = f_createBrowserTokenWorker, timeoutMs = 30000, maxRestarts = 2 } = {}) {
   let worker;
   let active;
   let timer;
   let sequence = 0;
   let failure;
+  let restarts = 0;
   const queue = [];
 
-  function f_fail(error) {
-    failure = error;
+  function f_fail(error, recover = true) {
     clearTimeout(timer);
-    worker?.terminate();
+    if (worker) {
+      worker.onmessage = worker.onerror = worker.onmessageerror = null;
+      worker.terminate();
+    }
     worker = null;
+    if (!recover || restarts >= maxRestarts) {
+      failure = error;
+      error.tokenCounterUnavailable = true;
+    }
     active?.reject(error);
     active = null;
-    for (const job of queue.splice(0)) job.reject(error);
+    if (failure) {
+      for (const job of queue.splice(0)) job.reject(error);
+    } else {
+      restarts++;
+      f_next();
+    }
   }
 
   function f_next() {
@@ -76,7 +96,7 @@ function f_createTokenCounter({ createWorker = f_createBrowserTokenWorker, timeo
         f_next();
       });
     },
-    dispose() { f_fail(new Error("Token counter disposed")); },
+    dispose() { f_fail(new Error("Token counter disposed"), false); },
   };
 }
 

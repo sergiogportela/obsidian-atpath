@@ -6,6 +6,13 @@ const { Worker } = require("node:worker_threads");
 const esbuild = require("esbuild");
 const { f_createTokenCounter } = require("../src/token-counter");
 const { f_createBufferTokenCounts } = require("../src/buffer-token-counts");
+const { TOKEN_CACHE_IDENTITY } = require("../src/token-contract");
+
+test("the cache identity includes the installed and declared pinned tokenizer version", () => {
+  const installed = require("gpt-tokenizer/package.json").version;
+  assert.equal(require("../package.json").dependencies["gpt-tokenizer"], installed);
+  assert.ok(TOKEN_CACHE_IDENTITY.startsWith("gpt-tokenizer@" + installed + "/o200k_base/"));
+});
 
 function f_fakeCounter(options) {
   const posted = [];
@@ -48,7 +55,7 @@ test("worker queue prioritizes editor jobs and coalesces superseded snapshots", 
 
 test("worker failure, timeout and disposal reject active and queued jobs without estimates", async () => {
   for (const kind of ["error", "timeout", "dispose", "invalid"]) {
-    const fake = f_fakeCounter({ timeoutMs: 10 });
+    const fake = f_fakeCounter({ timeoutMs: 10, maxRestarts: 0 });
     const requests = [fake.counter.count("one"), fake.counter.count("two")];
     const assertions = requests.map(request => assert.rejects(request));
     if (kind === "error") fake.worker.onerror({ message: "crash" });
@@ -59,6 +66,55 @@ test("worker failure, timeout and disposal reject active and queued jobs without
     await assert.rejects(fake.counter.count("later"));
     assert.equal(fake.posted.length, 1);
   }
+});
+
+test("a failed job is isolated while a fresh worker continues queued work, with a restart cap", async () => {
+  const workers = [];
+  const counter = f_createTokenCounter({ createWorker: () => {
+    const worker = { postMessage(job) { this.job = job; }, terminate() { this.terminated = true; } };
+    workers.push(worker);
+    return worker;
+  } });
+  const first = counter.count("bad input");
+  const rejected = assert.rejects(first, /crash/);
+  const healthy = counter.count("healthy input");
+  workers[0].onerror({ message: "crash" });
+  await rejected;
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers[1].job.text, "healthy input");
+  workers[1].onmessage({ data: { id: workers[1].job.id, tokens: 2 } });
+  assert.equal(await healthy, 2);
+  const second = counter.count("second bad input");
+  const secondRejected = assert.rejects(second);
+  workers[1].onerror({ message: "second crash" });
+  await secondRejected;
+  const third = counter.count("third bad input");
+  const thirdRejected = assert.rejects(third, error => error.tokenCounterUnavailable === true);
+  const queued = assert.rejects(counter.count("waiting"), error => error.tokenCounterUnavailable === true);
+  workers[2].onerror({ message: "third crash" });
+  await Promise.all([thirdRejected, queued]);
+  await assert.rejects(counter.count("later"), error => error.tokenCounterUnavailable === true);
+  assert.equal(workers.length, 3);
+  counter.dispose();
+});
+
+test("editor invalidation discards earlier jobs before debounced text reads, and failures are distinct", async () => {
+  const jobs = [];
+  const values = [];
+  const counter = f_createBufferTokenCounts({ count: () => new Promise((resolve, reject) => jobs.push({ resolve, reject })),
+    delay: 0, onChange: (note, selected) => values.push([note, selected]), onError() {} });
+  counter.update("old");
+  await new Promise(resolve => setTimeout(resolve, 5));
+  counter.invalidate(true);
+  jobs[0].resolve(999);
+  await Promise.resolve();
+  assert.deepEqual(values.at(-1), [null, null]);
+  counter.update("new");
+  await new Promise(resolve => setTimeout(resolve, 5));
+  jobs[1].reject(new Error("worker error"));
+  await Promise.resolve();
+  assert.equal(Number.isNaN(values.at(-1)[0]), true);
+  counter.dispose();
 });
 
 test("editor count generations discard stale results, cache zero and count selections separately", async t => {

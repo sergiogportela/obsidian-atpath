@@ -26,6 +26,7 @@ function f_createBufferTokenCounts({ count, onChange, onError, delay = 80 }) {
         part.tokens = total;
       } catch (error) {
         if (disposed || generation !== part.generation) return;
+        part.tokens = NaN;
         onError(error);
       }
       if (!disposed && generation === part.generation) onChange(doc.tokens, selection.tokens);
@@ -33,6 +34,15 @@ function f_createBufferTokenCounts({ count, onChange, onError, delay = 80 }) {
   }
 
   return {
+    invalidate(documentChanged) {
+      for (const part of documentChanged ? [doc, selection] : [selection]) {
+        part.generation++;
+        clearTimeout(part.timer);
+        part.texts = null;
+        part.tokens = null;
+      }
+      onChange(doc.tokens, selection.tokens);
+    },
     update(text, selections = []) {
       if (disposed) return;
       f_update(doc, [text], "document");

@@ -135,6 +135,20 @@ function f_loadPlugin(isMobile = true, obsidianOverrides = {}) {
   }
 }
 
+test("invalid stored folder exclusions fall back without losing other settings or preventing load", async t => {
+  const messages = [];
+  const AtPath = f_loadPlugin(false, { Notice: class { constructor(message) { messages.push(message); } } });
+  t.mock.method(console, "warn", () => {});
+  for (const value of ["../outside", ["90_archive"], null]) {
+    const plugin = new AtPath();
+    plugin.loadData = async () => ({ folderCountExclusions: value, maxFolderFiles: 123 });
+    await plugin.loadSettings();
+    assert.equal(plugin.settings.folderCountExclusions, "90_archive");
+    assert.equal(plugin.settings.maxFolderFiles, 123);
+  }
+  assert.equal(messages.length, 3);
+});
+
 test("open Reading badges and all editor panes react to count changes and settings", async () => {
   const AtPath = f_loadPlugin(false);
   const { f_createTokenIndex } = require("../src/token-index");

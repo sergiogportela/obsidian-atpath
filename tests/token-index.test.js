@@ -50,8 +50,8 @@ test("folder totals distinguish pending, skipped and counted files", async () =>
     assert.equal(await index.request(unicode), 2);
     assert.equal(await index.request(binary), null);
     assert.equal(await index.request(oversized), null);
-    assert.deepEqual(index.get("top", true), { tokens: 5, pending: 0, skipped: 2, counted: 2, candidates: 3 });
-    assert.deepEqual(index.get("top/deep", true), { tokens: 2, pending: 0, skipped: 1, counted: 1, candidates: 2 });
+    assert.deepEqual(index.get("top", true), { tokens: 5, pending: 0, skipped: 2, failed: 0, counted: 2, candidates: 3 });
+    assert.deepEqual(index.get("top/deep", true), { tokens: 2, pending: 0, skipped: 1, failed: 0, counted: 1, candidates: 2 });
     assert.deepEqual(index.get("/", true), index.get("top", true));
     assert.match(f_describeTokenBadge(index.get("/", true), String).title, /2 files skipped/);
   } finally {
@@ -68,9 +68,9 @@ test("explicit unindexed targets have direct counts and no folder contribution",
     assert.equal(await index.request(indexed), 1);
     assert.equal(await index.request(explicit), 2);
     assert.deepEqual(index.get("folder", true), {
-      tokens: 1, pending: 0, skipped: 0, counted: 1, candidates: 1,
+      tokens: 1, pending: 0, skipped: 0, failed: 0, counted: 1, candidates: 1,
     });
-    assert.deepEqual(index.get(explicit.path), { tokens: 2, pending: 0, skipped: 0, counted: 1 });
+    assert.deepEqual(index.get(explicit.path), { tokens: 2, pending: 0, skipped: 0, failed: 0, counted: 1 });
   } finally {
     await index.dispose();
   }
@@ -214,8 +214,8 @@ test("a priority link overtakes background work and stale reads cannot revive de
     assert.equal(reads[1], "linked.md");
     assert.equal(await index.request(slow), 3);
     assert.equal(index.get("old/slow.md"), null);
-    assert.deepEqual(index.get("new", true), { tokens: 3, pending: 0, skipped: 0, counted: 1, candidates: 1 });
-    assert.deepEqual(index.get("old", true), { tokens: 0, pending: 0, skipped: 0, counted: 0, candidates: 0 });
+    assert.deepEqual(index.get("new", true), { tokens: 3, pending: 0, skipped: 0, failed: 0, counted: 1, candidates: 1 });
+    assert.deepEqual(index.get("old", true), { tokens: 0, pending: 0, skipped: 0, failed: 0, counted: 0, candidates: 0 });
   } finally {
     release.resolve("");
     await index.dispose();
@@ -233,7 +233,7 @@ test("folder-first native rename events wait for descendant paths to update", as
     file.path = "new/leaf.md";
     index.rename(file, "old/leaf.md");
     assert.equal(await index.request(file), 2);
-    assert.deepEqual(index.get("new", true), { tokens: 2, pending: 0, skipped: 0, counted: 1, candidates: 1 });
+    assert.deepEqual(index.get("new", true), { tokens: 2, pending: 0, skipped: 0, failed: 0, counted: 1, candidates: 1 });
   } finally {
     await index.dispose();
   }
@@ -413,4 +413,60 @@ test("warm checkpoints and early unload preserve saved candidates awaiting verif
   await deleting.dispose();
   assert.equal(saved.files["slow.md"], undefined, "deletion removes a checkpointed candidate still awaiting verification");
   blocked.resolve("");
+});
+
+test("read and tokenizer errors are distinct failed entries and leave other files countable", async () => {
+  const files = [f_file("unreadable.md", "aaaa"), f_file("poison.md", "bbbb"), f_file("healthy.md", "cccc")];
+  const errors = [];
+  const index = f_index(files, {
+    read: async file => { if (file === files[0]) throw new Error("ENOENT"); return file.text; },
+    count: async text => { if (text === "bbbb") throw new Error("worker timeout"); return 1; },
+    onError: (error, path, stage) => errors.push({ message: error.message, path, stage }),
+  });
+  await index.start();
+  assert.deepEqual(await Promise.all(files.map(file => index.request(file))), [null, null, 1]);
+  assert.deepEqual(errors.map(error => error.stage), ["read", "count"]);
+  const total = index.get("/", true);
+  assert.equal(total.failed, 2);
+  assert.equal(total.skipped, 0);
+  assert.equal(total.tokens, 1);
+  const badge = f_describeTokenBadge(total, String);
+  assert.equal(badge.text, "1 !");
+  assert.match(badge.title, /2 files failed.*incomplete/);
+  assert.match(f_describeTokenBadge(index.get("poison.md"), String).text, /!/);
+  await index.dispose();
+});
+
+test("touches and renames retain saved candidates while verification is in flight", async () => {
+  for (const operation of ["modify", "rename"]) {
+    const file = f_file("note.md", "aaaa");
+    let saved;
+    let encodes = 0;
+    const count = async () => { encodes++; return 1; };
+    const cold = f_index([file], { count, save: async value => { saved = value; } });
+    await cold.start();await cold.request(file);await cold.dispose();
+    const started = f_deferred();const release = f_deferred();let first = true;
+    const warm = f_index([file], { count, load: async () => saved,
+      read: async () => { if (first) { first = false; started.resolve(); return release.promise; } return file.text; } });
+    await warm.start();const old = warm.request(file);await started.promise;
+    if (operation === "modify") warm.upsert(file);
+    else { file.path = "renamed.md"; warm.rename(file, "note.md"); }
+    release.resolve(file.text);assert.equal(await old, null);
+    assert.equal(await warm.request(file), 1);assert.equal(encodes, 1);
+    await warm.dispose();
+  }
+});
+
+test("persistent save failures back off and log once per failure streak", async t => {
+  try { t.mock.timers.enable({ apis: ["setTimeout"] }); }
+  catch (error) { if (error.code !== "ERR_INVALID_ARG_TYPE") throw error; t.mock.timers.enable(["setTimeout"]); }
+  const file = f_file("note.md", "aaaa");let attempts = 0;let warnings = 0;
+  const index = f_index([file], { save: async () => { if (++attempts < 4) throw new Error("quota"); }, onError: () => warnings++ });
+  await index.start();const request = index.request(file);t.mock.timers.tick(0);await request;
+  for (const delay of [5000, 5000, 10000, 20000]) {
+    t.mock.timers.tick(delay);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  }
+  assert.equal(attempts, 4);assert.equal(warnings, 1);
+  t.mock.timers.reset();await index.dispose();
 });

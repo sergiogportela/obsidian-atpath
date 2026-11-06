@@ -3,7 +3,7 @@
   "name": "AtPath",
   "version": "1.9.0",
   "minAppVersion": "1.15.0",
-  "description": "Author repository Markdown links, open local files, and estimate context sizes.",
+  "description": "Author repository Markdown links, open local files, and count text tokens.",
   "author": "sergio",
   "authorUrl": "https://github.com/sergiogportela",
   "isDesktopOnly": false

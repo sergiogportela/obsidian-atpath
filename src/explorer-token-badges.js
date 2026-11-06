@@ -9,15 +9,16 @@ function f_describeTokenBadge(snapshot, formatTokens) {
   if (!snapshot) {
     return { text: "…", title: "Token count pending" };
   }
-  const { tokens, counted, pending, skipped } = snapshot;
+  const { tokens, counted, pending, skipped, failed = 0 } = snapshot;
   const notes = [];
-  if (counted || (!skipped && !pending)) notes.push(tokens.toLocaleString() + " o200k_base text tokens");
+  if (counted || (!skipped && !pending && !failed)) notes.push(tokens.toLocaleString() + " o200k_base text tokens");
   if (counted) notes.push(TOKEN_COUNT_DISCLOSURE.replace(/\.$/, ""));
   if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
   if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
+  if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete");
   return {
-    text: !counted && pending ? "…" : !counted && skipped ? "—"
-      : formatTokens(tokens) + (pending ? " …" : skipped ? " *" : ""),
+    text: (!counted && pending ? "…" : !counted && failed ? "" : !counted && skipped ? "—"
+      : formatTokens(tokens) + (pending ? " …" : skipped ? " *" : "")) + (failed ? (counted || pending || skipped ? " !" : "!") : ""),
     title: notes.join(". "),
   };
 }
