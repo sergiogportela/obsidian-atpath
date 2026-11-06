@@ -18,8 +18,16 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install and build
-        run: npm ci && npm run build
+      - name: Verify release version
+        run: |
+          node -e 'const m = require("./manifest.json"); if (m.version !== process.env.GITHUB_REF_NAME || m.version !== require("./package.json").version || m.version !== require("./package-lock.json").version || require("./versions.json")[m.version] !== m.minAppVersion) throw new Error("Release version mismatch")'
+
+      - name: Install, test and build
+        run: |
+          npm ci
+          npm test
+          npm run build
+          git diff --exit-code -- main.js
 
       - name: Package plugin zip
         run: |
@@ -33,7 +41,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete "$GITHUB_REF_NAME" --yes --cleanup-tag=false 2>/dev/null || true
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md" \
             main.js manifest.json styles.css "atpath-${GITHUB_REF_NAME}.zip"

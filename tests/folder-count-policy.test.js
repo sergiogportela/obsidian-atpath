@@ -4,6 +4,7 @@ const { test } = require("node:test");
 const { f_parseFolderCountExclusions, f_isFolderCountBoundary, f_folderCountIncludes } = require("../src/folder-count-policy");
 
 test("folder settings accept one name or vault path per line and reject ambiguous patterns", () => {
+  assert.deepEqual(f_parseFolderCountExclusions(), ["90_archive", "00_llm"]);
   const rules = f_parseFolderCountExclusions(" 90_archive/\n\n /repo/scratch/\n90_archive\n");
   assert.deepEqual(rules, ["90_archive", "repo/scratch"]);
   assert.equal(f_isFolderCountBoundary("a/90_archive", rules), true);

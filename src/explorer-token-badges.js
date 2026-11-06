@@ -1,25 +1,29 @@
 "use strict";
 
-const { TOKEN_COUNT_DISCLOSURE } = require("./token-contract");
-
 const ROW = ".nav-file-title[data-path], .nav-folder-title[data-path]";
 const BADGE = "atpath-explorer-token-badge";
 
-function f_describeTokenBadge(snapshot, formatTokens) {
+function f_describeTokenBadge(snapshot, formatTokens, exclusions = []) {
   if (!snapshot) {
     return { text: "…", title: "Token count pending" };
   }
   const { tokens, counted, pending, skipped, failed = 0 } = snapshot;
   const notes = [];
-  if (counted || (!skipped && !pending && !failed)) notes.push(tokens.toLocaleString() + " o200k_base text tokens");
-  if (counted) notes.push(TOKEN_COUNT_DISCLOSURE.replace(/\.$/, ""));
+  if (counted || (!skipped && !pending && !failed)) notes.push(tokens.toLocaleString() + " tokens");
   if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
-  if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
+  if (skipped && !counted && !pending && !failed) notes.push("No countable text");
   if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete. Reload AtPath to retry");
+  if (exclusions.length) {
+    notes.push("Excluded folders:\n" + exclusions.map(total => {
+      const value = total.counted ? total.tokens.toLocaleString() + " tokens" : total.pending ? "Counting…" : "—";
+      return total.path + ": " + value + (total.pending && total.counted ? " …" : "") + (total.failed ? " !" : "");
+    }).join("\n"));
+  }
   return {
     text: (!counted && pending ? "…" : !counted && skipped ? "—" : !counted && failed ? ""
-      : formatTokens(tokens) + (pending ? " …" : skipped ? " *" : "")) + (failed ? (counted || pending || skipped ? " !" : "!") : ""),
-    title: notes.join(". "),
+      : formatTokens(tokens) + (pending ? " …" : "")) + (failed ? (counted || pending || skipped ? " !" : "!") : "")
+      + (exclusions.length ? " *" : ""),
+    title: notes.join("\n"),
   };
 }
 
@@ -82,8 +86,7 @@ function f_installExplorerTokenBadges({ workspace, index, formatTokens, isEnable
         const folder = row.classList.contains("nav-folder-title");
         const snapshot = index.get(path, folder);
         if (!folder && snapshot?.pending) index.prioritize(path);
-        const badge = f_describeTokenBadge(snapshot, formatTokens);
-        if (folder) badge.title += ". Configured folder exclusions apply to descendants";
+        const badge = f_describeTokenBadge(snapshot, formatTokens, folder ? index.getExclusions(path) : []);
         visible.set(row, badge);
       }
     }
@@ -103,8 +106,7 @@ function f_installExplorerTokenBadges({ workspace, index, formatTokens, isEnable
         badges.set(row, badge);
       }
       if (badge.textContent !== text) badge.textContent = text;
-      if (badge.title !== title) {
-        badge.title = title;
+      if (badge.getAttribute("aria-label") !== title) {
         badge.setAttribute("aria-label", title);
       }
     }

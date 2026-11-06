@@ -143,8 +143,15 @@ test("invalid stored folder exclusions fall back without losing other settings o
     const plugin = new AtPath();
     plugin.loadData = async () => ({ folderCountExclusions: value, maxFolderFiles: 123 });
     await plugin.loadSettings();
-    assert.equal(plugin.settings.folderCountExclusions, "90_archive");
+    assert.equal(plugin.settings.folderCountExclusions, "90_archive\n00_llm");
     assert.equal(plugin.settings.maxFolderFiles, 123);
+  }
+  assert.equal(messages.length, 3);
+  for (const value of [undefined, "", "90_archive", "custom/scratch\n00_llm"]) {
+    const plugin = new AtPath();
+    plugin.loadData = async () => value === undefined ? {} : { folderCountExclusions: value };
+    await plugin.loadSettings();
+    assert.equal(plugin.settings.folderCountExclusions, value ?? "90_archive\n00_llm");
   }
   assert.equal(messages.length, 3);
 });

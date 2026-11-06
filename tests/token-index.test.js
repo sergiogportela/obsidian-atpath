@@ -53,7 +53,7 @@ test("folder totals distinguish pending, skipped and counted files", async () =>
     assert.deepEqual(index.get("top", true), { tokens: 5, pending: 0, skipped: 2, failed: 0, counted: 2, candidates: 3 });
     assert.deepEqual(index.get("top/deep", true), { tokens: 2, pending: 0, skipped: 1, failed: 0, counted: 1, candidates: 2 });
     assert.deepEqual(index.get("/", true), index.get("top", true));
-    assert.match(f_describeTokenBadge(index.get("/", true), String).title, /2 files skipped/);
+    assert.deepEqual(f_describeTokenBadge(index.get("/", true), String), { text: "5", title: "5 tokens" });
   } finally {
     await index.dispose();
   }
@@ -366,6 +366,80 @@ test("folder boundaries stop ancestor totals while retaining direct and nested c
     assert.equal(index.get("work", true).tokens, 4);
     assert.equal(index.get("work/90_archive", true).tokens, 1);
   } finally { await index.dispose(); }
+});
+
+test("excluded breakdowns count nested boundaries once and follow edits, moves, deletions and settings", async () => {
+  const files = [f_file("work/active.md", "aaaa"), f_file("work/90_archive/old.md", "aaaaaaaa"),
+    f_file("work/90_archive/00_llm/nested.md", "aaaaaaaaaaaa"), f_file("work/00_llm/review.md", "aaaaaaaaaaaaaaaa"),
+    f_file("work/other/00_llm/review.md", "aaaa"),
+    { ...f_file("work/00_llm/local.md", "aaaa"), localOnly: true }];
+  let encodes = 0;
+  const index = f_index(files, { folderExclusions: ["90_archive", "00_llm"], count: async text => { encodes++; return text.length / 4; } });
+  const summary = path => index.getExclusions(path).map(({ path, tokens }) => [path, tokens]);
+  try {
+    await index.start();
+    await Promise.all(files.map(file => index.request(file)));
+    assert.equal(index.get("work", true).tokens, 1);
+    assert.deepEqual(summary("work"), [["00_llm", 5], ["90_archive", 5]]);
+    assert.deepEqual(summary("/"), summary("work"));
+    assert.deepEqual(summary("work/90_archive"), [["00_llm", 3]]);
+    assert.deepEqual(summary("work/00_llm"), []);
+    const badge = f_describeTokenBadge(index.get("work", true), String, index.getExclusions("work"));
+    assert.deepEqual(badge, { text: "1 *", title: "1 tokens\nExcluded folders:\n00_llm: 5 tokens\n90_archive: 5 tokens" });
+
+    files[2].text = "aaaa";
+    files[2].stat.size = 4;
+    index.upsert(files[2]);
+    await index.request(files[2]);
+    assert.deepEqual(summary("work"), [["00_llm", 5], ["90_archive", 3]]);
+    const oldPath = files[1].path;
+    files[1].path = "work/restored.md";
+    index.rename(files[1], oldPath);
+    await index.request(files[1]);
+    assert.equal(index.get("work", true).tokens, 3);
+    assert.deepEqual(summary("work"), [["00_llm", 5], ["90_archive", 1]]);
+    index.remove("work/90_archive");
+    assert.deepEqual(summary("work"), [["00_llm", 5]]);
+    const previousEncodes = encodes;
+    index.setFolderExclusions(["work/other/00_llm"]);
+    assert.deepEqual(summary("work"), [["work/other/00_llm", 1]]);
+    assert.equal(index.get("work", true).tokens, 7);
+    index.setFolderExclusions([]);
+    assert.deepEqual(summary("work"), []);
+    assert.equal(index.get("work", true).tokens, 8);
+    assert.equal(encodes, previousEncodes, "breakdowns reuse exact counts without extra tokenization");
+  } finally { await index.dispose(); }
+});
+
+test("excluded counts remain pending until cached content is verified and never claim failed totals are exact", async () => {
+  const file = f_file("00_llm/review.md", "aaaa");
+  let saved;
+  const cold = f_index([file], { folderExclusions: ["00_llm"], save: async value => { saved = value; } });
+  await cold.start();
+  await cold.request(file);
+  await cold.dispose();
+  const blocked = f_deferred();
+  const warm = f_index([file], { folderExclusions: ["00_llm"], load: async () => saved, read: () => blocked.promise });
+  try {
+    await warm.start();
+    const pending = f_describeTokenBadge(warm.get("/", true), String, warm.getExclusions("/"));
+    assert.equal(pending.text, "0 *");
+    assert.match(pending.title, /00_llm: Counting…/);
+    file.text = "abcdefgh"; // Same metadata; the cache must still verify content.
+    blocked.resolve(file.text);
+    await warm.request(file);
+    assert.equal(warm.getExclusions("/")[0].tokens, 2);
+  } finally { await warm.dispose(); }
+  const failed = f_index([file], { folderExclusions: ["00_llm"], count: async () => { throw new Error("worker unavailable"); } });
+  try {
+    await failed.start();
+    await failed.request(file);
+    const badge = f_describeTokenBadge(failed.get("/", true), String, failed.getExclusions("/"));
+    assert.match(badge.title, /00_llm: — !/);
+    failed.remove(file.path);
+    assert.deepEqual(failed.getExclusions("/"), []);
+    assert.equal(f_describeTokenBadge(failed.get("/", true), String, failed.getExclusions("/")).text, "0");
+  } finally { await failed.dispose(); }
 });
 
 test("warm checkpoints and early unload preserve saved candidates awaiting verification", async t => {

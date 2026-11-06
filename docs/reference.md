@@ -46,15 +46,18 @@ Counts use pinned `gpt-tokenizer 4.1.0`, **o200k_base ordinary text**, in a lazy
 |---|---|
 | `…` | Counting is pending |
 | `!` | Counting failed |
-| Partial total / skipped-file details | Some content is excluded or unavailable |
+| Explorer `*` | Excluded folders; hover for their omitted token counts |
+| Linked total `*` / skipped-file details | Some linked content is excluded or unavailable |
 
 The device-local IndexedDB cache is separate from synced settings. Schema/identity includes the tokenizer version and a SHA-256 digest of decoded text. At startup every eligible file is read and hashed before its saved count is displayed; unchanged content avoids tokenization. Modification events invalidate even same-size/same-timestamp edits. Async results become invalid after edits, moves, deletion or unload. Old heuristic caches are discarded. Failed checkpoints retry with exponential backoff capped at five minutes, logging once per failure streak.
 
 A worker failure affects its active job; queued work continues in a fresh worker. Two automatic restarts per session bound repeated startup failures and 30-second job timeouts. Reload the plugin if recovery is exhausted. Unreadable files are logged and marked failed without claiming the entire counter stopped; modification or reload retries them, repeated display requests do not. Some folder-renames and late unindexed files can cause harmless extra tokenization.
 
-**Exclude folders from parent totals** accepts one folder name or vault-relative path per line, default `90_archive`. A name matches anywhere; `project/scratch` matches only that path. No globs. **Apply** saves the complete list; drafts do not affect counts. Invalid stored settings fall back to the default with a notice. Blank settings include all otherwise eligible folders.
+**Exclude folders from parent totals** accepts one folder name or vault-relative path per line, default `90_archive` and `00_llm`. A name matches anywhere; `project/scratch` matches only that path. No globs. **Apply** saves the complete list; drafts do not affect counts. Existing customized lists are preserved. Invalid stored settings fall back to the default with a notice. Blank settings include all otherwise eligible folders.
 
 Matching folders are excluded from outside ancestor totals and copied folder expansions, but retain their own totals and direct-link count/copy behavior. Nested matching folders create another exclusion boundary. Changing this setting rebuilds totals without re-tokenizing files.
+
+Explorer tooltips show full token counts and, only when applicable, omitted counts grouped by the matching exclusion rule. An outer excluded folder's omitted count includes its nested exclusions once; inside that folder, nested exclusions are reported separately. These breakdowns use the same verified file counts and update on edits, moves, deletions and setting changes. Normal policy skips do not add an explorer asterisk; pending and failed counts retain their indicators.
 
 ### File scope and limits
 

@@ -8,13 +8,13 @@ AtPath adds file and folder autocomplete, exact token counts, context copying, a
 
 ## Get started
 
-This guide covers the **1.9.0 code on main**, requiring **Obsidian 1.15+**. Tagged releases may have an earlier feature set.
+Requires **Obsidian 1.15+**.
 
-1. Copy [main.js](/main.js), [manifest.json](/manifest.json), and [styles.css](/styles.css) into your vault's `.obsidian/plugins/atpath/` folder, then enable **AtPath** under **Settings → Community plugins**. Use your configured settings folder if it differs from `.obsidian`.
+1. Download [AtPath 1.9.0 ZIP](https://github.com/sergiogportela/obsidian-atpath/releases/download/1.9.0/atpath-1.9.0.zip), unzip it, and move the `atpath` folder into your vault's `.obsidian/plugins/` folder. Restart Obsidian, then enable **AtPath** under **Settings → Community plugins**. On macOS, **Cmd+Shift+.** shows hidden folders. Use your configured settings folder if it differs from `.obsidian`.
 2. Under **Settings → Files and links**, turn **Use Wikilinks** off.
 3. Open a note inside a Git checkout in your vault. Type `[[`, search for a file or folder, and press **Enter**.
 
-For tagged builds, use [Releases](https://github.com/sergiogportela/obsidian-atpath/releases) or add `sergiogportela/obsidian-atpath` through BRAT.
+For updates through BRAT, add `sergiogportela/obsidian-atpath`. For manual updates, replace only `main.js`, `manifest.json` and `styles.css`; keep your `data.json` settings. See [release notes](https://github.com/sergiogportela/obsidian-atpath/releases/tag/1.9.0).
 
 ## Add and open links
 
@@ -40,9 +40,9 @@ Counts appear beside links, in the file explorer, and in the desktop status bar.
 
 <img src="screenshots/explorer-counts.png" width="380" alt="The docs folder totals 163 tokens: 81 for research plus 82 for the brief; 90_archive keeps its own 19-token count" />
 
-In **Settings → AtPath → Exclude folders from parent totals**, enter one folder name or vault-relative path per line, then **Apply**. The default `90_archive` keeps old material out of parent totals and copied folder contents. You can still link to it directly. Clear the list to include all otherwise eligible folders.
+In **Settings → AtPath → Exclude folders from parent totals**, enter one folder name or vault-relative path per line, then **Apply**. The defaults `90_archive` and `00_llm` keep internal material out of parent totals and copied folder contents. You can still link to these folders directly. Clear the list to include all otherwise eligible folders. Existing customized lists are preserved.
 
-Counts are exact for **o200k_base text tokens**, calculated locally and cached with content verification. They are not a complete AI request cost or an exact count for every model. Folder totals sum individual files; overlapping linked files count once. `k` abbreviations are rounded; `…` means pending, `!` means failed, and incomplete totals identify skipped files.
+Counts are exact for **o200k_base text tokens**, calculated locally and cached with content verification. They are not a complete AI request cost or an exact count for every model. Folder totals sum individual files; overlapping linked files count once. `k` abbreviations are rounded; `…` means pending and `!` means failed. An explorer `*` appears only when folders are excluded; hover for their omitted token counts.
 
 ## Copy or publish
 

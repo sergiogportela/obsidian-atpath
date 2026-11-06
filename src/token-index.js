@@ -1,7 +1,7 @@
 "use strict";
 
 const { TOKEN_CACHE_IDENTITY, TOKEN_CACHE_VERSION, f_hashTokenText } = require("./token-contract");
-const { f_isFolderCountBoundary } = require("./folder-count-policy");
+const { f_folderCountExclusion } = require("./folder-count-policy");
 const CHECKPOINT_INTERVAL_MS = 5000;
 const EMPTY = { tokens: 0, pending: 0, skipped: 0, failed: 0, counted: 0 };
 const EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
@@ -14,6 +14,7 @@ function f_createTokenIndex({
   if (typeof count !== "function") throw new TypeError("An asynchronous exact token counter is required");
   const entries = new Map();
   const folders = new Map();
+  const excludedFolders = new Map();
   const background = new Set();
   const priority = new Set();
   const listeners = new Set();
@@ -42,15 +43,26 @@ function f_createTokenIndex({
   function f_adjust(entry, direction) {
     if (entry.file.localOnly) return;
     let folder = entry.path;
+    let exclusion;
     do {
       folder = folder.slice(0, Math.max(0, folder.lastIndexOf("/")));
-      const total = folders.get(folder) ?? { ...EMPTY_FOLDER };
+      let totals = folders;
+      let key = folder;
+      if (exclusion !== undefined) {
+        if (!excludedFolders.has(folder)) excludedFolders.set(folder, new Map());
+        totals = excludedFolders.get(folder);
+        key = exclusion;
+      }
+      const total = totals.get(key) ?? { ...EMPTY_FOLDER };
       total[entry.state] += direction;
       if (entry.eligible) total.candidates += direction;
       total.tokens += direction * (entry.tokens ?? 0);
-      if (total.pending || total.counted || total.skipped || total.failed) folders.set(folder, total);
-      else folders.delete(folder);
-      if (f_isFolderCountBoundary(folder, folderExclusions)) break;
+      if (total.pending || total.counted || total.skipped || total.failed) totals.set(key, total);
+      else totals.delete(key);
+      if (exclusion !== undefined && !totals.size) excludedFolders.delete(folder);
+      // An outer boundary owns all omitted descendants, including nested
+      // exclusions. Each file contributes once to each ancestor's breakdown.
+      exclusion = f_folderCountExclusion(folder, folderExclusions) ?? exclusion;
     } while (folder);
   }
 
@@ -262,6 +274,7 @@ function f_createTokenIndex({
     setFolderExclusions(rules) {
       folderExclusions = rules;
       folders.clear();
+      excludedFolders.clear();
       for (const entry of entries.values()) f_adjust(entry, 1);
       f_notify();
     },
@@ -329,6 +342,11 @@ function f_createTokenIndex({
       }
       const entry = entries.get(path);
       return entry ? { ...EMPTY, tokens: entry.tokens ?? 0, [entry.state]: 1 } : null;
+    },
+    getExclusions(path) {
+      return [...(excludedFolders.get(path === "/" ? "" : path) ?? [])]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([path, total]) => ({ path, ...total, pending: total.pending + (inventoried ? 0 : 1) }));
     },
     prioritize: f_prioritize,
     request(file) {

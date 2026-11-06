@@ -1581,7 +1581,7 @@ class AtPathSettingTab extends PluginSettingTab {
       .setDesc("One folder name or vault-relative path per line; no wildcards. These folders are left out of totals and copied content for folders above them. Direct links to the folder or its files still work. Leave empty to include all folders, then select Apply.")
       .addTextArea(text => {
         folderExclusionsInput = text;
-        text.setPlaceholder("90_archive\nproject/scratch").setValue(this.plugin.settings.folderCountExclusions);
+        text.setPlaceholder("90_archive\n00_llm\nproject/scratch").setValue(this.plugin.settings.folderCountExclusions);
       })
       .addButton(button => button.setButtonText("Apply").onClick(async () => {
           const value = folderExclusionsInput.getValue();
@@ -2574,7 +2574,7 @@ class AtPathPlugin extends Plugin {
     catch (error) {
       console.warn("AtPath invalid folder exclusions; using the default", error);
       this.settings.folderCountExclusions = DEFAULT_FOLDER_COUNT_EXCLUSIONS;
-      new Notice("Invalid folder exclusions. Using 90_archive; edit the list in AtPath settings.");
+      new Notice("Invalid folder exclusions. Using 90_archive and 00_llm; edit the list in AtPath settings.");
     }
   }
 

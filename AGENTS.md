@@ -87,15 +87,15 @@ Historical diagnosis research is available in Git history before the documentati
 ## Releasing a new version
 
 1. Bump `version` in **both** `manifest.json` and `package.json`
-2. Add the new version entry to `versions.json`
+2. Add the new version entry to `versions.json` and release notes to `docs/releases/X.Y.Z.md`
 3. Commit and push to `main`
 4. Create and push a tag matching the version:
    ```
    git tag X.Y.Z && git push origin X.Y.Z
    ```
-5. The workflow runs `npm ci && npm run build`, creates a GitHub release, and uploads `main.js`, `manifest.json`, and `styles.css` as assets
+5. The workflow verifies versions, runs `npm ci`, tests and builds, checks the committed bundle, then publishes the three plugin files and an installable ZIP with those release notes.
 
-**Do NOT** create the release via the GitHub UI — the workflow handles it. If a release already exists for the tag, the workflow deletes and recreates it.
+**Do NOT** create the release via the GitHub UI — the workflow handles it. Existing releases are not overwritten; use a new version for subsequent changes.
 
 ## Versioning
 

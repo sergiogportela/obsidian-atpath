@@ -1,6 +1,6 @@
 "use strict";
 
-const DEFAULT_FOLDER_COUNT_EXCLUSIONS = "90_archive";
+const DEFAULT_FOLDER_COUNT_EXCLUSIONS = "90_archive\n00_llm";
 
 // A bare name matches that folder anywhere; a slash selects one vault-relative
 // folder. These are boundaries, not file exclusions: count inside, stop outside.
@@ -19,7 +19,11 @@ function f_parseFolderCountExclusions(text = DEFAULT_FOLDER_COUNT_EXCLUSIONS) {
 }
 
 function f_isFolderCountBoundary(path, rules) {
-  return rules.some(rule => rule.includes("/") ? path === rule : path.slice(path.lastIndexOf("/") + 1) === rule);
+  return f_folderCountExclusion(path, rules) !== undefined;
+}
+
+function f_folderCountExclusion(path, rules) {
+  return rules.find(rule => rule.includes("/") ? path === rule : path.slice(path.lastIndexOf("/") + 1) === rule);
 }
 
 function f_folderCountIncludes(folder, target, rules, targetIsFolder = false) {
@@ -33,4 +37,4 @@ function f_folderCountIncludes(folder, target, rules, targetIsFolder = false) {
   return true;
 }
 
-module.exports = { DEFAULT_FOLDER_COUNT_EXCLUSIONS, f_parseFolderCountExclusions, f_isFolderCountBoundary, f_folderCountIncludes };
+module.exports = { DEFAULT_FOLDER_COUNT_EXCLUSIONS, f_parseFolderCountExclusions, f_isFolderCountBoundary, f_folderCountExclusion, f_folderCountIncludes };

@@ -3,9 +3,9 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/gpt-tokenizer/package.json
+// node_modules/gpt-tokenizer/package.json
 var require_package = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/gpt-tokenizer/package.json"(exports2, module2) {
+  "node_modules/gpt-tokenizer/package.json"(exports2, module2) {
     module2.exports = {
       name: "gpt-tokenizer",
       version: "4.1.0",
@@ -171,7 +171,7 @@ var require_token_contract = __commonJS({
 var require_folder_count_policy = __commonJS({
   "src/folder-count-policy.js"(exports2, module2) {
     "use strict";
-    var DEFAULT_FOLDER_COUNT_EXCLUSIONS2 = "90_archive";
+    var DEFAULT_FOLDER_COUNT_EXCLUSIONS2 = "90_archive\n00_llm";
     function f_parseFolderCountExclusions2(text = DEFAULT_FOLDER_COUNT_EXCLUSIONS2) {
       if (typeof text !== "string") throw new TypeError("Folder exclusions must be one name or path per line");
       const rules = /* @__PURE__ */ new Set();
@@ -186,7 +186,10 @@ var require_folder_count_policy = __commonJS({
       return [...rules];
     }
     function f_isFolderCountBoundary2(path, rules) {
-      return rules.some((rule) => rule.includes("/") ? path === rule : path.slice(path.lastIndexOf("/") + 1) === rule);
+      return f_folderCountExclusion(path, rules) !== void 0;
+    }
+    function f_folderCountExclusion(path, rules) {
+      return rules.find((rule) => rule.includes("/") ? path === rule : path.slice(path.lastIndexOf("/") + 1) === rule);
     }
     function f_folderCountIncludes2(folder, target, rules, targetIsFolder = false) {
       const root = folder === "/" ? "" : folder;
@@ -198,7 +201,7 @@ var require_folder_count_policy = __commonJS({
       }
       return true;
     }
-    module2.exports = { DEFAULT_FOLDER_COUNT_EXCLUSIONS: DEFAULT_FOLDER_COUNT_EXCLUSIONS2, f_parseFolderCountExclusions: f_parseFolderCountExclusions2, f_isFolderCountBoundary: f_isFolderCountBoundary2, f_folderCountIncludes: f_folderCountIncludes2 };
+    module2.exports = { DEFAULT_FOLDER_COUNT_EXCLUSIONS: DEFAULT_FOLDER_COUNT_EXCLUSIONS2, f_parseFolderCountExclusions: f_parseFolderCountExclusions2, f_isFolderCountBoundary: f_isFolderCountBoundary2, f_folderCountExclusion, f_folderCountIncludes: f_folderCountIncludes2 };
   }
 });
 
@@ -207,7 +210,7 @@ var require_token_index = __commonJS({
   "src/token-index.js"(exports2, module2) {
     "use strict";
     var { TOKEN_CACHE_IDENTITY, TOKEN_CACHE_VERSION, f_hashTokenText } = require_token_contract();
-    var { f_isFolderCountBoundary: f_isFolderCountBoundary2 } = require_folder_count_policy();
+    var { f_folderCountExclusion } = require_folder_count_policy();
     var CHECKPOINT_INTERVAL_MS = 5e3;
     var EMPTY = { tokens: 0, pending: 0, skipped: 0, failed: 0, counted: 0 };
     var EMPTY_FOLDER = { ...EMPTY, candidates: 0 };
@@ -229,6 +232,7 @@ var require_token_index = __commonJS({
       if (typeof count !== "function") throw new TypeError("An asynchronous exact token counter is required");
       const entries = /* @__PURE__ */ new Map();
       const folders = /* @__PURE__ */ new Map();
+      const excludedFolders = /* @__PURE__ */ new Map();
       const background = /* @__PURE__ */ new Set();
       const priority = /* @__PURE__ */ new Set();
       const listeners = /* @__PURE__ */ new Set();
@@ -255,15 +259,24 @@ var require_token_index = __commonJS({
       function f_adjust(entry, direction) {
         if (entry.file.localOnly) return;
         let folder = entry.path;
+        let exclusion;
         do {
           folder = folder.slice(0, Math.max(0, folder.lastIndexOf("/")));
-          const total = folders.get(folder) ?? { ...EMPTY_FOLDER };
+          let totals = folders;
+          let key = folder;
+          if (exclusion !== void 0) {
+            if (!excludedFolders.has(folder)) excludedFolders.set(folder, /* @__PURE__ */ new Map());
+            totals = excludedFolders.get(folder);
+            key = exclusion;
+          }
+          const total = totals.get(key) ?? { ...EMPTY_FOLDER };
           total[entry.state] += direction;
           if (entry.eligible) total.candidates += direction;
           total.tokens += direction * (entry.tokens ?? 0);
-          if (total.pending || total.counted || total.skipped || total.failed) folders.set(folder, total);
-          else folders.delete(folder);
-          if (f_isFolderCountBoundary2(folder, folderExclusions)) break;
+          if (total.pending || total.counted || total.skipped || total.failed) totals.set(key, total);
+          else totals.delete(key);
+          if (exclusion !== void 0 && !totals.size) excludedFolders.delete(folder);
+          exclusion = f_folderCountExclusion(folder, folderExclusions) ?? exclusion;
         } while (folder);
       }
       async function f_flush() {
@@ -461,6 +474,7 @@ var require_token_index = __commonJS({
         setFolderExclusions(rules) {
           folderExclusions = rules;
           folders.clear();
+          excludedFolders.clear();
           for (const entry of entries.values()) f_adjust(entry, 1);
           f_notify();
         },
@@ -525,6 +539,9 @@ var require_token_index = __commonJS({
           }
           const entry = entries.get(path);
           return entry ? { ...EMPTY, tokens: entry.tokens ?? 0, [entry.state]: 1 } : null;
+        },
+        getExclusions(path) {
+          return [...excludedFolders.get(path === "/" ? "" : path) ?? []].sort(([left], [right]) => left.localeCompare(right)).map(([path2, total]) => ({ path: path2, ...total, pending: total.pending + (inventoried ? 0 : 1) }));
         },
         prioritize: f_prioritize,
         request(file) {
@@ -727,23 +744,27 @@ var require_buffer_token_counts = __commonJS({
 var require_explorer_token_badges = __commonJS({
   "src/explorer-token-badges.js"(exports2, module2) {
     "use strict";
-    var { TOKEN_COUNT_DISCLOSURE: TOKEN_COUNT_DISCLOSURE2 } = require_token_contract();
     var ROW = ".nav-file-title[data-path], .nav-folder-title[data-path]";
     var BADGE = "atpath-explorer-token-badge";
-    function f_describeTokenBadge(snapshot, formatTokens2) {
+    function f_describeTokenBadge(snapshot, formatTokens2, exclusions = []) {
       if (!snapshot) {
         return { text: "\u2026", title: "Token count pending" };
       }
       const { tokens, counted, pending, skipped, failed = 0 } = snapshot;
       const notes = [];
-      if (counted || !skipped && !pending && !failed) notes.push(tokens.toLocaleString() + " o200k_base text tokens");
-      if (counted) notes.push(TOKEN_COUNT_DISCLOSURE2.replace(/\.$/, ""));
+      if (counted || !skipped && !pending && !failed) notes.push(tokens.toLocaleString() + " tokens");
       if (pending) notes.push(counted ? "Some files are still pending" : "Token count pending");
-      if (skipped) notes.push(skipped + (skipped === 1 ? " file skipped" : " files skipped"));
+      if (skipped && !counted && !pending && !failed) notes.push("No countable text");
       if (failed) notes.push(failed + (failed === 1 ? " file failed to count" : " files failed to count") + "; total is incomplete. Reload AtPath to retry");
+      if (exclusions.length) {
+        notes.push("Excluded folders:\n" + exclusions.map((total) => {
+          const value = total.counted ? total.tokens.toLocaleString() + " tokens" : total.pending ? "Counting\u2026" : "\u2014";
+          return total.path + ": " + value + (total.pending && total.counted ? " \u2026" : "") + (total.failed ? " !" : "");
+        }).join("\n"));
+      }
       return {
-        text: (!counted && pending ? "\u2026" : !counted && skipped ? "\u2014" : !counted && failed ? "" : formatTokens2(tokens) + (pending ? " \u2026" : skipped ? " *" : "")) + (failed ? counted || pending || skipped ? " !" : "!" : ""),
-        title: notes.join(". ")
+        text: (!counted && pending ? "\u2026" : !counted && skipped ? "\u2014" : !counted && failed ? "" : formatTokens2(tokens) + (pending ? " \u2026" : "")) + (failed ? counted || pending || skipped ? " !" : "!" : "") + (exclusions.length ? " *" : ""),
+        title: notes.join("\n")
       };
     }
     function f_installExplorerTokenBadges2({ workspace, index, formatTokens: formatTokens2, isEnabled = () => true }) {
@@ -801,8 +822,7 @@ var require_explorer_token_badges = __commonJS({
             const folder = row.classList.contains("nav-folder-title");
             const snapshot = index.get(path, folder);
             if (!folder && snapshot?.pending) index.prioritize(path);
-            const badge = f_describeTokenBadge(snapshot, formatTokens2);
-            if (folder) badge.title += ". Configured folder exclusions apply to descendants";
+            const badge = f_describeTokenBadge(snapshot, formatTokens2, folder ? index.getExclusions(path) : []);
             visible.set(row, badge);
           }
         }
@@ -821,8 +841,7 @@ var require_explorer_token_badges = __commonJS({
             badges.set(row, badge);
           }
           if (badge.textContent !== text) badge.textContent = text;
-          if (badge.title !== title) {
-            badge.title = title;
+          if (badge.getAttribute("aria-label") !== title) {
             badge.setAttribute("aria-label", title);
           }
         }
@@ -1223,9 +1242,9 @@ var require_linked_file_policy = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/mdurl/build/index.cjs.js
+// node_modules/mdurl/build/index.cjs.js
 var require_index_cjs = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/mdurl/build/index.cjs.js"(exports2) {
+  "node_modules/mdurl/build/index.cjs.js"(exports2) {
     "use strict";
     var decodeCache = {};
     function getDecodeCache(exclude) {
@@ -1570,9 +1589,9 @@ var require_index_cjs = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/uc.micro/build/index.cjs.js
+// node_modules/uc.micro/build/index.cjs.js
 var require_index_cjs2 = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/uc.micro/build/index.cjs.js"(exports2) {
+  "node_modules/uc.micro/build/index.cjs.js"(exports2) {
     "use strict";
     var regex$5 = /[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
     var regex$4 = /[\0-\x1F\x7F-\x9F]/;
@@ -1589,9 +1608,9 @@ var require_index_cjs2 = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-html.js
+// node_modules/entities/lib/generated/decode-data-html.js
 var require_decode_data_html = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-html.js"(exports2) {
+  "node_modules/entities/lib/generated/decode-data-html.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.default = new Uint16Array(
@@ -1603,9 +1622,9 @@ var require_decode_data_html = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-xml.js
+// node_modules/entities/lib/generated/decode-data-xml.js
 var require_decode_data_xml = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/decode-data-xml.js"(exports2) {
+  "node_modules/entities/lib/generated/decode-data-xml.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.default = new Uint16Array(
@@ -1617,9 +1636,9 @@ var require_decode_data_xml = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode_codepoint.js
+// node_modules/entities/lib/decode_codepoint.js
 var require_decode_codepoint = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode_codepoint.js"(exports2) {
+  "node_modules/entities/lib/decode_codepoint.js"(exports2) {
     "use strict";
     var _a;
     Object.defineProperty(exports2, "__esModule", { value: true });
@@ -1681,9 +1700,9 @@ var require_decode_codepoint = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode.js
+// node_modules/entities/lib/decode.js
 var require_decode = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/decode.js"(exports2) {
+  "node_modules/entities/lib/decode.js"(exports2) {
     "use strict";
     var __createBinding = exports2 && exports2.__createBinding || (Object.create ? (function(o, m, k, k2) {
       if (k2 === void 0) k2 = k;
@@ -2040,9 +2059,9 @@ var require_decode = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/encode-html.js
+// node_modules/entities/lib/generated/encode-html.js
 var require_encode_html = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/generated/encode-html.js"(exports2) {
+  "node_modules/entities/lib/generated/encode-html.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     function restoreDiff(arr) {
@@ -2055,9 +2074,9 @@ var require_encode_html = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/escape.js
+// node_modules/entities/lib/escape.js
 var require_escape = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/escape.js"(exports2) {
+  "node_modules/entities/lib/escape.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.escapeText = exports2.escapeAttribute = exports2.escapeUTF8 = exports2.escape = exports2.encodeXML = exports2.getCodePoint = exports2.xmlReplacer = void 0;
@@ -2128,9 +2147,9 @@ var require_escape = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/encode.js
+// node_modules/entities/lib/encode.js
 var require_encode = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/encode.js"(exports2) {
+  "node_modules/entities/lib/encode.js"(exports2) {
     "use strict";
     var __importDefault = exports2 && exports2.__importDefault || function(mod) {
       return mod && mod.__esModule ? mod : { "default": mod };
@@ -2183,9 +2202,9 @@ var require_encode = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/index.js
+// node_modules/entities/lib/index.js
 var require_lib = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/entities/lib/index.js"(exports2) {
+  "node_modules/entities/lib/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.decodeXMLStrict = exports2.decodeHTML5Strict = exports2.decodeHTML4Strict = exports2.decodeHTML5 = exports2.decodeHTML4 = exports2.decodeHTMLAttribute = exports2.decodeHTMLStrict = exports2.decodeHTML = exports2.decodeXML = exports2.DecodingMode = exports2.EntityDecoder = exports2.encodeHTML5 = exports2.encodeHTML4 = exports2.encodeNonAsciiHTML = exports2.encodeHTML = exports2.escapeText = exports2.escapeAttribute = exports2.escapeUTF8 = exports2.escape = exports2.encodeXML = exports2.encode = exports2.decodeStrict = exports2.decode = exports2.EncodingMode = exports2.EntityLevel = void 0;
@@ -2313,9 +2332,9 @@ var require_lib = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/linkify-it/build/index.cjs.js
+// node_modules/linkify-it/build/index.cjs.js
 var require_index_cjs3 = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/linkify-it/build/index.cjs.js"(exports2, module2) {
+  "node_modules/linkify-it/build/index.cjs.js"(exports2, module2) {
     "use strict";
     var uc_micro = require_index_cjs2();
     function reFactory(opts) {
@@ -2746,9 +2765,9 @@ var require_index_cjs3 = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/punycode.js/punycode.js
+// node_modules/punycode.js/punycode.js
 var require_punycode = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/punycode.js/punycode.js"(exports2, module2) {
+  "node_modules/punycode.js/punycode.js"(exports2, module2) {
     "use strict";
     var maxInt = 2147483647;
     var base = 36;
@@ -2985,9 +3004,9 @@ var require_punycode = __commonJS({
   }
 });
 
-// ../../../../../../obsidian_plugin_atpath/node_modules/markdown-it/dist/index.cjs.js
+// node_modules/markdown-it/dist/index.cjs.js
 var require_index_cjs4 = __commonJS({
-  "../../../../../../obsidian_plugin_atpath/node_modules/markdown-it/dist/index.cjs.js"(exports2, module2) {
+  "node_modules/markdown-it/dist/index.cjs.js"(exports2, module2) {
     var __create = Object.create;
     var __defProp = Object.defineProperty;
     var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -10223,7 +10242,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
     let folderExclusionsInput;
     new Setting(containerEl).setName("Exclude folders from parent totals").setDesc("One folder name or vault-relative path per line; no wildcards. These folders are left out of totals and copied content for folders above them. Direct links to the folder or its files still work. Leave empty to include all folders, then select Apply.").addTextArea((text) => {
       folderExclusionsInput = text;
-      text.setPlaceholder("90_archive\nproject/scratch").setValue(this.plugin.settings.folderCountExclusions);
+      text.setPlaceholder("90_archive\n00_llm\nproject/scratch").setValue(this.plugin.settings.folderCountExclusions);
     }).addButton((button) => button.setButtonText("Apply").onClick(async () => {
       const value = folderExclusionsInput.getValue();
       try {
@@ -11020,7 +11039,7 @@ var AtPathPlugin = class extends Plugin {
     } catch (error) {
       console.warn("AtPath invalid folder exclusions; using the default", error);
       this.settings.folderCountExclusions = DEFAULT_FOLDER_COUNT_EXCLUSIONS;
-      new Notice("Invalid folder exclusions. Using 90_archive; edit the list in AtPath settings.");
+      new Notice("Invalid folder exclusions. Using 90_archive and 00_llm; edit the list in AtPath settings.");
     }
   }
   async saveSettings() {
