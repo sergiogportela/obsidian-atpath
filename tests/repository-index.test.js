@@ -448,7 +448,23 @@ test("registered drag and drop uses the destination editor's checkout in an inac
   const target = new TFile("checkout-b/docs/space here.md");
   const files = new Map([active, source, target].map(file => [file.path, file]));
   const changes = [];
-  const view = { posAtCoords: () => 4, dispatch: transaction => changes.push(transaction) };
+  let content = "Text here";
+  let dropPosition = 4;
+  const view = {
+    posAtCoords: () => dropPosition,
+    coordsAtPos: () => ({ bottom: 100 }),
+    state: { doc: {
+      get length() { return content.length; },
+      toString: () => content,
+      lineAt: pos => {
+        const from = content.lastIndexOf("\n", pos - 1) + 1;
+        const end = content.indexOf("\n", pos);
+        const to = end < 0 ? content.length : end;
+        return { from, to, text: content.slice(from, to) };
+      },
+    } },
+    dispatch: transaction => changes.push(transaction),
+  };
   plugin.app = {
     appId: "test",
     vault: { adapter: {}, on() {}, getAbstractFileByPath: path => files.get(path) },
@@ -497,6 +513,132 @@ test("registered drag and drop uses the destination editor's checkout in an inac
   assert.equal(handlers.dragover(f_event(source), view), false);
   assert.equal(handlers.drop(f_event(source), view), false);
   assert.equal(changes.length, 1);
+
+  for (const [text, pos, from, to, insertion] of [
+    ["", 0, 0, 0, "- " + expected],
+    ["before\n\nafter", 7, 7, 7, "- " + expected],
+    ["before\n  \nafter", 8, 7, 9, "  - " + expected],
+    ["- ", 2, 2, 2, expected],
+    ["```md\n\n```", 6, 6, 6, expected],
+    ["```md\n", 6, 6, 6, expected],
+    ["---\n\n---\n", 4, 4, 4, expected],
+  ]) {
+    content = text;
+    dropPosition = pos;
+    assert.equal(handlers.drop(f_event(target), view), true);
+    assert.deepEqual(changes.at(-1), {
+      changes: { from, to, insert: insertion },
+      selection: { anchor: from + insertion.length },
+      userEvent: "input.drop",
+    }, text);
+  }
+  const secondTarget = new TFile("checkout-b/second_file.md");
+  files.set(secondTarget.path, secondTarget);
+  content = "";
+  dropPosition = 0;
+  const multiple = f_event(target);
+  multiple.dataTransfer.getData = mime => mime === "application/obsidian-files"
+    ? JSON.stringify([target.path, secondTarget.path]) : "";
+  assert.equal(handlers.drop(multiple, view), true);
+  assert.equal(changes.at(-1).changes.insert,
+    "- " + expected.trimEnd() + "\n- [second_file.md](/second_file.md) ");
+  content = "Last paragraph.";
+  dropPosition = content.length;
+  const belowDocument = f_event(target);
+  belowDocument.clientY = 120;
+  assert.equal(handlers.drop(belowDocument, view), true);
+  assert.equal(changes.at(-1).changes.insert, "\n\n- " + expected);
+});
+
+test("repository link menus preserve local targets and fragments across navigation modes and windows", async t => {
+  const menus = [];
+  const notices = [];
+  class Menu {
+    constructor() { this.items = []; menus.push(this); }
+    addItem(callback) {
+      const item = {
+        setTitle(title) { this.title = title; return this; },
+        setIcon() { return this; },
+        onClick(callback) { this.click = callback; return this; },
+      };
+      callback(item);
+      this.items.push(item);
+    }
+    addSeparator() {}
+    showAtMouseEvent(event) { this.event = event; }
+  }
+  const originalDocument = globalThis.document;
+  globalThis.document = {};
+  t.after(() => { globalThis.document = originalDocument; });
+  for (const mobile of [false, true]) {
+    // The menu needs platform coverage, not desktop status-bar DOM scaffolding.
+    const platform = { isMobile: true };
+    const AtPath = f_loadPlugin(true, { Platform: platform, Menu, Notice: class { constructor(message) { notices.push(message); } } });
+    const plugin = new AtPath();
+    const { TFile } = require("obsidian");
+    const source = new TFile("checkout/note.md");
+    const target = new TFile("checkout/target_file.md");
+    const opened = [];
+    const documents = new Map();
+    const events = new Map();
+    const revealed = [];
+    plugin.app = {
+      appId: "test",
+      vault: { adapter: {}, on() {}, getAbstractFileByPath: path => path === target.path ? target : null },
+      workspace: {
+        editorSuggest: { suggests: [] },
+        getActiveFile: () => source,
+        getLeavesOfType: () => [{ view: { revealInFolder: file => revealed.push(file) } }],
+        getLeaf: pane => ({ openFile: async (file, options) => opened.push({ pane, file, options }) }),
+        onLayoutReady() {},
+        on(name, callback) { events.set(name, callback); },
+      },
+    };
+    plugin.loadSettings = async () => { plugin.settings = {}; };
+    plugin.registerEditorSuggest = suggest => plugin.app.workspace.editorSuggest.suggests.push(suggest);
+    plugin.registerDomEvent = (doc, type, callback) => {
+      if (type === "contextmenu") documents.set(doc, callback);
+    };
+    for (const name of ["register", "registerEvent", "registerEditorExtension", "addCommand",
+      "addSettingTab", "registerMarkdownPostProcessor"]) plugin[name] = () => {};
+    await plugin.onload();
+    platform.isMobile = mobile;
+    plugin.repositories = [{ root: "checkout", identity: "org/repo" }];
+    const element = {
+      dataset: { atpathDestination: "/target_file.md#Heading", atpathSource: source.path },
+      closest: () => element,
+    };
+    const event = {
+      type: "contextmenu", target: element,
+      preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() {},
+    };
+    documents.get(globalThis.document)(event);
+    const menu = menus.at(-1);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(menu.event, event);
+    assert.deepEqual(menu.items.map(item => item.title), [
+      "Open link", "Open in new tab", "Open to the right",
+      ...(!mobile ? ["Open in new window"] : []),
+      "Reveal in file explorer", "Copy path", ...(!mobile ? ["Open in default app"] : []),
+    ]);
+    const panes = mobile ? [false, "tab", "split"] : [false, "tab", "split", "window"];
+    for (const [index, pane] of panes.entries()) {
+      await menu.items[index].click();
+      assert.deepEqual(opened.at(-1), { pane, file: target, options: { eState: { subpath: "#Heading" } } });
+    }
+    menu.items.find(item => item.title === "Reveal in file explorer").click();
+    assert.deepEqual(revealed, [target]);
+    const popoutDocument = {};
+    events.get("window-open")({}, { document: popoutDocument });
+    documents.get(popoutDocument)(event);
+    assert.equal(menus.at(-1).items[1].title, "Open in new tab");
+    plugin.f_resolveLinkTarget = () => ({ kind: "file", normalizedPath: target.path, target: { ...target, localOnly: true } });
+    documents.get(globalThis.document)(event);
+    assert.deepEqual(menus.at(-1).items.map(item => item.title), ["Copy path", ...(!mobile ? ["Open in default app"] : [])]);
+    plugin.f_openRepositoryTarget = async () => { throw new Error("test failure"); };
+    await menu.items[0].click();
+    assert.equal(notices.at(-1), "Could not open link: test failure");
+  }
 });
 
 test("canonical linked copy and publishing collection trust destination and deduplicate descendants", async t => {

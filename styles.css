@@ -1,6 +1,14 @@
 .atpath-link { color: var(--text-accent); cursor: pointer; text-decoration: underline dotted; }
 .atpath-link:hover { text-decoration: underline solid; }
 
+/* One hover target even when Obsidian splits escaped or formatted labels. */
+.markdown-source-view.mod-cm6 .atpath-repository-link:hover .cm-underline,
+.markdown-source-view.mod-cm6 .atpath-repository-link:hover .cm-link,
+.markdown-source-view.mod-cm6 .atpath-repository-link:hover .external-link {
+  color: var(--link-color-hover);
+  text-decoration-color: var(--link-color-hover);
+}
+
 /* Wikilink-rendered @path links (a.internal-link decorated by plugin) */
 a.internal-link.atpath-link { color: var(--text-accent); text-decoration: underline dotted; }
 a.internal-link.atpath-link:hover { text-decoration: underline solid; }

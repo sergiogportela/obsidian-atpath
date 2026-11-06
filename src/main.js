@@ -424,21 +424,35 @@ function openInDefaultApp(plugin, vaultPath) {
   require("electron").shell.openPath(absolutePath);
 }
 
-function showAtPathMenu(plugin, event, vaultPath) {
-  // Sole action is desktop-only (opens via the OS shell). Skip the menu
-  // entirely on mobile rather than popping an empty one.
-  if (Platform.isMobile) return;
+function showAtPathMenu(plugin, event, vaultPath, result) {
+  result ??= { kind: "file", normalizedPath: vaultPath, target: plugin.app.vault.getAbstractFileByPath(vaultPath) };
+  if (!result.target) return;
   const menu = new Menu();
-  menu.addItem((item) =>
-    item
-      .setTitle("Open in default app")
-      .setIcon("arrow-up-right")
-      .onClick(() => openInDefaultApp(plugin, vaultPath))
-  );
+  if (!result.target.localOnly) {
+    for (const [title, icon, pane] of [
+      ["Open link", "file", false],
+      ["Open in new tab", "file-plus", "tab"],
+      ["Open to the right", "separator-vertical", "split"],
+      ...(!Platform.isMobile ? [["Open in new window", "picture-in-picture-2", "window"]] : []),
+    ]) {
+      menu.addItem(item => item.setTitle(title).setIcon(icon).onClick(() =>
+        plugin.f_openRepositoryTarget(result, pane)
+          .catch(error => new Notice("Could not open link: " + error.message))));
+    }
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("Reveal in file explorer").setIcon("folder-search")
+      .onClick(() => f_revealInFileExplorer(plugin.app, result.target)));
+  }
+  menu.addItem(item => item.setTitle("Copy path").setIcon("copy")
+    .onClick(() => copyToClipboard(vaultPath).catch(error => new Notice("Could not copy path: " + error.message))));
+  if (!Platform.isMobile) {
+    menu.addItem(item => item.setTitle("Open in default app").setIcon("arrow-up-right")
+      .onClick(() => openInDefaultApp(plugin, vaultPath)));
+  }
   menu.showAtMouseEvent(event);
 }
 
-function revealFolderInExplorer(app, folder) {
+function f_revealInFileExplorer(app, folder) {
   const leaves = app.workspace.getLeavesOfType("file-explorer");
   let revealed = false;
   for (const leaf of leaves) {
@@ -452,7 +466,7 @@ function revealFolderInExplorer(app, folder) {
       console.warn("[atpath] revealInFolder failed", err);
     }
   }
-  if (!revealed) new Notice("Could not reveal folder in file explorer: " + folder.path);
+  if (!revealed) new Notice("Could not reveal target in file explorer: " + folder.path);
 }
 
 function showAtPathFolderMenu(plugin, event, folder) {
@@ -461,7 +475,7 @@ function showAtPathFolderMenu(plugin, event, folder) {
     item
       .setTitle("Reveal in file explorer")
       .setIcon("folder")
-      .onClick(() => revealFolderInExplorer(plugin.app, folder))
+      .onClick(() => f_revealInFileExplorer(plugin.app, folder))
   );
   if (!Platform.isMobile) {
     menu.addItem((item) =>
@@ -954,7 +968,7 @@ function buildAtPathViewPlugin(plugin) {
               sourcePath
             );
             if (resolved.kind === "folder") {
-              revealFolderInExplorer(plugin.app, resolved.target);
+              f_revealInFileExplorer(plugin.app, resolved.target);
             }
             return true;
           }
@@ -1144,7 +1158,7 @@ function captureDragRefsFromExplorerDom(plugin, evt) {
   return out;
 }
 
-function insertAtPathRefs(view, pos, refs, plugin, sourcePath) {
+function insertAtPathRefs(view, pos, refs, plugin, sourcePath, belowDocument = false) {
   const parts = [];
   for (const ref of refs) {
     if (!ref?.target) continue;
@@ -1155,10 +1169,19 @@ function insertAtPathRefs(view, pos, refs, plugin, sourcePath) {
     }
   }
   if (parts.length === 0) return;
-  const text = parts.join(" ") + " ";
+  const line = view.state.doc.lineAt(pos);
+  // Include the insertion point at EOF in an unfinished fenced block.
+  const inCode = isInExcludedRange(pos, buildExcludedRanges(view.state.doc.toString() + "\n"));
+  const blankLine = /^[\t ]*$/.test(line.text) && !inCode;
+  const from = blankLine ? line.from : pos;
+  const to = blankLine ? line.to : pos;
+  let text;
+  if (blankLine) text = parts.map(part => line.text + "- " + part).join("\n") + " ";
+  else if (belowDocument && !inCode) text = "\n\n" + parts.map(part => "- " + part).join("\n") + " ";
+  else text = parts.join(" ") + " ";
   view.dispatch({
-    changes: { from: pos, to: pos, insert: text },
-    selection: { anchor: pos + text.length },
+    changes: { from, to, insert: text },
+    selection: { anchor: from + text.length },
     userEvent: "input.drop",
   });
 }
@@ -1185,8 +1208,10 @@ function buildDragDropExtension(plugin) {
       }
       evt.preventDefault();
       evt.stopPropagation();
-      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY });
-      insertAtPathRefs(view, dropPos ?? view.state.selection.main.head, refs, plugin, sourcePath);
+      // Clamp the space below the document to its end, not the old cursor.
+      const dropPos = view.posAtCoords({ x: evt.clientX, y: evt.clientY }, false) ?? view.state.selection.main.head;
+      const endRect = dropPos === view.state.doc.length ? view.coordsAtPos(dropPos) : null;
+      insertAtPathRefs(view, dropPos, refs, plugin, sourcePath, endRect && evt.clientY > endRect.bottom);
       plugin._currentDragRefs = null;
       return true;
     },
@@ -1221,13 +1246,15 @@ class RepositoryTokenWidget extends WidgetType {
 
 function f_buildRepositoryLinkView(plugin) {
   function f_decorate(view, refs, sourcePath) {
-    if (!sourcePath) return Decoration.none;
+    if (!sourcePath) return { decorations: Decoration.none, linkDecorations: Decoration.none };
     const ranges = [];
+    const links = [];
     for (const ref of refs) {
       if (!view.visibleRanges.some(range => ref.start >= range.from && ref.end <= range.to)) continue;
       const result = plugin.f_resolveLinkTarget(ref, sourcePath);
       if (!f_managesRepositoryNavigation(ref.destination, result)) continue;
-      ranges.push(Decoration.mark({
+      links.push(Decoration.mark({
+        class: "atpath-repository-link",
         attributes: { "data-atpath-destination": ref.destination, "data-atpath-source": sourcePath,
           title: result.reason || result.normalizedPath },
       }).range(ref.start, ref.end));
@@ -1250,7 +1277,7 @@ function f_buildRepositoryLinkView(plugin) {
       }
       if (text) ranges.push(Decoration.widget({ widget: new RepositoryTokenWidget(text, skipped, failed), side: 1 }).range(ref.end));
     }
-    return Decoration.set(ranges, true);
+    return { decorations: Decoration.set(ranges, true), linkDecorations: Decoration.set(links, true) };
   }
 
   return ViewPlugin.define(view => {
@@ -1260,7 +1287,7 @@ function f_buildRepositoryLinkView(plugin) {
       refs,
       sourcePath,
       generation: plugin._repositoryDecorationGeneration,
-      decorations: f_decorate(view, refs, sourcePath),
+      ...f_decorate(view, refs, sourcePath),
       update(update) {
         const path = f_editorSourcePath(update.view, plugin);
         if (update.docChanged) this.refs = plugin.f_scanMarkdownRefs(update.state.doc.toString());
@@ -1268,12 +1295,14 @@ function f_buildRepositoryLinkView(plugin) {
           || this.generation !== plugin._repositoryDecorationGeneration) {
           this.sourcePath = path;
           this.generation = plugin._repositoryDecorationGeneration;
-          this.decorations = f_decorate(update.view, this.refs, path);
+          Object.assign(this, f_decorate(update.view, this.refs, path));
         }
       },
     };
   }, {
     decorations: value => value.decorations,
+    // Keep one wrapper around Obsidian's escaped/emphasized label fragments.
+    provide: extension => EditorView.outerDecorations.of(view => view.plugin(extension)?.linkDecorations ?? Decoration.none),
   });
 }
 
@@ -1292,7 +1321,15 @@ function f_captureEditorRepositoryLinks(plugin) {
     }
     f_interceptRepositoryLink(plugin, event, link.dataset.atpathDestination, link.dataset.atpathSource);
   };
-  for (const type of ["click", "mousedown", "contextmenu"]) plugin.registerDomEvent(document, type, handle, { capture: true });
+  const documents = new WeakSet();
+  const f_registerDocument = doc => {
+    if (documents.has(doc)) return;
+    documents.add(doc);
+    for (const type of ["click", "mousedown", "contextmenu"]) plugin.registerDomEvent(doc, type, handle, { capture: true });
+  };
+  f_registerDocument(document);
+  plugin.app.workspace.iterateAllLeaves?.(leaf => f_registerDocument(leaf.view.containerEl.ownerDocument));
+  plugin.registerEvent(plugin.app.workspace.on("window-open", (_workspaceWindow, win) => f_registerDocument(win.document)));
 }
 
 function f_isCanonicalRepositoryDestination(destination) {
@@ -1311,7 +1348,7 @@ function f_interceptRepositoryLink(plugin, event, destination, sourcePath) {
   event.stopImmediatePropagation();
   if (event.type === "contextmenu") {
     if (resolved.kind === "folder") showAtPathFolderMenu(plugin, event, resolved.target);
-    if (resolved.kind === "file") showAtPathMenu(plugin, event, resolved.normalizedPath);
+    if (resolved.kind === "file") showAtPathMenu(plugin, event, resolved.normalizedPath, resolved);
   } else {
     void plugin.f_resolveLinkTargetAsync({ destination }, sourcePath)
       .then(result => plugin.f_openRepositoryTarget(result, event.ctrlKey || event.metaKey || event.button === 1))
@@ -1440,7 +1477,7 @@ function registerPostProcessor(plugin) {
               ctx.sourcePath
             );
             if (resolved.kind === "folder") {
-              revealFolderInExplorer(plugin.app, resolved.target);
+              f_revealInFileExplorer(plugin.app, resolved.target);
             }
           });
           link.addEventListener("contextmenu", (e) => {
@@ -3588,7 +3625,7 @@ class AtPathPlugin extends Plugin {
 
   async f_openRepositoryTarget(result, newLeaf) {
     if (result.kind === "folder") {
-      revealFolderInExplorer(this.app, result.target);
+      f_revealInFileExplorer(this.app, result.target);
     } else if (result.kind === "file") {
       if (result.target.localOnly) {
         if (Platform.isMobile) new Notice("File is available for copy but is outside the Obsidian index: " + result.normalizedPath);

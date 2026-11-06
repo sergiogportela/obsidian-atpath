@@ -47,7 +47,9 @@ Existing `@path` and AtPath wikilink references remain readable during migration
 
 ### Clickable Links
 
-Click a repository link in Live Preview or Reading mode to open the local file, or reveal a folder. The desktop context menu can open the target in the default external application.
+Click a repository link in Live Preview or Reading mode to open the local file, or reveal a folder. File links offer opening in the current tab, a new tab, a right split, or a new window (desktop), plus revealing the file and copying its vault path. Desktop also offers opening in the default external application. Navigation preserves heading/block fragments. Files outside Obsidian's index offer copying their path and opening externally on desktop.
+
+Ordinary underscores within generated path names stay readable without Markdown escapes. Existing escaped labels highlight as one link in Live Preview; entering a link still exposes its Markdown source for editing. Drops onto blank lines or below the document create one bullet per distinct file or folder. Drops into existing text stay inline, and code/frontmatter regions do not acquire bullet markers.
 
 ### Token Counts
 

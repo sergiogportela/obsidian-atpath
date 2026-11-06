@@ -68,6 +68,26 @@ test("authoring generates scoped destinations and full labels and rejects unaddr
     /unique GitHub link/);
 });
 
+test("authored path labels keep intraword underscores readable without enabling Markdown formatting", () => {
+  const MarkdownIt = require("markdown-it");
+  const parser = new MarkdownIt();
+  const source = "projects/one/source.md";
+  for (const label of [
+    "21_git_workspace/PRD.md", "MATRIZ_GERAL.md", "ação_última/文件_名称.md", "a__b.md",
+    "_private_/file.md", "a_/b_c_.md", "[brackets]*stars*`code`&amp;~strike~.md", "back\\slash.md",
+  ]) {
+    const markdown = f_formatRepositoryLink("projects/one/" + label, source, fixture.repositories, "file");
+    const [link] = f_scanMarkdownLinks(markdown);
+    assert.equal(link.label, label);
+    const children = parser.parseInline(markdown, {})[0].children;
+    assert.deepEqual(children.map(child => child.type), ["link_open", "text", "link_close"], label);
+    assert.equal(children[1].content, label);
+    if (["21_git_workspace/PRD.md", "MATRIZ_GERAL.md", "ação_última/文件_名称.md", "a__b.md"].includes(label)) {
+      assert.ok(markdown.startsWith("[" + label + "]("), markdown);
+    }
+  }
+});
+
 test("a canonical GitHub identity outranks aliases on other checkouts", () => {
   const sourcePath = "projects/one/dir/source.md";
   const repositories = fixture.repositories.map(repo =>

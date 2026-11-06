@@ -316,7 +316,14 @@ function f_repositoryLinkParts(targetPath, sourcePath, repositories, kind, githu
 
 function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
   const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
-  return "[" + label.replace(/([\\\[\]*_`<>&~])/g, "\\$1") + "](" + destination + ")";
+  // Intraword underscores cannot start emphasis. Keeping them literal also
+  // avoids Obsidian splitting ordinary file names into escaped text fragments.
+  const escaped = label.replace(/([\\\[\]*`<>&~])|_+/gu, (match, punctuation, offset) => {
+    if (!punctuation && /[\p{L}\p{N}]/u.test(label[offset - 1] ?? "")
+      && /[\p{L}\p{N}]/u.test(label[offset + match.length] ?? "")) return match;
+    return match.replace(/./g, "\\$&");
+  });
+  return "[" + escaped + "](" + destination + ")";
 }
 
 function f_rewriteRepositoryDestinations(markdown, {
