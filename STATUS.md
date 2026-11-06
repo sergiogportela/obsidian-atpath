@@ -4,7 +4,7 @@ AtPath 1.9.0's repository-link migration and exact token counting are integrated
 
 ## Verified
 
-- The file-symlink follow-up is installed for desktop acceptance on codex/explorer-file-symlinks, separate from main. Arrow-marked virtual rows open indexed in-vault targets; aliases share target counts without changing folder totals. Eight installed checks cover discovery, identity, search, retargeting, target changes, deletion-key protection and disposal.
+- The file-symlink follow-up is installed and integrated into main. Arrow-marked virtual rows open indexed in-vault targets; aliases share target counts without changing folder totals. Eight installed checks cover discovery, identity, search, retargeting, target changes, deletion-key protection and disposal.
 
 - 191 Node tests pass. Desktop checks cover autocomplete, navigation, native backlinks/graph, counts, copy, rename and preview dialogs.
 - Exact counts match Python tiktoken for 4,423 files; 968 folder totals match an independent calculation. Content-verified caching detects offline same-size/same-timestamp edits. Three exact-token Claude reviews completed without a blocker.
