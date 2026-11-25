@@ -10,11 +10,11 @@ AtPath adds file and folder autocomplete, exact token counts, context copying, a
 
 Requires **Obsidian 1.15+**.
 
-1. Download [AtPath 1.9.0 ZIP](https://github.com/sergiogportela/obsidian-atpath/releases/download/1.9.0/atpath-1.9.0.zip), unzip it, and move the `atpath` folder into your vault's `.obsidian/plugins/` folder. Restart Obsidian, then enable **AtPath** under **Settings → Community plugins**. On macOS, **Cmd+Shift+.** shows hidden folders. Use your configured settings folder if it differs from `.obsidian`.
+1. Download [AtPath 1.10.0 ZIP](https://github.com/sergiogportela/obsidian-atpath/releases/download/1.10.0/atpath-1.10.0.zip), unzip it, and move the `atpath` folder into your vault's `.obsidian/plugins/` folder. Restart Obsidian, then enable **AtPath** under **Settings → Community plugins**. On macOS, **Cmd+Shift+.** shows hidden folders. Use your configured settings folder if it differs from `.obsidian`.
 2. Under **Settings → Files and links**, turn **Use Wikilinks** off.
 3. Open a note inside a Git checkout in your vault. Type `[[`, search for a file or folder, and press **Enter**.
 
-For updates through BRAT, add `sergiogportela/obsidian-atpath`. For manual updates, replace only `main.js`, `manifest.json` and `styles.css`; keep your `data.json` settings. See [release notes](https://github.com/sergiogportela/obsidian-atpath/releases/tag/1.9.0).
+For updates through BRAT, add `sergiogportela/obsidian-atpath`. For manual updates, replace only `main.js`, `manifest.json` and `styles.css`; keep your `data.json` settings. See [release notes](https://github.com/sergiogportela/obsidian-atpath/releases/tag/1.10.0).
 
 ## Add and open links
 
@@ -29,6 +29,8 @@ Files in the note's repository rank first. Dragging files or folders from the ex
 | Folder | `[docs/](/docs/)` |
 
 Click a link to open its **current local file**, even when the GitHub URL says `main` and your checkout is on another branch. Folder links reveal the folder. Right-click for **new tab**, **right split**, **new window**, **reveal**, **copy path**, or **open in default app**; desktop-only actions appear on desktop.
+
+To reference a file or folder outside the note, right-click it in the explorer and choose **Copy path → as GitHub link**, or drag it into another app. Both give the full form, such as `[repo/docs/brief.md](https://github.com/owner/repo/blob/main/docs/brief.md)`.
 
 **File symlinks on desktop** appear as arrow-marked shortcuts, such as `CLAUDE.md → AGENTS.md`. They open the original indexed file and share its count without adding duplicate tokens to folder totals.
 

@@ -6403,16 +6403,23 @@ var require_repository_links = __commonJS({
       const directory = kind === "folder";
       const suffix = directory && relative ? "/" : "";
       const destination = sameCheckout && !github ? "/" + encoded + suffix : "https://github.com/" + (github?.identity ?? target.identity) + "/" + (directory ? "tree" : "blob") + "/" + (github?.ref ?? "main") + "/" + encoded + suffix;
-      const label = (sameCheckout ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
+      const label = (sameCheckout && !github ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
       return { label, destination };
     }
-    function f_formatRepositoryLink2(targetPath, sourcePath, repositories, kind) {
-      const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
+    function f_markdownLink(label, destination) {
       const escaped = label.replace(/([\\\[\]*`<>&~])|_+/gu, (match, punctuation, offset) => {
         if (!punctuation && /[\p{L}\p{N}]/u.test(label[offset - 1] ?? "") && /[\p{L}\p{N}]/u.test(label[offset + match.length] ?? "")) return match;
         return match.replace(/./g, "\\$&");
       });
       return "[" + escaped + "](" + destination + ")";
+    }
+    function f_formatRepositoryLink2(targetPath, sourcePath, repositories, kind) {
+      const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
+      return f_markdownLink(label, destination);
+    }
+    function f_formatGithubLink2(targetPath, repositories, kind) {
+      const { label, destination } = f_repositoryLinkParts(targetPath, targetPath, repositories, kind, {});
+      return f_markdownLink(label, destination);
     }
     function f_rewriteRepositoryDestinations2(markdown, {
       sourcePath,
@@ -6484,6 +6491,7 @@ var require_repository_links = __commonJS({
       f_repositoryForPath: f_repositoryForPath2,
       f_resolveRepositoryLink: f_resolveRepositoryLink2,
       f_formatRepositoryLink: f_formatRepositoryLink2,
+      f_formatGithubLink: f_formatGithubLink2,
       f_rewriteRepositoryDestinations: f_rewriteRepositoryDestinations2
     };
   }
@@ -8851,7 +8859,7 @@ var { f_installExplorerTokenBadges } = require_explorer_token_badges();
 var { f_installExplorerSymlinkShortcuts } = require_explorer_symlink_shortcuts();
 var { f_loadTokenCache, f_saveTokenCache } = require_token_cache_storage();
 var { f_isEligibleLinkedPath } = require_linked_file_policy();
-var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_rewriteRepositoryDestinations } = require_repository_links();
+var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require_repository_links();
 var { f_installNativeRepositoryLinks } = require_native_repository_links();
 var {
   REPOSITORY_MAP_PATH,
@@ -10269,7 +10277,7 @@ var AtPathSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new Setting(containerEl).setName("Drag-and-drop repository links").setDesc("Dragging a file or folder into the editor inserts a Markdown repository link. Disable to restore Obsidian\u2019s default drag behavior.").addToggle(
+    new Setting(containerEl).setName("Drag-and-drop repository links").setDesc("Dragging a file or folder into the editor inserts a Markdown repository link. Dragging it to another app drops its GitHub link. Disable to restore Obsidian\u2019s default drag behavior.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableDragDropAtPath !== false).onChange(async (value) => {
         this.plugin.settings.enableDragDropAtPath = value;
         await this.plugin.saveSettings();
@@ -10873,6 +10881,13 @@ var AtPathPlugin = class extends Plugin {
       const refs = captureDragRefsFromExplorerDom(this, evt);
       if (refs.length > 0) this._currentDragRefs = refs;
     }, { capture: true });
+    this.registerDomEvent(document, "dragstart", (evt) => {
+      if (!this._currentDragRefs || !evt.dataTransfer) return;
+      const links = this.f_githubLinks(this._currentDragRefs.map((ref) => ref.target));
+      if (!links.length) return;
+      evt.dataTransfer.setData("text/plain", links.join("\n"));
+      evt.dataTransfer.clearData("text/uri-list");
+    });
     this.registerDomEvent(document, "dragend", () => {
       this._currentDragRefs = null;
     }, { capture: true });
@@ -10968,6 +10983,12 @@ var AtPathPlugin = class extends Plugin {
       })
     );
     this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => this.f_addGithubLinkMenuItem(menu, [file]))
+    );
+    this.registerEvent(
+      this.app.workspace.on("files-menu", (menu, files) => this.f_addGithubLinkMenuItem(menu, files))
+    );
+    this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this._linkedCountWatches.clear();
         this._repositoryDecorationGeneration = (this._repositoryDecorationGeneration || 0) + 1;
@@ -10995,6 +11016,16 @@ var AtPathPlugin = class extends Plugin {
       id: "copy-note-with-atpaths",
       name: "Copy note with linked files to clipboard",
       editorCallback: () => this.copyNoteWithAtPaths()
+    });
+    this.addCommand({
+      id: "copy-github-link",
+      name: "Copy GitHub link for current file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || !this.f_githubLinks([file]).length) return false;
+        if (!checking) void this.f_copyGithubLinks([file]);
+        return true;
+      }
     });
     this.addCommand({
       id: "publish-to-vercel",
@@ -11880,6 +11911,45 @@ var AtPathPlugin = class extends Plugin {
       sourcePath,
       this.repositories,
       target instanceof TFolder ? "folder" : "file"
+    );
+  }
+  // GitHub links address targets for readers outside the note: the clipboard
+  // and drags leaving Obsidian. A target outside a GitHub checkout has no such
+  // link and is omitted, so callers can offer the action only when it works.
+  f_githubLinks(targets) {
+    const links = [];
+    for (const target of targets) {
+      try {
+        links.push(f_formatGithubLink(
+          target.path === "/" ? "" : target.path,
+          this.repositories,
+          target instanceof TFolder ? "folder" : "file"
+        ));
+      } catch (_) {
+      }
+    }
+    return links;
+  }
+  async f_copyGithubLinks(targets) {
+    const links = this.f_githubLinks(targets);
+    if (!links.length) {
+      new Notice("No GitHub repository found for this path.");
+      return;
+    }
+    try {
+      await copyToClipboard(links.join("\n"));
+    } catch (error) {
+      new Notice("Could not copy GitHub link: " + error.message);
+      return;
+    }
+    const skipped = targets.length - links.length;
+    new Notice("Copied " + (links.length === 1 ? "GitHub link" : links.length + " GitHub links") + (skipped ? ". Skipped " + skipped + " outside GitHub repositories." : ""));
+  }
+  f_addGithubLinkMenuItem(menu, targets) {
+    if (!this.f_githubLinks(targets).length) return;
+    const inCopyPathSubmenu = targets.length === 1 && typeof menu.setSectionSubmenu === "function";
+    menu.addItem(
+      (item) => item.setSection(inCopyPathSubmenu ? "info.copy" : "info").setTitle(inCopyPathSubmenu ? "as GitHub link" : targets.length === 1 ? "Copy GitHub link" : "Copy GitHub links").setIcon("github").onClick(() => void this.f_copyGithubLinks(targets))
     );
   }
   f_scanMarkdownRefs(content) {

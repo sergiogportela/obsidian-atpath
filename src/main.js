@@ -14,7 +14,7 @@ const { f_installExplorerSymlinkShortcuts } = require("./explorer-symlink-shortc
 const { f_loadTokenCache, f_saveTokenCache } = require("./token-cache-storage");
 const { f_isEligibleLinkedPath } = require("./linked-file-policy");
 
-const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_rewriteRepositoryDestinations } = require("./repository-links");
+const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require("./repository-links");
 const { f_installNativeRepositoryLinks } = require("./native-repository-links");
 const {
   REPOSITORY_MAP_PATH, f_discoverRepositories, f_discoverSourceCheckout, f_isPrunedSourcePath,
@@ -1620,7 +1620,7 @@ class AtPathSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Drag-and-drop repository links")
-      .setDesc("Dragging a file or folder into the editor inserts a Markdown repository link. Disable to restore Obsidian’s default drag behavior.")
+      .setDesc("Dragging a file or folder into the editor inserts a Markdown repository link. Dragging it to another app drops its GitHub link. Disable to restore Obsidian’s default drag behavior.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.enableDragDropAtPath !== false)
@@ -2373,6 +2373,18 @@ class AtPathPlugin extends Plugin {
       const refs = captureDragRefsFromExplorerDom(this, evt);
       if (refs.length > 0) this._currentDragRefs = refs;
     }, { capture: true });
+    // Obsidian fills the drag payload with its own obsidian:// URL while it
+    // handles dragstart, so the GitHub link is written afterwards, in the
+    // bubble phase. Dropping the URL entry leaves one payload, so every other
+    // app receives the same Markdown link. Drops inside Obsidian are unaffected:
+    // they read the drag manager and `_currentDragRefs`, not this payload.
+    this.registerDomEvent(document, "dragstart", (evt) => {
+      if (!this._currentDragRefs || !evt.dataTransfer) return;
+      const links = this.f_githubLinks(this._currentDragRefs.map(ref => ref.target));
+      if (!links.length) return;
+      evt.dataTransfer.setData("text/plain", links.join("\n"));
+      evt.dataTransfer.clearData("text/uri-list");
+    });
     this.registerDomEvent(document, "dragend", () => {
       this._currentDragRefs = null;
     }, { capture: true });
@@ -2490,6 +2502,13 @@ class AtPathPlugin extends Plugin {
       })
     );
 
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => this.f_addGithubLinkMenuItem(menu, [file]))
+    );
+    this.registerEvent(
+      this.app.workspace.on("files-menu", (menu, files) => this.f_addGithubLinkMenuItem(menu, files))
+    );
+
     // Status bar triggers
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -2521,6 +2540,17 @@ class AtPathPlugin extends Plugin {
       id: "copy-note-with-atpaths",
       name: "Copy note with linked files to clipboard",
       editorCallback: () => this.copyNoteWithAtPaths(),
+    });
+
+    this.addCommand({
+      id: "copy-github-link",
+      name: "Copy GitHub link for current file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || !this.f_githubLinks([file]).length) return false;
+        if (!checking) void this.f_copyGithubLinks([file]);
+        return true;
+      },
     });
 
     this.addCommand({
@@ -3534,6 +3564,52 @@ class AtPathPlugin extends Plugin {
     if (sourceIssue) throw new Error(sourceIssue);
     return f_formatRepositoryLink(target.path === "/" ? "" : target.path, sourcePath, this.repositories,
       target instanceof TFolder ? "folder" : "file");
+  }
+
+  // GitHub links address targets for readers outside the note: the clipboard
+  // and drags leaving Obsidian. A target outside a GitHub checkout has no such
+  // link and is omitted, so callers can offer the action only when it works.
+  f_githubLinks(targets) {
+    const links = [];
+    for (const target of targets) {
+      try {
+        links.push(f_formatGithubLink(target.path === "/" ? "" : target.path, this.repositories,
+          target instanceof TFolder ? "folder" : "file"));
+      } catch (_) { /* no GitHub checkout contains this target */ }
+    }
+    return links;
+  }
+
+  async f_copyGithubLinks(targets) {
+    const links = this.f_githubLinks(targets);
+    if (!links.length) {
+      new Notice("No GitHub repository found for this path.");
+      return;
+    }
+    try {
+      await copyToClipboard(links.join("\n"));
+    } catch (error) {
+      new Notice("Could not copy GitHub link: " + error.message);
+      return;
+    }
+    const skipped = targets.length - links.length;
+    new Notice("Copied " + (links.length === 1 ? "GitHub link" : links.length + " GitHub links")
+      + (skipped ? ". Skipped " + skipped + " outside GitHub repositories." : ""));
+  }
+
+  f_addGithubLinkMenuItem(menu, targets) {
+    if (!this.f_githubLinks(targets).length) return;
+    // For a single item Obsidian turns the "info.copy" section into its native
+    // "Copy path" submenu, where this belongs beside the other path formats.
+    // Multi-selection menus have no such submenu, so the item names itself.
+    const inCopyPathSubmenu = targets.length === 1 && typeof menu.setSectionSubmenu === "function";
+    menu.addItem((item) =>
+      item
+        .setSection(inCopyPathSubmenu ? "info.copy" : "info")
+        .setTitle(inCopyPathSubmenu ? "as GitHub link" : targets.length === 1 ? "Copy GitHub link" : "Copy GitHub links")
+        .setIcon("github")
+        .onClick(() => void this.f_copyGithubLinks(targets))
+    );
   }
 
   f_scanMarkdownRefs(content) {

@@ -310,12 +310,11 @@ function f_repositoryLinkParts(targetPath, sourcePath, repositories, kind, githu
   const destination = sameCheckout && !github ? "/" + encoded + suffix :
     "https://github.com/" + (github?.identity ?? target.identity) + "/" + (directory ? "tree" : "blob")
       + "/" + (github?.ref ?? "main") + "/" + encoded + suffix;
-  const label = (sameCheckout ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
+  const label = (sameCheckout && !github ? relative || "/" : target.identity.split("/")[1] + "/" + relative) + suffix;
   return { label, destination };
 }
 
-function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
-  const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
+function f_markdownLink(label, destination) {
   // Intraword underscores cannot start emphasis. Keeping them literal also
   // avoids Obsidian splitting ordinary file names into escaped text fragments.
   const escaped = label.replace(/([\\\[\]*`<>&~])|_+/gu, (match, punctuation, offset) => {
@@ -324,6 +323,19 @@ function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
     return match.replace(/./g, "\\$&");
   });
   return "[" + escaped + "](" + destination + ")";
+}
+
+function f_formatRepositoryLink(targetPath, sourcePath, repositories, kind) {
+  const { label, destination } = f_repositoryLinkParts(targetPath, sourcePath, repositories, kind);
+  return f_markdownLink(label, destination);
+}
+
+// A link that leaves Obsidian (clipboard, drag to another app) has no source
+// note to be relative to, so it always names the repository and uses the
+// GitHub destination, even for a target the reader's note would reach by "/".
+function f_formatGithubLink(targetPath, repositories, kind) {
+  const { label, destination } = f_repositoryLinkParts(targetPath, targetPath, repositories, kind, {});
+  return f_markdownLink(label, destination);
 }
 
 function f_rewriteRepositoryDestinations(markdown, {
@@ -391,5 +403,5 @@ function f_rewriteRepositoryDestinations(markdown, {
 
 module.exports = {
   f_scanMarkdownLinks, f_originIdentity, f_repositoryForPath, f_resolveRepositoryLink,
-  f_formatRepositoryLink, f_rewriteRepositoryDestinations,
+  f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations,
 };

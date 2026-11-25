@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
-  f_scanMarkdownLinks, f_resolveRepositoryLink, f_originIdentity, f_formatRepositoryLink
+  f_scanMarkdownLinks, f_resolveRepositoryLink, f_originIdentity, f_formatRepositoryLink, f_formatGithubLink
 } = require("../src/repository-links");
 const fixture = require("./fixtures/repository-links.json");
 
@@ -101,4 +101,41 @@ test("a canonical GitHub identity outranks aliases on other checkouts", () => {
   assert.equal(result.status, "resolved");
   assert.equal(result.repository, "org/beta");
   assert.equal(result.vaultPath, "third/AGENTS.md");
+});
+
+test("GitHub links name the repository and resolve back to the same local target", () => {
+  const repos = fixture.repositories;
+  const cases = [
+    ["projects/one/dir/space (x).md", "file", "[alpha/dir/space (x).md](https://github.com/org/alpha/blob/main/dir/space%20%28x%29.md)"],
+    ["projects/one/docs", "folder", "[alpha/docs/](https://github.com/org/alpha/tree/main/docs/)"],
+    ["projects/one", "folder", "[alpha/](https://github.com/org/alpha/tree/main/)"],
+    ["third/AGENTS.md", "file", "[beta/AGENTS.md](https://github.com/org/beta/blob/main/AGENTS.md)"],
+    ["README.md", "file", "[workspace/README.md](https://github.com/org/workspace/blob/main/README.md)"],
+    ["", "folder", "[workspace/](https://github.com/org/workspace/tree/main/)"],
+    ["projects/one/21_git_workspace/MATRIZ_GERAL.md", "file",
+      "[alpha/21_git_workspace/MATRIZ_GERAL.md](https://github.com/org/alpha/blob/main/21_git_workspace/MATRIZ_GERAL.md)"],
+  ];
+  for (const [vaultPath, kind, expected] of cases) {
+    const markdown = f_formatGithubLink(vaultPath, repos, kind);
+    assert.equal(markdown, expected);
+    // Read from a note in an unrelated checkout, the link must lead to the same target.
+    const [link] = f_scanMarkdownLinks(markdown);
+    const result = f_resolveRepositoryLink(link, {
+      sourcePath: "third/notes.md", repositories: repos, getTargetType: () => kind,
+    });
+    assert.equal(result.status, "resolved", vaultPath);
+    assert.equal(result.vaultPath, vaultPath, vaultPath);
+  }
+});
+
+test("GitHub links stay available for duplicate checkouts and reject targets without a GitHub origin", () => {
+  const repos = fixture.repositories;
+  // Two local checkouts of one GitHub repository share the same public address.
+  assert.equal(f_formatGithubLink("moved/beta-checkout/AGENTS.md", repos, "file"),
+    "[beta/AGENTS.md](https://github.com/other/beta/blob/main/AGENTS.md)");
+  assert.equal(f_formatGithubLink("clones/beta/AGENTS.md", repos, "file"),
+    "[beta/AGENTS.md](https://github.com/other/beta/blob/main/AGENTS.md)");
+  // A nested checkout without a GitHub origin must not borrow its parent's address.
+  assert.throws(() => f_formatGithubLink("projects/one/nested/file.md", repos, "file"), /unique GitHub link/);
+  assert.throws(() => f_formatGithubLink("notes/file.md", [], "file"), /Repository map is unavailable/);
 });
