@@ -1,7 +1,7 @@
 {
   "id": "atpath",
   "name": "AtPath",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "minAppVersion": "1.15.0",
   "description": "Author repository Markdown links, open local files, and count text tokens.",
   "author": "sergio",

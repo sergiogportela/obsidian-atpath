@@ -16,6 +16,7 @@ const { f_isEligibleLinkedPath } = require("./linked-file-policy");
 
 const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require("./repository-links");
 const { f_installNativeRepositoryLinks } = require("./native-repository-links");
+const { COPY_PATH_SECTION, f_compactCopyPathItems } = require("./copy-path-menu");
 const {
   REPOSITORY_MAP_PATH, f_discoverRepositories, f_discoverSourceCheckout, f_isPrunedSourcePath,
   f_lookupRenamedRepository,
@@ -257,6 +258,7 @@ const DEFAULT_SETTINGS = {
   statusBarShowSelection: true,
   suggestFolders: true,
   enableDragDropAtPath: true,
+  compactCopyPathMenu: true,
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
@@ -1631,6 +1633,18 @@ class AtPathSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("Compact copy path menu")
+      .setDesc("Shows only the vault path and the GitHub link under Copy path. Disable to also show the Obsidian URL and system path.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.compactCopyPathMenu !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.compactCopyPathMenu = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     new Setting(containerEl).setHeading().setName("Publishing");
 
     new Setting(containerEl)
@@ -2503,7 +2517,10 @@ class AtPathPlugin extends Plugin {
     );
 
     this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file) => this.f_addGithubLinkMenuItem(menu, [file]))
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (this.settings.compactCopyPathMenu !== false) f_compactCopyPathItems(menu);
+        this.f_addGithubLinkMenuItem(menu, [file]);
+      })
     );
     this.registerEvent(
       this.app.workspace.on("files-menu", (menu, files) => this.f_addGithubLinkMenuItem(menu, files))
@@ -3599,13 +3616,13 @@ class AtPathPlugin extends Plugin {
 
   f_addGithubLinkMenuItem(menu, targets) {
     if (!this.f_githubLinks(targets).length) return;
-    // For a single item Obsidian turns the "info.copy" section into its native
+    // For a single item Obsidian turns the copy-path section into its native
     // "Copy path" submenu, where this belongs beside the other path formats.
     // Multi-selection menus have no such submenu, so the item names itself.
     const inCopyPathSubmenu = targets.length === 1 && typeof menu.setSectionSubmenu === "function";
     menu.addItem((item) =>
       item
-        .setSection(inCopyPathSubmenu ? "info.copy" : "info")
+        .setSection(inCopyPathSubmenu ? COPY_PATH_SECTION : "info")
         .setTitle(inCopyPathSubmenu ? "as GitHub link" : targets.length === 1 ? "Copy GitHub link" : "Copy GitHub links")
         .setIcon("github")
         .onClick(() => void this.f_copyGithubLinks(targets))

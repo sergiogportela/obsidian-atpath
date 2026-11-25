@@ -10,11 +10,11 @@ AtPath adds file and folder autocomplete, exact token counts, context copying, a
 
 Requires **Obsidian 1.15+**.
 
-1. Download [AtPath 1.10.0 ZIP](https://github.com/sergiogportela/obsidian-atpath/releases/download/1.10.0/atpath-1.10.0.zip), unzip it, and move the `atpath` folder into your vault's `.obsidian/plugins/` folder. Restart Obsidian, then enable **AtPath** under **Settings → Community plugins**. On macOS, **Cmd+Shift+.** shows hidden folders. Use your configured settings folder if it differs from `.obsidian`.
+1. Download [AtPath 1.10.1 ZIP](https://github.com/sergiogportela/obsidian-atpath/releases/download/1.10.1/atpath-1.10.1.zip), unzip it, and move the `atpath` folder into your vault's `.obsidian/plugins/` folder. Restart Obsidian, then enable **AtPath** under **Settings → Community plugins**. On macOS, **Cmd+Shift+.** shows hidden folders. Use your configured settings folder if it differs from `.obsidian`.
 2. Under **Settings → Files and links**, turn **Use Wikilinks** off.
 3. Open a note inside a Git checkout in your vault. Type `[[`, search for a file or folder, and press **Enter**.
 
-For updates through BRAT, add `sergiogportela/obsidian-atpath`. For manual updates, replace only `main.js`, `manifest.json` and `styles.css`; keep your `data.json` settings. See [release notes](https://github.com/sergiogportela/obsidian-atpath/releases/tag/1.10.0).
+For updates through BRAT, add `sergiogportela/obsidian-atpath`. For manual updates, replace only `main.js`, `manifest.json` and `styles.css`; keep your `data.json` settings. See [release notes](https://github.com/sergiogportela/obsidian-atpath/releases/tag/1.10.1).
 
 ## Add and open links
 

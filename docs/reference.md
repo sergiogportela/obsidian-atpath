@@ -1,6 +1,6 @@
 # AtPath reference
 
-For the visual introduction, see [README.md](/README.md). This document describes the 1.10.0 implementation on main; it does not imply a tagged release.
+For the visual introduction, see [README.md](/README.md). This document describes the 1.10.1 implementation on main; it does not imply a tagged release.
 
 ## Repository links
 
@@ -36,11 +36,13 @@ A link used outside its note, such as in a chat, a prompt or another repository,
 
 `[{repo}/{path}](https://github.com/{owner}/{repo}/blob/main/{path})`; folders use `tree` and end in `/`.
 
-- **Explorer and tab menus:** right-click a file or folder and choose **Copy path → as GitHub link**, beside Obsidian's own path formats. A multi-selection shows **Copy GitHub links** and copies one link per line.
+- **Explorer and tab menus:** right-click a file or folder and choose **Copy path → as GitHub link**, beside **from vault folder**. A multi-selection shows **Copy GitHub links** and copies one link per line.
 - **Command palette:** **Copy GitHub link for current file**; assign a hotkey if you use it often.
 - **Dragging out of Obsidian:** a file, folder or multi-selection dragged from the explorer into another app drops the same links as text. Drops inside Obsidian are unchanged: the editor still receives the shorter repository link and the explorer still moves files.
 
-The revision is always `main`, matching authored links, even before the target is pushed. Items outside a GitHub checkout have no such link: the menu entry and command are not offered, a mixed selection reports how many were skipped, and their drags keep Obsidian's own payload. While dragging, AtPath replaces Obsidian's `obsidian://` text and URL payload with the Markdown link so every app receives the same text; **Copy path → as Obsidian URL** still provides that URL. The submenu placement uses a guarded internal menu API and falls back to a top-level **Copy GitHub link** item.
+The revision is always `main`, matching authored links, even before the target is pushed. Items outside a GitHub checkout have no such link: the menu entry and command are not offered, a mixed selection reports how many were skipped, and their drags keep Obsidian's own payload. While dragging, AtPath replaces Obsidian's `obsidian://` text and URL payload with the Markdown link so every app receives the same text; Obsidian's **Copy Obsidian URL** command still provides that URL. The submenu placement uses a guarded internal menu API and falls back to a top-level **Copy GitHub link** item.
+
+**Compact copy path menu**, default on, removes **as Obsidian URL** and **from system root** from that submenu, leaving the two formats worth pasting elsewhere. Turn it off to show all of Obsidian's formats. The entries are recognized by icon through a guarded internal menu API; if Obsidian changes them, they simply remain visible.
 
 ## File-symlink shortcuts
 
@@ -97,8 +99,8 @@ Enable **Require login to view** and configure Clerk plus approved emails for pr
 
 ## Other preferences and verification
 
-**Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, and **Drag-and-drop repository links** default on. Turning off drag/drop restores Obsidian's normal drag behavior, including the `obsidian://` payload for drags to other apps. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
+**Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, **Drag-and-drop repository links** and **Compact copy path menu** default on. Turning off drag/drop restores Obsidian's normal drag behavior, including the `obsidian://` payload for drags to other apps. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
 
-Automated coverage includes 195 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
+Automated coverage includes 197 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
 
 Registered drag/drop tests and six injected DOM drop cases pass. On macOS with Obsidian 1.15.1, physical mouse drags were verified for a file and a folder dropped into TextEdit and for a file dropped into a note, along with the native **Copy path** submenu entry. Other operating systems and drop targets were not tested. Mobile/Sync and live publication need their respective environments. Historical implementation and review documents remain available in Git history before this documentation cleanup.

@@ -6739,6 +6739,24 @@ var require_native_repository_links = __commonJS({
   }
 });
 
+// src/copy-path-menu.js
+var require_copy_path_menu = __commonJS({
+  "src/copy-path-menu.js"(exports2, module2) {
+    "use strict";
+    var COPY_PATH_SECTION2 = "info.copy";
+    var HIDDEN_COPY_PATH_ICONS = ["lucide-link", "lucide-hard-drive"];
+    function f_compactCopyPathItems2(menu) {
+      if (!Array.isArray(menu?.items)) return;
+      menu.items = menu.items.filter((item) => {
+        if (item?.section !== COPY_PATH_SECTION2) return true;
+        const icon = item.iconEl?.querySelector?.("svg");
+        return !icon || !HIDDEN_COPY_PATH_ICONS.some((name) => icon.classList.contains(name));
+      });
+    }
+    module2.exports = { COPY_PATH_SECTION: COPY_PATH_SECTION2, f_compactCopyPathItems: f_compactCopyPathItems2 };
+  }
+});
+
 // src/repository-index.js
 var require_repository_index = __commonJS({
   "src/repository-index.js"(exports2, module2) {
@@ -8861,6 +8879,7 @@ var { f_loadTokenCache, f_saveTokenCache } = require_token_cache_storage();
 var { f_isEligibleLinkedPath } = require_linked_file_policy();
 var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require_repository_links();
 var { f_installNativeRepositoryLinks } = require_native_repository_links();
+var { COPY_PATH_SECTION, f_compactCopyPathItems } = require_copy_path_menu();
 var {
   REPOSITORY_MAP_PATH,
   f_discoverRepositories,
@@ -9139,6 +9158,7 @@ var DEFAULT_SETTINGS = {
   statusBarShowSelection: true,
   suggestFolders: true,
   enableDragDropAtPath: true,
+  compactCopyPathMenu: true,
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
@@ -10284,6 +10304,12 @@ var AtPathSettingTab = class extends PluginSettingTab {
         this.plugin.reconfigureDragDrop();
       })
     );
+    new Setting(containerEl).setName("Compact copy path menu").setDesc("Shows only the vault path and the GitHub link under Copy path. Disable to also show the Obsidian URL and system path.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.compactCopyPathMenu !== false).onChange(async (value) => {
+        this.plugin.settings.compactCopyPathMenu = value;
+        await this.plugin.saveSettings();
+      })
+    );
     new Setting(containerEl).setHeading().setName("Publishing");
     new Setting(containerEl).setName("Vercel API token").setDesc("Personal access token for deploying notes to Vercel.").addText(
       (text) => text.setPlaceholder("Enter token...").setValue(this.plugin.settings.vercelToken).then((t) => {
@@ -10983,7 +11009,10 @@ var AtPathPlugin = class extends Plugin {
       })
     );
     this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file) => this.f_addGithubLinkMenuItem(menu, [file]))
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (this.settings.compactCopyPathMenu !== false) f_compactCopyPathItems(menu);
+        this.f_addGithubLinkMenuItem(menu, [file]);
+      })
     );
     this.registerEvent(
       this.app.workspace.on("files-menu", (menu, files) => this.f_addGithubLinkMenuItem(menu, files))
@@ -11949,7 +11978,7 @@ var AtPathPlugin = class extends Plugin {
     if (!this.f_githubLinks(targets).length) return;
     const inCopyPathSubmenu = targets.length === 1 && typeof menu.setSectionSubmenu === "function";
     menu.addItem(
-      (item) => item.setSection(inCopyPathSubmenu ? "info.copy" : "info").setTitle(inCopyPathSubmenu ? "as GitHub link" : targets.length === 1 ? "Copy GitHub link" : "Copy GitHub links").setIcon("github").onClick(() => void this.f_copyGithubLinks(targets))
+      (item) => item.setSection(inCopyPathSubmenu ? COPY_PATH_SECTION : "info").setTitle(inCopyPathSubmenu ? "as GitHub link" : targets.length === 1 ? "Copy GitHub link" : "Copy GitHub links").setIcon("github").onClick(() => void this.f_copyGithubLinks(targets))
     );
   }
   f_scanMarkdownRefs(content) {
