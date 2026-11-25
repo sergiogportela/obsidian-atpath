@@ -1360,6 +1360,18 @@ function f_interceptRepositoryLink(plugin, event, destination, sourcePath) {
   return true;
 }
 
+// Obsidian's Live Preview table cell arms a delayed cell focus when it is pressed and disarms it
+// only when the click reaches the window. f_interceptRepositoryLink keeps that click, so the
+// focus would run after navigation and write the reformatted table into the note just opened.
+// The cell ignores a press whose pointerdown is already cancelled, so cancel it for links AtPath opens.
+function f_cancelTableCellPressOnRepositoryLink(plugin, event, destination, sourcePath) {
+  if (!event.isPrimary || event.button !== 0) return false;
+  if (!event.target.closest?.("td, th")?.closest(".cm-editor")) return false;
+  if (!f_managesRepositoryNavigation(destination, plugin.f_resolveLinkTarget({ destination }, sourcePath))) return false;
+  event.preventDefault();
+  return true;
+}
+
 function registerPostProcessor(plugin) {
   plugin.registerMarkdownPostProcessor((el, ctx) => {
     for (const link of el.querySelectorAll("a[href]")) {
@@ -1367,6 +1379,7 @@ function registerPostProcessor(plugin) {
       if (!destination || (!f_isCanonicalRepositoryDestination(destination) && !/^\.\.?\//.test(destination))) continue;
       const result = plugin.f_resolveLinkTarget({ destination }, ctx.sourcePath);
       if (!f_managesRepositoryNavigation(destination, result) && !(result.kind === "ignored" && result.repository)) continue;
+      link.addEventListener("pointerdown", event => f_cancelTableCellPressOnRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       link.addEventListener("click", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       link.addEventListener("contextmenu", event => f_interceptRepositoryLink(plugin, event, destination, ctx.sourcePath), true);
       const nativeTitle = link.title;

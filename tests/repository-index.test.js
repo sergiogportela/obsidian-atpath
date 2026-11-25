@@ -446,6 +446,59 @@ test("normal plugin registration prioritizes [[ and consumes its closing pair", 
   assert.deepEqual(opened, [{ destination: "/missing.md", kind: "missing", reason: "Local target is unavailable" }]);
 });
 
+test("pressing a managed link in a Live Preview table cell cancels the press so the cell never focuses", async t => {
+  const AtPath = f_loadPlugin();
+  const plugin = new AtPath();
+  plugin.app = {
+    appId: "test",
+    vault: { adapter: {}, on() {} },
+    workspace: { editorSuggest: { suggests: [] }, onLayoutReady() {}, on() {} },
+  };
+  plugin.loadSettings = async () => { plugin.settings = {}; };
+  let f_postProcess;
+  plugin.registerMarkdownPostProcessor = processor => { f_postProcess = processor; };
+  for (const name of ["register", "registerEditorExtension", "registerEditorSuggest", "registerEvent",
+    "registerDomEvent", "addCommand", "addSettingTab"]) plugin[name] = () => {};
+  const oldDocument = globalThis.document;
+  const oldNodeFilter = globalThis.NodeFilter;
+  globalThis.document = { createTreeWalker: () => ({ nextNode: () => null }) };
+  globalThis.NodeFilter = { SHOW_TEXT: 4 };
+  t.after(() => { globalThis.document = oldDocument; globalThis.NodeFilter = oldNodeFilter; });
+  await plugin.onload();
+  plugin.f_resolveLinkTarget = ({ destination }) => destination === "/managed.md"
+    ? { kind: "file" } : { kind: "ignored", repository: {} };
+  plugin.f_bindReadingTokenBadge = () => {};
+  const f_link = destination => {
+    const listeners = new Map();
+    return {
+      listeners, dataset: {}, title: "", getAttribute: () => destination, createSpan: () => ({}),
+      addEventListener: (type, listener, capture) => { assert.equal(capture, true); listeners.set(type, listener); },
+    };
+  };
+  const managed = f_link("/managed.md");
+  const unmanaged = f_link("/unmanaged.md");
+  f_postProcess(
+    { querySelectorAll: selector => selector === "a[href]" ? [managed, unmanaged] : [] },
+    { sourcePath: "checkout/note.md" },
+  );
+  const f_pressIsCancelled = (link, { inEditorTable = true, button = 0, isPrimary = true } = {}) => {
+    const cell = { closest: selector => selector === ".cm-editor" && inEditorTable ? {} : null };
+    const event = {
+      type: "pointerdown", button, isPrimary, defaultPrevented: false,
+      target: { closest: selector => selector === "td, th" ? cell : null },
+      preventDefault() { this.defaultPrevented = true; },
+      stopImmediatePropagation() { assert.fail("the press must still reach other listeners"); },
+    };
+    link.listeners.get("pointerdown")(event);
+    return event.defaultPrevented;
+  };
+  assert.equal(f_pressIsCancelled(managed), true);
+  assert.equal(f_pressIsCancelled(managed, { inEditorTable: false }), false, "tables outside the editor keep native presses");
+  assert.equal(f_pressIsCancelled(managed, { button: 1 }), false, "only the primary button focuses a cell");
+  assert.equal(f_pressIsCancelled(managed, { isPrimary: false }), false);
+  assert.equal(f_pressIsCancelled(unmanaged), false, "links AtPath does not open keep native presses");
+});
+
 test("registered drag and drop uses the destination editor's checkout in an inactive split", async t => {
   const AtPath = f_loadPlugin();
   const plugin = new AtPath();
