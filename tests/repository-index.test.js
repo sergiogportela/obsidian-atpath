@@ -116,15 +116,18 @@ function f_loadPlugin(isMobile = true, obsidianOverrides = {}) {
       ...obsidianOverrides,
     };
     if (id === "@codemirror/view") return {
-      ViewPlugin: { define: (_plugin, options) => options },
-      EditorView: { domEventHandlers: handlers => handlers },
+      ViewPlugin: { define: (_plugin, options) => options, fromClass: pluginClass => pluginClass },
+      EditorView: { domEventHandlers: handlers => handlers, editorAttributes: { of: attributes => attributes } },
       MatchDecorator: class {},
       WidgetType: class {},
     };
     if (id === "@codemirror/state") return {
       Compartment: class { of(value) { return value; } },
+      EditorState: { transactionFilter: { of: filter => filter } },
+      StateField: { define: spec => spec },
       Prec: { highest: value => value },
     };
+    if (id === "@codemirror/language") return { syntaxTree: () => null, ensureSyntaxTree: () => null };
     return originalLoad.call(this, id, ...rest);
   };
   try {
@@ -497,6 +500,49 @@ test("pressing a managed link in a Live Preview table cell cancels the press so 
   assert.equal(f_pressIsCancelled(managed, { button: 1 }), false, "only the primary button focuses a cell");
   assert.equal(f_pressIsCancelled(managed, { isPrimary: false }), false);
   assert.equal(f_pressIsCancelled(unmanaged), false, "links AtPath does not open keep native presses");
+});
+
+test("the table guard is on by default and follows its setting without a reload", async t => {
+  const AtPath = f_loadPlugin();
+  const f_loadWith = async storedSettings => {
+    const plugin = new AtPath();
+    let optionUpdates = 0;
+    plugin.app = {
+      appId: "test",
+      vault: { adapter: {}, on() {} },
+      workspace: { editorSuggest: { suggests: [] }, onLayoutReady() {}, on() {}, updateOptions() { optionUpdates++; } },
+    };
+    plugin.loadData = async () => storedSettings;
+    const registered = [];
+    plugin.registerEditorExtension = extension => { registered.push(extension); };
+    for (const name of ["register", "registerEditorSuggest", "registerEvent", "registerDomEvent",
+      "registerMarkdownPostProcessor", "addCommand", "addSettingTab"]) plugin[name] = () => {};
+    await plugin.onload();
+    return { plugin, registered, optionUpdates: () => optionUpdates };
+  };
+  const oldDocument = globalThis.document;
+  const oldNodeFilter = globalThis.NodeFilter;
+  globalThis.document = { createTreeWalker: () => ({ nextNode: () => null }) };
+  globalThis.NodeFilter = { SHOW_TEXT: 4 };
+  t.after(() => { globalThis.document = oldDocument; globalThis.NodeFilter = oldNodeFilter; });
+
+  const fresh = await f_loadWith({});
+  const guard = fresh.plugin._tableGuardExtensions;
+  assert.equal(fresh.plugin.settings.protectTablesFromReformatting, true);
+  assert.equal(guard.length, 1, "a fresh install has the guard on");
+  assert.ok(fresh.registered.includes(guard), "Obsidian holds the array that the setting refills");
+
+  fresh.plugin.settings.protectTablesFromReformatting = false;
+  fresh.plugin.f_applyTableGuardSetting();
+  assert.equal(guard.length, 0);
+  fresh.plugin.settings.protectTablesFromReformatting = true;
+  fresh.plugin.f_applyTableGuardSetting();
+  assert.deepEqual(guard, [fresh.plugin._tableGuard], "the same guard returns, so no editor ever holds two");
+  assert.equal(fresh.plugin._tableGuardExtensions, guard, "the registered array is refilled, never replaced");
+  assert.equal(fresh.optionUpdates(), 2, "each change asks Obsidian to reconfigure its editors");
+
+  const optedOut = await f_loadWith({ protectTablesFromReformatting: false });
+  assert.equal(optedOut.plugin._tableGuardExtensions.length, 0, "a stored opt-out survives a restart");
 });
 
 test("registered drag and drop uses the destination editor's checkout in an inactive split", async t => {

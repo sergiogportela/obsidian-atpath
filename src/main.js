@@ -1,9 +1,10 @@
 // obsidian-atpath — Author repository Markdown links and navigate local files.
 // Uses Obsidian API + CodeMirror 6.
 
-const { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+const { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl, editorEditorField, editorLivePreviewField } = require("obsidian");
 const { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-const { Compartment, Prec } = require("@codemirror/state");
+const { Compartment, EditorState, Prec, StateField } = require("@codemirror/state");
+const { ensureSyntaxTree, syntaxTree } = require("@codemirror/language");
 const { f_createTokenIndex } = require("./token-index");
 const { TOKEN_COUNT_DISCLOSURE } = require("./token-contract");
 const { f_createTokenCounter } = require("./token-counter");
@@ -17,6 +18,7 @@ const { f_isEligibleLinkedPath } = require("./linked-file-policy");
 const { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require("./repository-links");
 const { f_installNativeRepositoryLinks } = require("./native-repository-links");
 const { COPY_PATH_SECTION, f_compactCopyPathItems } = require("./copy-path-menu");
+const { f_buildLivePreviewTableGuard } = require("./live-preview-table-guard");
 const {
   REPOSITORY_MAP_PATH, f_discoverRepositories, f_discoverSourceCheckout, f_isPrunedSourcePath,
   f_lookupRenamedRepository,
@@ -259,6 +261,7 @@ const DEFAULT_SETTINGS = {
   suggestFolders: true,
   enableDragDropAtPath: true,
   compactCopyPathMenu: true,
+  protectTablesFromReformatting: true,
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
@@ -1658,6 +1661,19 @@ class AtPathSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("Protect tables from reformatting")
+      .setDesc("Obsidian pads a table’s Markdown into aligned columns as soon as you click a cell or move the cursor through it in Live Preview. When enabled, tables there are read-only: clicks and the cursor skip them, and links still open. Edit tables in Source mode or with a table plugin. Disable to restore Obsidian’s table editor.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.protectTablesFromReformatting !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.protectTablesFromReformatting = value;
+            await this.plugin.saveSettings();
+            this.plugin.f_applyTableGuardSetting();
+          })
+      );
+
     new Setting(containerEl).setHeading().setName("Publishing");
 
     new Setting(containerEl)
@@ -2389,6 +2405,17 @@ class AtPathPlugin extends Plugin {
       )
     );
 
+    // Live Preview table guard — registered as an array that
+    // f_applyTableGuardSetting refills, so the setting applies to every editor
+    // without a reload.
+    this._tableGuard = f_buildLivePreviewTableGuard({
+      EditorState, EditorView, StateField, ViewPlugin, syntaxTree, ensureSyntaxTree,
+      livePreviewField: editorLivePreviewField, editorViewField: editorEditorField,
+    });
+    this._tableGuardExtensions = [];
+    this.f_fillTableGuardExtensions();
+    this.registerEditorExtension(this._tableGuardExtensions);
+
     // Capture file-explorer drag sources from the DOM, since Obsidian does not
     // expose a stable DataTransfer MIME for internal vault drags. Listeners run
     // in the capture phase so we see the event before any handler can stop it.
@@ -2640,6 +2667,16 @@ class AtPathPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  f_fillTableGuardExtensions() {
+    this._tableGuardExtensions.length = 0;
+    if (this.settings.protectTablesFromReformatting !== false) this._tableGuardExtensions.push(this._tableGuard);
+  }
+
+  f_applyTableGuardSetting() {
+    this.f_fillTableGuardExtensions();
+    this.app.workspace.updateOptions();
   }
 
   reconfigureDragDrop() {

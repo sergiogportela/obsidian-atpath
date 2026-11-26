@@ -12,7 +12,7 @@ const worker = await esbuild.build({
 await esbuild.build({
   entryPoints: ["src/main.js"],
   bundle: true,
-  external: ["obsidian", "@codemirror/view", "@codemirror/state", "electron"],
+  external: ["obsidian", "@codemirror/view", "@codemirror/state", "@codemirror/language", "electron"],
   format: "cjs",
   outfile: "main.js",
   platform: "node",

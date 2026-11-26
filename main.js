@@ -6757,6 +6757,228 @@ var require_copy_path_menu = __commonJS({
   }
 });
 
+// src/live-preview-table-guard.js
+var require_live_preview_table_guard = __commonJS({
+  "src/live-preview-table-guard.js"(exports2, module2) {
+    "use strict";
+    var TABLE_ROW_NODE_NAME = "HyperMD-table-row";
+    var RENDERED_TABLE_SELECTOR = ".cm-table-widget table";
+    var CELL_EDITOR_SELECTOR = ".cm-table-widget .cm-editor";
+    var RELOAD_USER_EVENT = "set";
+    var PARSE_BUDGET_MILLISECONDS = 100;
+    var BLOCKED_POINTER_EVENT_TYPES = ["pointerdown", "mousedown"];
+    var PRESS_DEFAULT_KEPT_SELECTOR = "a, button, input, select, textarea, label, summary";
+    var BLOCKED_DRAG_EVENT_TYPES = ["dragenter", "dragover", "drop"];
+    var TABLE_EDITOR_BUTTON_SELECTOR = ".cm-table-widget .table-row-btn, .cm-table-widget .table-col-btn";
+    var BLOCKED_BUTTON_EVENT_TYPES = ["click"];
+    var GUARDED_EDITOR_CLASS = "atpath-table-guard";
+    function f_isTableRowLine(tree, line) {
+      let isTableRow = false;
+      tree.iterate({
+        from: line.from,
+        to: line.to,
+        enter: (node) => {
+          if (node.from === line.from && node.type.name.includes(TABLE_ROW_NODE_NAME)) isTableRow = true;
+          return !isTableRow;
+        }
+      });
+      return isTableRow;
+    }
+    function f_findTableRange(tree, doc, position) {
+      const f_isRow = (lineNumber2) => lineNumber2 >= 1 && lineNumber2 <= doc.lines && f_isTableRowLine(tree, doc.line(lineNumber2));
+      const lineNumber = doc.lineAt(position).number;
+      if (!f_isRow(lineNumber)) return null;
+      let firstLine = lineNumber;
+      let lastLine = lineNumber;
+      while (f_isRow(firstLine - 1)) firstLine--;
+      while (f_isRow(lastLine + 1)) lastLine++;
+      return { from: doc.line(firstLine).from, to: doc.line(lastLine).to };
+    }
+    function f_isDelimiterRowText(text) {
+      return /^[\s|:-]+$/.test(text) && text.includes("|") && text.includes("-");
+    }
+    function f_findTableRangeInText(doc, position) {
+      const f_isBlank = (lineNumber) => doc.line(lineNumber).text.trim() === "";
+      const cursorLine = doc.lineAt(position).number;
+      let lastLine = cursorLine;
+      while (lastLine < doc.lines && !f_isBlank(lastLine + 1)) lastLine++;
+      let headerLine = null;
+      for (let lineNumber = cursorLine; lineNumber >= 1 && !f_isBlank(lineNumber); lineNumber--) {
+        const isHeader = lineNumber < doc.lines && doc.line(lineNumber).text.includes("|") && f_isDelimiterRowText(doc.line(lineNumber + 1).text);
+        if (isHeader) headerLine = lineNumber;
+      }
+      return headerLine === null ? null : { from: doc.line(headerLine).from, to: doc.line(lastLine).to };
+    }
+    function f_changesTouchRange(changes, from, to) {
+      let touchesRange = false;
+      changes.iterChangedRanges((fromBefore, toBefore, fromAfter, toAfter) => {
+        if (fromAfter <= to && toAfter >= from) touchesRange = true;
+      });
+      return touchesRange;
+    }
+    function f_endOfBlock(doc, position) {
+      let line = doc.lineAt(position);
+      while (line.number < doc.lines && doc.line(line.number + 1).text.trim() !== "") line = doc.line(line.number + 1);
+      return line.to;
+    }
+    function f_isMovingForward(table, previousSelection, newHead) {
+      const { anchor, head } = previousSelection;
+      if (head < table.from) return true;
+      if (head > table.to) return false;
+      if (newHead !== head) return newHead > head;
+      return anchor < table.from;
+    }
+    function f_positionPastTable(table, documentLength, isMovingForward) {
+      const positionAfter = table.to < documentLength ? table.to + 1 : null;
+      const positionBefore = table.from > 0 ? table.from - 1 : null;
+      return isMovingForward ? positionAfter ?? positionBefore : positionBefore ?? positionAfter;
+    }
+    function f_isLivePreview(state, livePreviewField) {
+      return state.field(livePreviewField, false) === true;
+    }
+    function f_turnsLivePreviewOn(transaction, livePreviewField) {
+      return transaction.effects.some(
+        (effect) => effect.value != null && effect.value.field === livePreviewField && effect.value.value === true
+      );
+    }
+    function f_tableHoldingSelection(selection, doc, f_findTable) {
+      if (selection.ranges.length !== 1) return null;
+      const { from, to, head } = selection.main;
+      if (!doc.lineAt(head).text.includes("|")) return null;
+      const table = f_findTable(head);
+      return table && from >= table.from && to <= table.to ? table : null;
+    }
+    function f_tableSkipPosition(transaction, { livePreviewField, f_parsedTree, f_isCellEditorOpen, f_wasCursorLeftByEdit }) {
+      if (transaction.docChanged) return null;
+      const state = transaction.startState;
+      const turnsLivePreviewOn = f_turnsLivePreviewOn(transaction, livePreviewField);
+      if (!f_isLivePreview(state, livePreviewField) && !turnsLivePreviewOn) return null;
+      const movesCursor = Boolean(transaction.selection) || turnsLivePreviewOn;
+      if (!movesCursor && f_wasCursorLeftByEdit(state)) return null;
+      const doc = state.doc;
+      const selection = transaction.newSelection;
+      const f_findTable = (position) => {
+        const line = doc.lineAt(position);
+        if (!f_isTableRowLine(f_parsedTree(state, line.to), line)) return null;
+        return f_findTableRange(f_parsedTree(state, f_endOfBlock(doc, position)), doc, position);
+      };
+      const table = f_tableHoldingSelection(selection, doc, f_findTable);
+      if (!table || f_isCellEditorOpen(state)) return null;
+      return f_positionPastTable(table, doc.length, f_isMovingForward(table, state.selection.main, selection.main.head));
+    }
+    function f_reloadSkipPosition(transaction, { livePreviewField, f_isCellEditorOpen }) {
+      if (!transaction.docChanged || !transaction.isUserEvent(RELOAD_USER_EVENT)) return null;
+      const state = transaction.startState;
+      if (!f_isLivePreview(state, livePreviewField)) return null;
+      const doc = transaction.newDoc;
+      const table = f_tableHoldingSelection(transaction.newSelection, doc, (position) => f_findTableRangeInText(doc, position));
+      if (!table || !f_changesTouchRange(transaction.changes, table.from, table.to)) return null;
+      if (f_isCellEditorOpen(state)) return null;
+      return f_positionPastTable(table, doc.length, false);
+    }
+    function f_hasOpenCellEditor(editorView) {
+      return Boolean(editorView && editorView.dom && editorView.dom.querySelector(CELL_EDITOR_SELECTOR));
+    }
+    function f_isCellEditorFocused(editorView) {
+      if (!editorView || !editorView.dom) return false;
+      const focusedElement = editorView.dom.ownerDocument.activeElement;
+      return Boolean(focusedElement) && typeof focusedElement.closest === "function" && editorView.dom.contains(focusedElement) && Boolean(focusedElement.closest(CELL_EDITOR_SELECTOR));
+    }
+    function f_isEventInside(event, selector) {
+      const target = event.target;
+      return Boolean(target) && typeof target.closest === "function" && Boolean(target.closest(selector));
+    }
+    function f_blockTablePointerEvent(event) {
+      if (!f_isEventInside(event, RENDERED_TABLE_SELECTOR)) return false;
+      if (f_isEventInside(event, CELL_EDITOR_SELECTOR)) return false;
+      event.stopPropagation();
+      if (event.target.closest(PRESS_DEFAULT_KEPT_SELECTOR)) return false;
+      event.preventDefault();
+      return true;
+    }
+    function f_blockTableDragEvent(event) {
+      if (!f_isEventInside(event, RENDERED_TABLE_SELECTOR)) return;
+      if (f_isEventInside(event, CELL_EDITOR_SELECTOR)) return;
+      event.stopPropagation();
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+    }
+    function f_blockTableButtonEvent(event) {
+      if (!f_isEventInside(event, TABLE_EDITOR_BUTTON_SELECTOR)) return;
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    function f_buildLivePreviewTableGuard2({
+      EditorState: EditorState2,
+      EditorView: EditorView2,
+      StateField: StateField2,
+      ViewPlugin: ViewPlugin2,
+      syntaxTree: syntaxTree2,
+      ensureSyntaxTree: ensureSyntaxTree2,
+      livePreviewField,
+      editorViewField
+    }) {
+      const cursorLeftByEditField = StateField2.define({
+        create: () => false,
+        update: (wasLeftByEdit, transaction) => transaction.docChanged ? true : transaction.selection ? false : wasLeftByEdit
+      });
+      const cursorRules = {
+        livePreviewField,
+        f_parsedTree: (state, upTo) => ensureSyntaxTree2(state, upTo, PARSE_BUDGET_MILLISECONDS) ?? syntaxTree2(state),
+        f_isCellEditorOpen: (state) => f_hasOpenCellEditor(state.field(editorViewField, false)),
+        f_wasCursorLeftByEdit: (state) => state.field(cursorLeftByEditField, false) === true
+      };
+      const cursorGuard = EditorState2.transactionFilter.of((transaction) => {
+        const position = f_tableSkipPosition(transaction, cursorRules);
+        if (position !== null) return [transaction, { selection: { anchor: position } }];
+        const positionAfterReload = f_reloadSkipPosition(transaction, cursorRules);
+        if (positionAfterReload !== null) return [transaction, { selection: { anchor: positionAfterReload }, sequential: true }];
+        return transaction;
+      });
+      const inputGuard = ViewPlugin2.fromClass(class {
+        constructor(view) {
+          this.editorElement = view.dom;
+          const f_blockPressAndKeepFocus = (event) => {
+            if (!f_blockTablePointerEvent(event)) return;
+            const isMousePress = event.pointerType === void 0 || event.pointerType === "mouse";
+            if (isMousePress && !view.hasFocus && !f_isCellEditorFocused(view)) view.focus();
+          };
+          this.listeners = [
+            ...BLOCKED_POINTER_EVENT_TYPES.map((type) => ({ type, f_listener: f_blockPressAndKeepFocus })),
+            ...BLOCKED_BUTTON_EVENT_TYPES.map((type) => ({ type, f_listener: (event) => f_blockTableButtonEvent(event) })),
+            ...BLOCKED_DRAG_EVENT_TYPES.map((type) => ({ type, f_listener: (event) => f_blockTableDragEvent(event) }))
+          ];
+          for (const { type, f_listener } of this.listeners) this.editorElement.addEventListener(type, f_listener, true);
+        }
+        destroy() {
+          for (const { type, f_listener } of this.listeners) this.editorElement.removeEventListener(type, f_listener, true);
+        }
+      });
+      return [cursorGuard, inputGuard, EditorView2.editorAttributes.of({ class: GUARDED_EDITOR_CLASS }), cursorLeftByEditField];
+    }
+    module2.exports = {
+      BLOCKED_BUTTON_EVENT_TYPES,
+      BLOCKED_DRAG_EVENT_TYPES,
+      BLOCKED_POINTER_EVENT_TYPES,
+      GUARDED_EDITOR_CLASS,
+      f_blockTableButtonEvent,
+      f_blockTableDragEvent,
+      f_blockTablePointerEvent,
+      f_buildLivePreviewTableGuard: f_buildLivePreviewTableGuard2,
+      f_endOfBlock,
+      f_findTableRange,
+      f_findTableRangeInText,
+      f_hasOpenCellEditor,
+      f_isCellEditorFocused,
+      f_isMovingForward,
+      f_positionPastTable,
+      f_reloadSkipPosition,
+      f_tableSkipPosition,
+      f_turnsLivePreviewOn
+    };
+  }
+});
+
 // src/repository-index.js
 var require_repository_index = __commonJS({
   "src/repository-index.js"(exports2, module2) {
@@ -8865,9 +9087,10 @@ var require_html_app_publish = __commonJS({
 });
 
 // src/main.js
-var { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl } = require("obsidian");
+var { Plugin, EditorSuggest, MarkdownRenderChild, MarkdownView, TFile, TFolder, Menu, PluginSettingTab, Setting, Notice, Modal, Platform, setIcon, prepareFuzzySearch, renderResults, requestUrl, editorEditorField, editorLivePreviewField } = require("obsidian");
 var { ViewPlugin, Decoration, MatchDecorator, EditorView, WidgetType } = require("@codemirror/view");
-var { Compartment, Prec } = require("@codemirror/state");
+var { Compartment, EditorState, Prec, StateField } = require("@codemirror/state");
+var { ensureSyntaxTree, syntaxTree } = require("@codemirror/language");
 var { f_createTokenIndex } = require_token_index();
 var { TOKEN_COUNT_DISCLOSURE } = require_token_contract();
 var { f_createTokenCounter } = require_token_counter();
@@ -8880,6 +9103,7 @@ var { f_isEligibleLinkedPath } = require_linked_file_policy();
 var { f_scanMarkdownLinks, f_repositoryForPath, f_resolveRepositoryLink, f_formatRepositoryLink, f_formatGithubLink, f_rewriteRepositoryDestinations } = require_repository_links();
 var { f_installNativeRepositoryLinks } = require_native_repository_links();
 var { COPY_PATH_SECTION, f_compactCopyPathItems } = require_copy_path_menu();
+var { f_buildLivePreviewTableGuard } = require_live_preview_table_guard();
 var {
   REPOSITORY_MAP_PATH,
   f_discoverRepositories,
@@ -9159,6 +9383,7 @@ var DEFAULT_SETTINGS = {
   suggestFolders: true,
   enableDragDropAtPath: true,
   compactCopyPathMenu: true,
+  protectTablesFromReformatting: true,
   vercelToken: "",
   contactUrl: "",
   contactLabel: "Entre em contato",
@@ -10318,6 +10543,13 @@ var AtPathSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new Setting(containerEl).setName("Protect tables from reformatting").setDesc("Obsidian pads a table\u2019s Markdown into aligned columns as soon as you click a cell or move the cursor through it in Live Preview. When enabled, tables there are read-only: clicks and the cursor skip them, and links still open. Edit tables in Source mode or with a table plugin. Disable to restore Obsidian\u2019s table editor.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.protectTablesFromReformatting !== false).onChange(async (value) => {
+        this.plugin.settings.protectTablesFromReformatting = value;
+        await this.plugin.saveSettings();
+        this.plugin.f_applyTableGuardSetting();
+      })
+    );
     new Setting(containerEl).setHeading().setName("Publishing");
     new Setting(containerEl).setName("Vercel API token").setDesc("Personal access token for deploying notes to Vercel.").addText(
       (text) => text.setPlaceholder("Enter token...").setValue(this.plugin.settings.vercelToken).then((t) => {
@@ -10908,6 +11140,19 @@ var AtPathPlugin = class extends Plugin {
         this.settings.enableDragDropAtPath !== false ? Prec.highest(buildDragDropExtension(this)) : []
       )
     );
+    this._tableGuard = f_buildLivePreviewTableGuard({
+      EditorState,
+      EditorView,
+      StateField,
+      ViewPlugin,
+      syntaxTree,
+      ensureSyntaxTree,
+      livePreviewField: editorLivePreviewField,
+      editorViewField: editorEditorField
+    });
+    this._tableGuardExtensions = [];
+    this.f_fillTableGuardExtensions();
+    this.registerEditorExtension(this._tableGuardExtensions);
     this._currentDragRefs = null;
     this.registerDomEvent(document, "dragstart", (evt) => {
       this._currentDragRefs = null;
@@ -11112,6 +11357,14 @@ var AtPathPlugin = class extends Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  f_fillTableGuardExtensions() {
+    this._tableGuardExtensions.length = 0;
+    if (this.settings.protectTablesFromReformatting !== false) this._tableGuardExtensions.push(this._tableGuard);
+  }
+  f_applyTableGuardSetting() {
+    this.f_fillTableGuardExtensions();
+    this.app.workspace.updateOptions();
   }
   reconfigureDragDrop() {
     if (!this.dragDropCompartment) return;

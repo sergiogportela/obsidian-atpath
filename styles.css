@@ -303,3 +303,18 @@ a.internal-link.atpath-link[data-tokens]::after {
   outline: 1px solid var(--interactive-accent);
   outline-offset: -1px;
 }
+
+/* Protect tables from reformatting: these Live Preview table controls rewrite the
+   whole table, so they are hidden while the guard is on an editor. Obsidian shows
+   them with `.markdown-source-view.mod-cm6 .cm-table-widget …` rules; the selectors
+   below repeat that prefix so that they outrank those rules. */
+.markdown-source-view.mod-cm6 .cm-editor.atpath-table-guard .cm-table-widget .table-row-btn,
+.markdown-source-view.mod-cm6 .cm-editor.atpath-table-guard .cm-table-widget .table-col-btn,
+.markdown-source-view.mod-cm6 .cm-editor.atpath-table-guard .cm-table-widget .table-row-drag-handle,
+.markdown-source-view.mod-cm6 .cm-editor.atpath-table-guard .cm-table-widget .table-col-drag-handle {
+  display: none;
+}
+
+.markdown-source-view.mod-cm6 .cm-editor.atpath-table-guard .cm-table-widget table {
+  cursor: default;
+}

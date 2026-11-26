@@ -1,6 +1,6 @@
 # AtPath reference
 
-For the visual introduction, see [README.md](/README.md). This document describes the 1.10.1 implementation on main; it does not imply a tagged release.
+For the visual introduction, see [README.md](/README.md). This document describes the 1.11.0 implementation on main; it does not imply a tagged release.
 
 ## Repository links
 
@@ -43,6 +43,34 @@ A link used outside its note, such as in a chat, a prompt or another repository,
 The revision is always `main`, matching authored links, even before the target is pushed. Items outside a GitHub checkout have no such link: the menu entry and command are not offered, a mixed selection reports how many were skipped, and their drags keep Obsidian's own payload. While dragging, AtPath replaces Obsidian's `obsidian://` text and URL payload with the Markdown link so every app receives the same text; Obsidian's **Copy Obsidian URL** command still provides that URL. The submenu placement uses a guarded internal menu API and falls back to a top-level **Copy GitHub link** item.
 
 **Compact copy path menu**, default on, removes **as Obsidian URL** and **from system root** from that submenu, leaving the two formats worth pasting elsewhere. Turn it off to show all of Obsidian's formats. The entries are recognized by icon through a guarded internal menu API; if Obsidian changes them, they simply remain visible.
+
+## Tables in Live Preview
+
+Obsidian's Live Preview table editor treats a table whose Markdown is not column-aligned as malformed. As soon as one of its cells is focused, by a click or by the cursor moving through the table, it rewrites the whole table with padded columns. Nothing was edited, yet every row changes in Git, and tables written compactly by scripts, agents or other plugins never stay compact. Obsidian has no setting for this.
+
+**Protect tables from reformatting**, default on, keeps that editor from being entered, so tables in Live Preview are read-only:
+
+- **Mouse:** a press inside a rendered table does not enter it. Links, buttons, checkboxes and other controls inside a cell still work, and so do other plugins' buttons on the table. A press on a table in another pane still makes that pane active and gives it the keyboard; its cursor stays where it was.
+- **Drags:** a table does not accept drops. Dragging text or a file over a cell would otherwise open that cell for editing.
+- **Cursor:** arrow keys, programmatic jumps (search results, backlinks) and closing in-note search land on the far side of the table instead of inside it. So does collapsing a selection that reaches into a table. A note that begins with a table opens with the cursor below it, and switching from Source mode to Live Preview moves a cursor that was inside a table to the line before it.
+- **Reloads:** when a note that changed on disk is reloaded, Obsidian can leave the cursor on a row of a table that the change touched. AtPath then puts it on the line above the table. This keeps tables intact when a script or an agent rewrites a note you have open.
+- **Controls:** the table editor's add-row, add-column and drag handles are hidden, because each rewrites the table. Clicks on the two add buttons are also stopped, in case a theme or snippet shows them again.
+
+Edit tables in Source mode or in a table plugin's own editor. Turning the setting off restores Obsidian's table editor at once, in every open editor.
+
+Left alone on purpose: selections that only pass through a table, the right-click menu and its explicit table commands, text typed or pasted as a table, and a table whose cell editor is already open. While you type a table, the cursor stays where your typing left it, so typing one in Live Preview behaves as it does with the setting off: Obsidian's table editor can take the table over midway and pad it. Type tables in Source mode to keep them as typed. **Insert table** still inserts its empty table, but the cursor lands below it. Text inside a table cannot be selected with the mouse in Live Preview; copy from Reading view or Source mode. Padded tables stay padded until something rewrites them.
+
+Known gaps:
+
+- **Undo and redo** bypass the mechanism the cursor rule uses. If one of them puts the cursor back into a table, which takes an edit made inside that table in Source mode, Obsidian's table editor opens on it.
+- A table that ends the note, with no line after it, cannot be passed with the keyboard in Live Preview; add the line in Source mode.
+- While in-note search highlights a match inside a table, Obsidian shows that table as source, and the cursor is still turned away from it.
+- After a reload the table is recognized from its text (a row with a pipe above a delimiter row), because no syntax tree exists yet. The cursor can therefore also be moved out of such text inside a code block, when the reload changed it.
+- In a note longer than about 100,000 characters, a jump to a far table may spend up to 100 ms finishing the parse; if that is not enough, that one jump is not turned away.
+
+Tables are recognized by two internal Obsidian names, the `cm-table-widget` element and the `HyperMD-table-row` syntax node; the add buttons by `table-row-btn` and `table-col-btn`; an open cell editor by a `cm-editor` nested in the table; a reload by its `set` user event; and the switch into Live Preview by the internal effect that sets Obsidian's Live Preview field. If Obsidian changes any of them, that part of the protection stops silently and its table editor returns.
+
+Separately, and regardless of this setting, AtPath cancels the press on one of its links inside a table cell. Without that, Obsidian's delayed cell focus ran after AtPath had opened the link and wrote the reformatted table into the linked note.
 
 ## File-symlink shortcuts
 
@@ -99,8 +127,8 @@ Enable **Require login to view** and configure Clerk plus approved emails for pr
 
 ## Other preferences and verification
 
-**Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, **Drag-and-drop repository links** and **Compact copy path menu** default on. Turning off drag/drop restores Obsidian's normal drag behavior, including the `obsidian://` payload for drags to other apps. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
+**Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, **Drag-and-drop repository links**, **Compact copy path menu** and **Protect tables from reformatting** default on. Turning off drag/drop restores Obsidian's normal drag behavior, including the `obsidian://` payload for drags to other apps. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
 
-Automated coverage includes 197 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
+Automated coverage includes 244 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
 
 Registered drag/drop tests and six injected DOM drop cases pass. On macOS with Obsidian 1.15.1, physical mouse drags were verified for a file and a folder dropped into TextEdit and for a file dropped into a note, along with the native **Copy path** submenu entry. Other operating systems and drop targets were not tested. Mobile/Sync and live publication need their respective environments. Historical implementation and review documents remain available in Git history before this documentation cleanup.
