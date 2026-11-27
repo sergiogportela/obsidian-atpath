@@ -890,6 +890,26 @@ test("repository rename rewrites local targets while preserving query, fragment 
   assert.equal(text, "[Old](/new.md?raw=1#Heading)\n" + shaLink);
 });
 
+test("archiving a checkout does not write notes whose destinations still resolve", async () => {
+  const plugin = new (f_loadPlugin())();
+  const { TFile } = require("obsidian");
+  const source = new TFile("archive/checkout/note.md");
+  const target = new TFile("archive/checkout/segmentação.md");
+  const text = '[Análise](/segmentação.md)\r\n[Encoded](/segmenta%c3%a7%c3%a3o.md)';
+  const writes = [];
+  plugin.repositories = [{ root: "archive/checkout", identity: "org/repo" }];
+  plugin.app = { vault: {
+    getMarkdownFiles: () => [source],
+    getAbstractFileByPath: path => path === target.path ? target : undefined,
+    cachedRead: async () => text,
+    process: async (file, update) => writes.push([file.path, update(text)]),
+  } };
+  await plugin.f_rewriteRepositoryReferences([
+    { oldPath: "checkout", newPath: "archive/checkout", isFolder: true },
+  ], [{ root: "checkout", identity: "org/repo" }]);
+  assert.deepEqual(writes, [], "An unchanged note must not be written");
+});
+
 test("queued renames preserve event order and ignore redundant folder descendants", async () => {
   const plugin = new (f_loadPlugin())();
   const { TFile, TFolder } = require("obsidian");
@@ -938,7 +958,7 @@ test("one rename batch reads each note once and retains an edit made before atom
   ]);
   assert.equal(reads, 2);
   assert.equal(writes, 2);
-  assert.equal(resolutions, 7, "two initial parses plus one reparse only for the concurrently edited note");
+  assert.equal(resolutions, 14, "before/after resolution for two initial parses and one concurrent reparse");
   assert.equal(contents.get(sources[0].path), '[First](/new.md) [Second](/second.md)');
   assert.equal(contents.get(sources[1].path), '[First](/new.md) [Second](/second.md)\nUser edit [Added](/new.md)');
 });

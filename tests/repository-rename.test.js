@@ -131,3 +131,67 @@ test("checkout-root moves use before and after maps without changing GitHub iden
     getTargetType: path => path === "renamed/new.md" ? "file" : null,
   }), '[Local](/new.md) <https://github.com/Owner/First/blob/feature/topic/new.md>');
 });
+
+test("archiving a checkout preserves authored destinations byte for byte", () => {
+  const input = [
+    '[Análise](/analise/segmentação.md)',
+    '[Encoded](/analise/segmenta%c3%a7%c3%a3o.md?raw=1&amp;mode=2&#35;Resumo "Title")',
+    '[Escaped](  </analise/segmentação \\(resumo\\).md> \'Keep this title\')',
+    '[Normalized](/analise/./segmentação.md) [Folder](/analise/) [Root](/)',
+    '[Shared][analysis]',
+    '',
+    '> [analysis]:',
+    '>   </analise/segmentação.md#Resumo> "Reference title"',
+    '<https://github.com/Owner/First/blob/feature/topic/analise/segmentação.md>',
+    '[Pinned](https://github.com/Owner/First/blob/123abcd/analise/segmentação.md)',
+  ].join('\r\n');
+  const files = {
+    'archive/a': 'folder',
+    'archive/a/analise': 'folder',
+    'archive/a/analise/segmentação.md': 'file',
+    'archive/a/analise/segmentação (resumo).md': 'file',
+  };
+  assert.equal(f_rewriteRepositoryDestinations(input, {
+    sourcePath: 'archive/a/note.md', repositoriesBefore: repositories,
+    repositories: [{ ...repositories[0], root: 'archive/a' }, repositories[1]],
+    moves: [{ oldPath: 'a', newPath: 'archive/a' }],
+    getTargetType: path => files[path] ?? null,
+  }), input);
+});
+
+test("moving a checkout preserves incoming GitHub links including repository aliases", () => {
+  const input = '<https://github.com/Owner/First/blob/feature/topic/segmentação.md>\n'
+    + '[Alias](https://github.com/Owner/Old/tree/main/analise/ "Title")';
+  const repo = { ...repositories[0], aliases: ['owner/old'] };
+  assert.equal(f_rewriteRepositoryDestinations(input, {
+    sourcePath: 'b/note.md', repositoriesBefore: [repo, repositories[1]],
+    repositories: [{ ...repo, root: 'archive/a' }, repositories[1]],
+    moves: [{ oldPath: 'a', newPath: 'archive/a' }],
+    getTargetType: path => ({ 'archive/a/segmentação.md': 'file', 'archive/a/analise': 'folder' })[path] ?? null,
+  }), input);
+});
+
+test("moving a parent folder preserves links inside its nested checkout", () => {
+  const input = '[Local](/segmentação.md) <https://github.com/Owner/Nested/blob/main/segmentação.md>';
+  const nested = { root: 'a/nested', identity: 'owner/nested' };
+  assert.equal(f_rewriteRepositoryDestinations(input, {
+    sourcePath: 'archive/a/nested/note.md', repositoriesBefore: [...repositories, nested],
+    repositories: [{ ...repositories[0], root: 'archive/a' }, repositories[1], { ...nested, root: 'archive/a/nested' }],
+    moves: [{ oldPath: 'a', newPath: 'archive/a' }],
+    getTargetType: path => path === 'archive/a/nested/segmentação.md' ? 'file' : null,
+  }), input);
+});
+
+test("moving notes between repositories preserves valid local spelling but rewrites GitHub identity", () => {
+  const input = '[Local](/docs/segmentação.md) <https://github.com/Owner/First/blob/main/docs/segmentação.md>';
+  assert.equal(f_rewrite(input, 'b/docs/note.md', 'a/docs', 'b/docs', {
+    'b/docs/segmentação.md': 'file',
+  }), '[Local](/docs/segmentação.md) <https://github.com/owner/second/blob/main/docs/segmenta%C3%A7%C3%A3o.md>');
+});
+
+test("an existing same-path file in another repository cannot replace the intended target", () => {
+  const input = '[Original](/segmentação.md)';
+  assert.equal(f_rewrite(input, 'b/note.md', 'a/note.md', 'b/note.md', {
+    'a/segmentação.md': 'file', 'b/segmentação.md': 'file',
+  }), '[Original](https://github.com/owner/first/blob/main/segmenta%C3%A7%C3%A3o.md)');
+});

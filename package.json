@@ -1,6 +1,6 @@
 {
   "name": "obsidian-atpath",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "description": "Author repository Markdown links, open local files, and count text tokens.",
   "author": "sergio",
   "license": "MIT",

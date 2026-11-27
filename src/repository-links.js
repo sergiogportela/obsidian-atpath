@@ -369,7 +369,10 @@ function f_rewriteRepositoryDestinations(markdown, {
     const targetPath = f_move(result.vaultPath);
     const moved = targetPath !== result.vaultPath;
     if (!moved && !sourceMovedRepo) continue;
-    if (!moved && github && f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
+    // A move can leave the authored destination valid, especially when the
+    // whole checkout moves. Preserve its spelling if it still reaches the target.
+    const current = f_resolveRepositoryLink(link, { sourcePath, repositories, getTargetType });
+    if (current.status === "resolved" && current.vaultPath === targetPath) continue;
     const targetMovedRepo = f_repositoryForPath(targetPath, repositories)?.identity !==
       f_repositoryForPath(result.vaultPath, repositoriesBefore)?.identity;
     const url = github ? {

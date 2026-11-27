@@ -26,7 +26,7 @@ An isolated compatibility layer supplies repository-aware references to Obsidian
 
 Outgoing Links normally shows canonical destinations. If a repository link and a native wikilink/embed use identical destination text, the repository row may show an internal key; native resolution is preserved in that ambiguous case.
 
-File/folder moves through Obsidian update links, including notes moved between repositories. Intentional commit-SHA destinations stay unchanged. Moving an entire checkout updates its map location instead of rewriting canonical references, and requires a freshly verified map before any rewrite.
+File/folder moves through Obsidian update links, including notes moved between repositories. Intentional commit-SHA destinations stay unchanged. Moving an entire checkout updates its map location and requires a freshly verified map before any rewrite. If a destination still resolves to the intended moved target, its authored text stays byte-for-byte unchanged, including accents, percent-escape spelling and Markdown escapes. Unchanged notes are not written. Native wikilinks and embeds still follow Obsidian’s own link-update behavior.
 
 Queued moves, chained moves, swaps and legacy repair share one chronological vault pass. Each note is parsed once unless it changes before the atomic update; concurrent edits are preserved. Failed notes do not stop others, and a persistent notice identifies incomplete updates. Only destinations change: labels, titles, reference definitions, autolink syntax and non-main refs are preserved.
 
@@ -129,6 +129,6 @@ Enable **Require login to view** and configure Clerk plus approved emails for pr
 
 **Show token counts**, **Show selection tokens in status bar**, **Suggest folders in autocomplete**, **Drag-and-drop repository links**, **Compact copy path menu** and **Protect tables from reformatting** default on. Turning off drag/drop restores Obsidian's normal drag behavior, including the `obsidian://` payload for drags to other apps. Selection status displays `Sel: {selected} / {total}`; disabling it keeps the note total.
 
-Automated coverage includes 244 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
+Automated coverage includes 250 Node tests. Desktop acceptance covers navigation, native backlinks/graph, counts, copy, rename and preview dialogs. Exact counts matched Python tiktoken for 4,423 files, and 968 folder totals matched an independent calculation. Offline same-size/same-timestamp changes invalidated correctly. Three exact-token Claude reviews finished with no blocker.
 
 Registered drag/drop tests and six injected DOM drop cases pass. On macOS with Obsidian 1.15.1, physical mouse drags were verified for a file and a folder dropped into TextEdit and for a file dropped into a note, along with the native **Copy path** submenu entry. Other operating systems and drop targets were not tested. Mobile/Sync and live publication need their respective environments. Historical implementation and review documents remain available in Git history before this documentation cleanup.

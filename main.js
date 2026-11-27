@@ -6456,7 +6456,8 @@ var require_repository_links = __commonJS({
         const targetPath = f_move(result.vaultPath);
         const moved = targetPath !== result.vaultPath;
         if (!moved && !sourceMovedRepo) continue;
-        if (!moved && github && f_resolveRepositoryLink2(link, { sourcePath, repositories, getTargetType }).vaultPath === result.vaultPath) continue;
+        const current = f_resolveRepositoryLink2(link, { sourcePath, repositories, getTargetType });
+        if (current.status === "resolved" && current.vaultPath === targetPath) continue;
         const targetMovedRepo = f_repositoryForPath2(targetPath, repositories)?.identity !== f_repositoryForPath2(result.vaultPath, repositoriesBefore)?.identity;
         const url = github ? {
           identity: targetMovedRepo ? void 0 : github[1],
